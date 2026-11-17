@@ -224,6 +224,10 @@ try {
   // Delete chat syncs to alice's other browser
   // (her second browser joins the new room by itself, from the synced chat list; it can only
   // read what is sent after it joined)
+  // A background page counts as hidden: the app then polls every 90 s and Chrome slows its timers,
+  // so put this browser in front, as a person looking at it would.
+  console.log(new Date().toISOString().slice(11, 19), "alice2 visibility before:", await alice2.page.evaluate(() => document.visibilityState));
+  await alice2.page.bringToFront();
   await openChat(alice2, 'bob');
   // The new room is found by the repo scan, which runs once a minute, then joined: allow two minutes.
   await alice2.page.locator('#composer:enabled').waitFor({ timeout: 120000 });
