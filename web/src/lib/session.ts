@@ -36,6 +36,7 @@ import { generateRecoveryCode, parseRecoveryCode } from 'keyhold/keys';
 import { hkdfAesKey, hkdfBytes } from 'keyhold/util';
 import { CONFIG, installUrl } from '../config';
 import { currentToken, type AuthState } from './auth';
+import { InboxSocket } from './inbox-socket';
 import { Db, IdbPinStore, idbDevice } from './idb';
 
 export type Phase = 'loading' | 'install' | 'new-identity' | 'restore' | 'ready' | 'error';
@@ -212,6 +213,8 @@ export class Session {
   private lastFullPull = 0;
   private lastFlush = 0;
   private lastClosures = 0;
+  /** Live connection to the invite inbox; while it is up the inbox isn't polled. */
+  private inbox?: InboxSocket;
   private peers = new Map<string, Promise<PeerInfo>>();
 
   constructor(readonly auth: AuthState) {
@@ -499,6 +502,15 @@ export class Session {
     for (const k of await this.db.keys('kv', 'block:')) this.blocked.add(k.slice('block:'.length));
     await this.startSync().catch((e) => (this.syncError = describeError(e)));
     this.phase = 'ready';
+    if (!CONFIG.mock) {
+      this.inbox = new InboxSocket(CONFIG.worker, currentToken, () => {
+        // Something arrived (or the socket went up or down): look at the inbox on the next tick.
+        this.lastInvites = 0;
+        this.lastClosures = 0;
+        this.kick?.();
+      });
+      this.inbox.start();
+    }
     void this.loop();
   }
 
@@ -1158,10 +1170,17 @@ export class Session {
     const now = Date.now();
     const known = () => new Set([...chat.groups.values()].map((g) => g.space));
     let notices: Awaited<ReturnType<typeof p.inviteInbox.list>> = [];
-    try {
-      notices = await p.inviteInbox.list();
-    } catch (e) {
-      this.lastPollError = describeError(e);
+    const live = this.inbox?.live ? this.inbox : undefined;
+    if (live) {
+      notices = [...live.invites.values()]
+        .map((i) => ({ id: String(i.id), from: toAddress(i.from), pointer: String(i.id), expiresAt: Date.parse(i.expires_at) }))
+        .filter((n) => n.expiresAt > now);
+    } else {
+      try {
+        notices = await p.inviteInbox.list();
+      } catch (e) {
+        this.lastPollError = describeError(e);
+      }
     }
     let have = known();
     // The inbox names who invited us but not the repo (the Worker keeps no repo names), so a
@@ -1430,9 +1449,13 @@ export class Session {
 
   /** Closure notices from the Worker: how an offline member learns a chat was closed. */
   private async checkClosures() {
-    const r = await this.ghFetch(`${CONFIG.worker}/closures`);
-    if (r.status !== 200) return;
-    const { closures } = (await r.json()) as { closures: { id: string; from: string; tag: string; at: string }[] };
+    let closures: { id: string; from: string; tag: string; at: string }[];
+    if (this.inbox?.live) closures = [...this.inbox.closures.values()];
+    else {
+      const r = await this.ghFetch(`${CONFIG.worker}/closures`);
+      if (r.status !== 200) return;
+      ({ closures } = (await r.json()) as { closures: typeof closures });
+    }
     if (!closures.length) return;
     const tags = new Map<string, ChatRecord>();
     for (const rec of this.records.values()) if (!rec.ended) tags.set(await this.closureTag(rec.groupId), rec);
@@ -1471,6 +1494,7 @@ export class Session {
 
   stop() {
     this.stopped = true;
+    this.inbox?.stop();
     this.kick?.();
   }
 

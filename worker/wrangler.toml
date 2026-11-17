@@ -15,9 +15,19 @@ GITHUB_CLIENT_ID = "Iv23liFOHVM634uq8c39"
 # Comma-separated list of web origins allowed to call the Worker from a browser.
 ALLOWED_ORIGINS = "https://chat-over-github.akagishigerutokyo.workers.dev,http://localhost:5173"
 
-# Create with:  npx wrangler kv namespace create INVITES   and paste the id below.
+# The old invite inbox, read once per user to copy pending entries into their Durable Object.
+# Everything in it expires by 2026-11-24; after that this binding can go.
 [[kv_namespaces]]
 binding = "INVITES"
 id = "f343b316d0984406897960fab255fb93"
 
 # Secret (not in this file):  npx wrangler secret put GITHUB_CLIENT_SECRET
+
+# Each user's invite inbox: one SQLite-backed Durable Object per GitHub user id.
+[[durable_objects.bindings]]
+name = "INBOX"
+class_name = "Inbox"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Inbox"]
