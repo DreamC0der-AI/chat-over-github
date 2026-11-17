@@ -1,0 +1,11 @@
+node_modules
+dist
+dist-mock
+*.log
+.DS_Store
+.wrangler
+.dev.vars
+provider/scripts/*.mjs
+web/tools/mock-server.mjs
+# Built web app (npm run build writes it here); _headers is part of the web app's public/.
+worker/public

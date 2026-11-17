@@ -1,6 +1,6 @@
-# Keyhold Chat (web)
+# Chat over GitHub: web app
 
-End-to-end encrypted 1:1 and group chat in the browser, with GitHub as the only backend. Built on `keyhold/chat` (MLS) and the GitHub provider. Live at https://chat-over-github.akagishigerutokyo.workers.dev, served by the chat-over-github Worker (static assets), which also does the OAuth exchange and the invite inbox.
+End-to-end encrypted 1:1 and group chat in the browser, with GitHub as the only backend. Built on `keyhold/chat` (MLS) and the GitHub provider in `../provider`. Live at https://chat-over-github.akagishigerutokyo.workers.dev, served by the chat-over-github Worker (static assets), which also does the OAuth exchange and the invite inbox.
 
 ## What it does
 
@@ -20,17 +20,13 @@ Each chat's repo is checked with a conditional `GET /repos/{space}/commits?per_p
 
 ## Develop
 
-```
-npm install            # in the repo root too (keyhold's own dependencies)
-npm run dev            # against real GitHub; sign-in needs the Worker origin, so use a mock build for local work
-npm run build          # dist/ -> copy to the Worker's public/
-```
-
-Local end-to-end test against the in-memory GitHub mock (`tests/github-mock.ts`), with three people, a DM, a group, removal and a second device:
+Run these from the repo root:
 
 ```
-npm run build:mock
-npx esbuild tools/mock-server.ts --bundle --platform=node --format=esm --outfile=tools/mock-server.mjs
-node tools/mock-server.mjs 8787 &
-node tools/e2e.mjs      # needs playwright
+npm install            # also builds keyhold from GitHub (pinned commit in package.json)
+npm run dev -w web     # against real GitHub; sign-in needs the Worker origin, so use the mock for local work
+npm run build          # writes the app into worker/public, ready for wrangler deploy
+npm run e2e            # mock build + in-memory GitHub and Worker + Playwright, three people
 ```
+
+`npm run e2e` needs Playwright. It covers a DM, a group, removal, a second device, invitations, Delete/Close/Quit/Block and first-run install.

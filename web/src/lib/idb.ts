@@ -2,8 +2,8 @@
  * IndexedDB for this browser: device keystore (box 1), ephemeral keys (box 2), decrypted
  * message cache and small app records. One database per GitHub account.
  */
-import type { DeviceKeystore, DeviceStorage, EphemeralKeyStore } from '@keyhold/storage/interfaces';
-import type { Pin, PinStore } from '@keyhold/chat/identity';
+import type { DeviceKeystore, DeviceStorage, EphemeralKeyStore } from 'keyhold/storage';
+import type { Pin, PinStore } from 'keyhold/chat';
 
 const STORES = ['keystore', 'ephemeral', 'kv', 'messages'] as const;
 type StoreName = (typeof STORES)[number];

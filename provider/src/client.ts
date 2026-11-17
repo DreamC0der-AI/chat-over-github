@@ -1,5 +1,5 @@
 /** Minimal GitHub REST client: injected fetch, user access token, JSON in and out. */
-import { KeyholdError } from '../../util/errors.js';
+import { KeyholdError } from 'keyhold/util';
 
 export type FetchFn = (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) => Promise<{
   status: number;

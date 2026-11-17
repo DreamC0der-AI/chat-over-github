@@ -1,0 +1,23 @@
+name = "chat-over-github"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+# The chat web app (npm run build in the repo root writes it here). Files are served first; other paths reach the Worker.
+[assets]
+directory = "./public"
+
+# Don't keep request logs: the Worker should not record who talks to whom.
+[observability]
+enabled = false
+
+[vars]
+GITHUB_CLIENT_ID = "Iv23liFOHVM634uq8c39"
+# Comma-separated list of web origins allowed to call the Worker from a browser.
+ALLOWED_ORIGINS = "https://chat-over-github.akagishigerutokyo.workers.dev,http://localhost:5173"
+
+# Create with:  npx wrangler kv namespace create INVITES   and paste the id below.
+[[kv_namespaces]]
+binding = "INVITES"
+id = "f343b316d0984406897960fab255fb93"
+
+# Secret (not in this file):  npx wrangler secret put GITHUB_CLIENT_SECRET

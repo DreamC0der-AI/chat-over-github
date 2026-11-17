@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { DeviceCertificate } from '@keyhold/chat/identity';
+import type { DeviceCertificate } from 'keyhold/chat';
 import { signOut } from '../lib/auth';
 import { loginFrom, type Session } from '../lib/session';
 import { ask, Avatar, ErrorFlash, Hint, Icon, Modal, useAction, useSession } from '../ui';

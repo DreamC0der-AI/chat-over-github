@@ -1,7 +1,7 @@
 /** Audit follow-ups: determinism, crash safety, junk resistance, padding, sharding, history. */
 import { describe, expect, it } from 'vitest';
-import { MemoryWorld, memoryDevice } from '../src/storage/index.js';
-import { Chat, PersonalData, historyRecorder, encodeAppMessage, decodeAppMessage, type Group } from '../src/chat/index.js';
+import { MemoryWorld, memoryDevice } from 'keyhold/storage';
+import { Chat, PersonalData, historyRecorder, encodeAppMessage, decodeAppMessage, type Group } from 'keyhold/chat';
 import { makeUser, addDevice, githubWorld, texts } from './chat-helpers.js';
 
 const internals = (g: Group) => g as unknown as { meta: { logNext: number; space: string } };
@@ -62,8 +62,8 @@ describe('crash safety', () => {
     for (const [k, v] of saved) await dev.ephemeral.put(k, v);
     for (const [k, v] of savedMeta) await dev.keystore.put(k, v);
     // re-create the pending marker that rotate() deleted after success
-    const { jsonBytes, b64 } = await import('../src/util/codec.js');
-    const { sha256 } = await import('../src/util/bytes.js');
+    const { jsonBytes, b64 } = await import('keyhold/util');
+    const { sha256 } = await import('keyhold/util');
     const mls = await import('ts-mls');
     const raw = await bob.provider.orderedLog.read(g.space, 0);
     const last = raw[raw.length - 1]!;
@@ -101,7 +101,7 @@ describe('invites before the invitee has an identity', () => {
     const bob = await makeUser(w.session('mem:bob'), 'mem:bob');
     const g = await bob.chat.createGroup();
     await g.invite('mem:x');
-    const { checkCommit } = await import('../src/chat/policy.js');
+    const { checkCommit } = await import('keyhold/chat');
     const v = checkCommit({
       policy: g.policy,
       members: [{ leafIndex: 0, root: bob.identity.fingerprint, device: bob.identity.cert.device, address: bob.address }],
