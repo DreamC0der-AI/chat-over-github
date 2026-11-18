@@ -55,6 +55,8 @@ export interface MsgRecord {
   edited?: boolean;
   deleted?: boolean;
   reactions?: Record<string, string[]>;
+  /** Reaction messages already counted, so one that arrives twice can't toggle twice. */
+  rxIds?: string[];
   reply?: string;
 }
 
@@ -67,7 +69,18 @@ export interface Sending {
   preview?: string;
   caption?: string;
   failed?: string;
+  /** Sent: the id it has in the chat. The bubble stays until the chat shows the real message. */
+  sentId?: string;
 }
+
+/** A reaction on its way out. `add` is what the person asked for; `sent` once GitHub has it. */
+export interface Reacting {
+  add: boolean;
+  sent?: boolean;
+}
+
+/** How long a finished action keeps its local state, so the screen never shows a gap before the stored copy appears. */
+const SETTLE_MS = 2_000;
 
 export const MAX_FILE_BYTES = 10 * 1024 * 1024;
 
@@ -199,6 +212,12 @@ export class Session {
   lastPollError?: string;
   /** Messages on their way out, per group, for the "sending…" bubble and the failed state. */
   sending = new Map<string, Sending[]>();
+  /** Reactions on their way out, by `groupId/messageId/emoji`. Shown at once, faded until sent. */
+  reacting = new Map<string, Reacting>();
+  /** Messages being deleted, by `groupId/messageId`. */
+  deleting = new Set<string>();
+  /** Slow chat-wide actions in progress (close, quit, block), by conversation key: what is happening. */
+  chatBusy = new Map<string, string>();
   /** Decrypted attachments this tab has opened or sent, by blob ref. Memory only, so no new plaintext lands on disk. */
   private files = new Map<string, Promise<Blob>>();
 
@@ -1008,24 +1027,12 @@ export class Session {
     return this.db.messages<MsgRecord>(groupId);
   }
 
+  /** Send a text. It shows at once as "Sending…", and stays as "Not sent" with Retry if it fails. */
   async send(g: Group, body: string) {
-    const pendingId = Math.random().toString(36).slice(2);
-    const list = this.sending.get(g.id) ?? [];
-    list.push({ id: pendingId, body, ts: Date.now() });
-    this.sending.set(g.id, list);
+    const item: Sending = { id: Math.random().toString(36).slice(2), body, ts: Date.now() };
+    this.sending.set(g.id, [...(this.sending.get(g.id) ?? []), item]);
     this.bump();
-    try {
-      await g.send({ t: 'text', body });
-    } catch (e) {
-      // The repo may be gone (closed): a sync turns that into the chat's state.
-      await this.syncGroup(g);
-      if (!g.active) throw new Error('This chat has ended, so the message was not sent.');
-      throw e;
-    } finally {
-      this.sending.set(g.id, (this.sending.get(g.id) ?? []).filter((p) => p.id !== pendingId));
-      this.bump();
-    }
-    void this.syncGroup(g);
+    await this.deliver(g, item);
   }
 
   /** Send files in order. Each shows at once with its local preview, and stays as "not sent" with Retry if it fails. The caption goes with the first. */
@@ -1035,15 +1042,15 @@ export class Session {
     const items: Sending[] = files.map((file, i) => ({ id: Math.random().toString(36).slice(2), ts: Date.now(), file, caption: i === 0 ? caption : undefined, preview: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined }));
     this.sending.set(g.id, [...(this.sending.get(g.id) ?? []), ...items]);
     this.bump();
-    for (const item of items) await this.upload(g, item);
+    for (const item of items) await this.deliver(g, item);
   }
 
   async retrySend(g: Group, id: string) {
     const item = this.sending.get(g.id)?.find((p) => p.id === id);
-    if (!item?.file) return;
+    if (!item || !item.failed) return;
     item.failed = undefined;
     this.bump();
-    await this.upload(g, item);
+    await this.deliver(g, item);
   }
 
   discardSend(groupId: string, id: string) {
@@ -1053,27 +1060,95 @@ export class Session {
     this.bump();
   }
 
-  private async upload(g: Group, item: Sending) {
-    const file = item.file!;
+  private async deliver(g: Group, item: Sending) {
+    let sent: { id: string };
     try {
-      const data = new Uint8Array(await file.arrayBuffer());
-      await g.sendAttachment(data, { name: file.name, mime: file.type || undefined, caption: item.caption });
+      if (item.file) {
+        const data = new Uint8Array(await item.file.arrayBuffer());
+        sent = await g.sendAttachment(data, { name: item.file.name, mime: item.file.type || undefined, caption: item.caption });
+      } else sent = await g.send({ t: 'text', body: item.body ?? '' });
     } catch (e) {
       await this.syncGroup(g).catch(() => undefined);
       item.failed = !g.active ? 'This chat has ended' : describeError(e);
       this.bump();
       return;
     }
-    this.discardSend(g.id, item.id);
+    // The real message is stored by now; the screen drops this bubble as soon as it shows that one.
+    item.sentId = sent.id;
+    this.bump();
+    setTimeout(() => this.discardSend(g.id, item.id), SETTLE_MS);
     void this.syncGroup(g);
   }
 
-  async react(g: Group, ref: string, emoji: string) {
-    await g.send({ t: 'react', ref, emoji });
+  /** Add or take back my reaction. Shows at once; on failure it goes back and the error is thrown. */
+  async react(g: Group, ref: string, emoji: string, add: boolean) {
+    const key = `${g.id}/${ref}/${emoji}`;
+    const cur = this.reacting.get(key);
+    if (cur && !cur.sent) return; // still sending the last tap
+    const entry: Reacting = { add };
+    this.reacting.set(key, entry);
+    this.bump();
+    try {
+      await g.send({ t: 'react', ref, emoji });
+    } catch (e) {
+      this.reacting.delete(key);
+      this.bump();
+      throw new Error(`Reaction not sent. Try again in a moment.`, { cause: e });
+    }
+    entry.sent = true;
+    this.bump();
+    setTimeout(() => {
+      if (this.reacting.get(key) === entry) {
+        this.reacting.delete(key);
+        this.bump();
+      }
+    }, SETTLE_MS);
+  }
+
+  /** Reactions on one message, with mine that are still on their way applied. */
+  shownReactions(m: MsgRecord): { emoji: string; who: string[]; pending: boolean }[] {
+    const out = Object.entries(m.reactions ?? {}).map(([emoji, who]) => ({ emoji, who, pending: false }));
+    const prefix = `${m.groupId}/${m.id}/`;
+    for (const [k, r] of this.reacting) {
+      if (!k.startsWith(prefix)) continue;
+      const emoji = k.slice(prefix.length);
+      let row = out.find((x) => x.emoji === emoji);
+      if (!row) out.push((row = { emoji, who: [], pending: false }));
+      const others = row.who.filter((a) => a !== this.address);
+      row.who = r.add ? [...others, this.address] : others;
+      row.pending = !r.sent;
+    }
+    return out.filter((x) => x.who.length > 0 || x.pending);
   }
 
   async deleteMessage(g: Group, ref: string) {
-    await g.send({ t: 'delete', ref });
+    const key = `${g.id}/${ref}`;
+    this.deleting.add(key);
+    this.bump();
+    try {
+      await g.send({ t: 'delete', ref });
+    } catch (e) {
+      this.deleting.delete(key);
+      this.bump();
+      throw new Error(`Message not deleted. Try again in a moment.`, { cause: e });
+    }
+    setTimeout(() => {
+      this.deleting.delete(key);
+      this.bump();
+    }, SETTLE_MS);
+  }
+
+  /** Run a slow chat-wide action; the chat shows `label` and takes no other action until it ends. */
+  async chatAction<T>(key: string, label: string, fn: () => Promise<T>): Promise<T> {
+    if (this.chatBusy.has(key)) throw new Error('Still working on the last change. Please wait.');
+    this.chatBusy.set(key, label);
+    this.bump();
+    try {
+      return await fn();
+    } finally {
+      this.chatBusy.delete(key);
+      this.bump();
+    }
   }
 
   /** Download and decrypt an attachment once per tab; later views reuse it. */
@@ -1140,14 +1215,15 @@ export class Session {
       }
       case 'react': {
         const cur = await this.db.get<MsgRecord>('messages', [g.id, msg.ref]);
-        if (cur) {
+        // A toggle: if the same reaction message were applied twice it would cancel itself.
+        if (cur && !cur.rxIds?.includes(msg.id)) {
           const rx = { ...(cur.reactions ?? {}) };
           const who = new Set(rx[msg.emoji] ?? []);
           if (who.has(m.from.address)) who.delete(m.from.address);
           else who.add(m.from.address);
           rx[msg.emoji] = [...who];
           if (!rx[msg.emoji]!.length) delete rx[msg.emoji];
-          await this.put({ ...cur, reactions: rx });
+          await this.put({ ...cur, reactions: rx, rxIds: [...(cur.rxIds ?? []), msg.id].slice(-200) });
         }
         break;
       }

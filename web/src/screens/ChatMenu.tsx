@@ -16,6 +16,8 @@ export function ChatMenu({ session, convo, className }: { session: Session; conv
   const owner = !!live && session.isOwner(live);
   const blocked = !!peer && session.blocked.has(peer);
   const act = (fn: () => Promise<unknown>) => void fn().catch((e) => toast(e instanceof Error ? e.message : String(e)));
+  const busy = session.chatBusy.has(convo.key);
+  const slow = (label: string, fn: () => Promise<unknown>) => session.chatAction(convo.key, label, fn);
   return (
     <>
       <Menu label="Chat options" className={className}>
@@ -26,23 +28,23 @@ export function ChatMenu({ session, convo, className }: { session: Session; conv
               <MenuItem icon={dm ? Icon.info() : Icon.people()} onClick={pick(() => setInfo(true))}>{dm ? 'Chat info' : 'Members'}</MenuItem>
               {dm && peer && <MenuItem icon={Icon.shield(true, 16)} onClick={pick(() => setVerify(peer))}>Verify {convo.title}</MenuItem>}
               <div className="menu-sep" role="separator" />
-              <MenuItem icon={Icon.trash()} onClick={pick(() => act(async () => {
+              <MenuItem icon={Icon.trash()} disabled={busy} onClick={pick(() => act(async () => {
                 if (!(await ask(deleteAsk(dm ? convo.title : undefined)))) return;
-                await session.deleteHistory(convo.key);
+                await slow('Deleting chat…', () => session.deleteHistory(convo.key));
                 if (!live) go('/');
               }))}>Delete chat</MenuItem>
               {live && owner && (
-                <MenuItem danger icon={Icon.close()} onClick={pick(() => act(async () => { if (await ask(CLOSE_ASK)) await session.closeChat(live); }))}>Close chat</MenuItem>
+                <MenuItem danger icon={Icon.close()} disabled={busy} onClick={pick(() => act(async () => { if (await ask(CLOSE_ASK)) await slow('Closing chat…', () => session.closeChat(live)); }))}>Close chat</MenuItem>
               )}
               {live && !owner && (
-                <MenuItem danger icon={Icon.exit()} onClick={pick(() => act(async () => { if (await ask(QUIT_ASK)) await session.quitChat(live); }))}>Quit chat</MenuItem>
+                <MenuItem danger icon={Icon.exit()} disabled={busy} onClick={pick(() => act(async () => { if (await ask(QUIT_ASK)) await slow('Leaving chat…', () => session.quitChat(live)); }))}>Quit chat</MenuItem>
               )}
               {dm && peer && (blocked ? (
-                <MenuItem icon={Icon.block()} onClick={pick(() => act(() => session.unblock(peer)))}>Unblock {convo.title}</MenuItem>
+                <MenuItem icon={Icon.block()} disabled={busy} onClick={pick(() => act(() => session.unblock(peer)))}>Unblock {convo.title}</MenuItem>
               ) : (
-                <MenuItem danger icon={Icon.block()} onClick={pick(() => act(async () => {
+                <MenuItem danger icon={Icon.block()} disabled={busy} onClick={pick(() => act(async () => {
                   const body = `${live ? (owner ? 'This chat is closed, and their' : 'You quit this chat, and their') : 'Their'} invitations are turned down without asking you.`;
-                  if (await ask({ title: `Block ${convo.title}?`, body, confirm: `Block ${convo.title}`, danger: true })) await session.block(peer);
+                  if (await ask({ title: `Block ${convo.title}?`, body, confirm: `Block ${convo.title}`, danger: true })) await slow(`Blocking ${convo.title}…`, () => session.block(peer));
                 }))}>Block {convo.title}</MenuItem>
               ))}
             </>
@@ -65,15 +67,15 @@ function ChatInfo({ session, convo, onClose, onVerify }: { session: Session; con
   const pending = live ? session.pending(live) : [];
   const [invite, setInvite] = useState('');
   const [name, setName] = useState(group?.name ?? '');
-  const { busy, error, run } = useAction();
+  const { busy, doing, error, run } = useAction();
   return (
     <Modal title={dm ? 'Chat info' : 'Members'} onClose={onClose}>
       <ErrorFlash error={error} />
       {!dm && iAmAdmin && live && (
-        <form className="inline-form" onSubmit={(e) => { e.preventDefault(); void run(() => session.rename(live, name.trim())); }}>
+        <form className="inline-form" onSubmit={(e) => { e.preventDefault(); void run(() => session.rename(live, name.trim()), 'rename'); }}>
           <label className="sr" htmlFor="group-name">Group name</label>
           <input id="group-name" className="input" value={name} onChange={(e) => setName(e.target.value)} />
-          <button className="btn" disabled={busy || !name.trim() || name.trim() === live.name}>Rename</button>
+          <button className="btn" disabled={busy || !name.trim() || name.trim() === live.name}>{doing === 'rename' ? <><span className="spinner" /> Renaming…</> : 'Rename'}</button>
         </form>
       )}
       <div className="members">
@@ -94,7 +96,7 @@ function ChatInfo({ session, convo, onClose, onVerify }: { session: Session; con
               {!me && !dm && iAmAdmin && live && (
                 <button className="btn danger" disabled={busy} onClick={() => run(async () => {
                   if (await ask({ title: `Remove ${login}?`, body: 'Keys rotate right away, so they can\'t read new messages.', confirm: 'Remove', danger: true })) await session.removeMember(live, m.fingerprint);
-                })}>Remove</button>
+                }, `remove:${m.fingerprint}`)}>{doing === `remove:${m.fingerprint}` ? <><span className="spinner" /> Removing…</> : 'Remove'}</button>
               )}
             </div>
           );
@@ -107,10 +109,10 @@ function ChatInfo({ session, convo, onClose, onVerify }: { session: Session; con
         ))}
       </div>
       {!dm && iAmAdmin && live && (
-        <form className="inline-form" onSubmit={(e) => { e.preventDefault(); void run(async () => { await session.invite(live, invite); setInvite(''); }); }}>
+        <form className="inline-form" onSubmit={(e) => { e.preventDefault(); void run(async () => { await session.invite(live, invite); setInvite(''); }, 'invite'); }}>
           <label className="sr" htmlFor="invite-login">Invite someone</label>
           <input id="invite-login" className="input" value={invite} onChange={(e) => setInvite(e.target.value)} placeholder="Invite by GitHub username" autoComplete="off" />
-          <button className="btn primary" disabled={busy || !invite.trim()}>{busy ? <span className="spinner" /> : 'Invite'}</button>
+          <button className="btn primary" disabled={busy || !invite.trim()}>{doing === 'invite' ? <><span className="spinner" /> Inviting…</> : 'Invite'}</button>
         </form>
       )}
       {group && (
@@ -155,11 +157,11 @@ export function VerifyModal({ session, address, onClose }: { session: Session; a
           <div className="safety">{p.safety?.split(' ').map((g, i) => <span key={i}>{g}</span>)}</div>
           <ErrorFlash error={error} />
           {p.status === 'key-changed' ? (
-            <button className="btn primary block" disabled={busy} onClick={() => run(() => session.acceptKeyChange(address))}>Numbers match, accept the new key</button>
+            <button className="btn primary block" disabled={busy} onClick={() => run(() => session.acceptKeyChange(address))}>{busy ? <><span className="spinner" /> Saving…</> : 'Numbers match, accept the new key'}</button>
           ) : p.verified ? (
             <div className="verified-note">{Icon.shield(true, 16)} Verified</div>
           ) : (
-            <button className="btn primary block" disabled={busy} onClick={() => run(() => session.markVerified(address))}>Numbers match, mark as verified</button>
+            <button className="btn primary block" disabled={busy} onClick={() => run(() => session.markVerified(address))}>{busy ? <><span className="spinner" /> Saving…</> : 'Numbers match, mark as verified'}</button>
           )}
         </>
       )}

@@ -74,6 +74,7 @@ export function Home({ session, route }: { session: Session; route: string }) {
 
 function ChatRow({ session, c, active }: { session: Session; c: Convo; active: boolean }) {
   const g = c.live ?? c.current;
+  const busyLabel = session.chatBusy.get(c.key);
   const last = c.rooms[c.rooms.length - 1]!;
   const pending = c.live ? session.pending(c.live) : [];
   const waiting = c.dm && pending.length > 0;
@@ -90,10 +91,10 @@ function ChatRow({ session, c, active }: { session: Session; c: Convo; active: b
             {!c.dm && g && <span className="count">{g.members().length}</span>}
             {!c.live && <span className="label">Ended</span>}
           </span>
-          <span className="preview">{preview}</span>
+          <span className="preview">{busyLabel ?? preview}</span>
         </span>
         <span className="right">
-          <span className="time">{timeLabel(c.lastTs)}</span>
+          {busyLabel ? <span className="time"><span className="spinner" /></span> : <span className="time">{timeLabel(c.lastTs)}</span>}
           {!!c.unread && <span className="counter">{c.unread}</span>}
         </span>
       </button>
@@ -127,6 +128,11 @@ function Invites({ session }: { session: Session }) {
 
 function InviteRow({ session, inv }: { session: Session; inv: PendingInvite }) {
   const { busy, error, run } = useAction();
+  const [doing, setDoing] = useState<'accept' | 'decline'>();
+  const answer = (what: 'accept' | 'decline') => {
+    setDoing(what);
+    void run(() => (what === 'accept' ? session.acceptInvite(inv.key) : session.declineInvite(inv.key))).finally(() => setDoing(undefined));
+  };
   const from = loginFrom(inv.from);
   const text =
     inv.status === 'invited' ? undefined
@@ -151,8 +157,8 @@ function InviteRow({ session, inv }: { session: Session; inv: PendingInvite }) {
         <ErrorFlash error={error} />
         {inv.status === 'invited' && (
           <div className="row invite-actions">
-            <button className="btn primary" disabled={busy} onClick={() => run(() => session.acceptInvite(inv.key))}>Accept</button>
-            <button className="btn" disabled={busy} onClick={() => run(() => session.declineInvite(inv.key))}>Decline</button>
+            <button className="btn primary" disabled={busy} onClick={() => answer('accept')}>{doing === 'accept' ? <><span className="spinner" /> Accepting…</> : 'Accept'}</button>
+            <button className="btn" disabled={busy} onClick={() => answer('decline')}>{doing === 'decline' ? <><span className="spinner" /> Declining…</> : 'Decline'}</button>
           </div>
         )}
         {(inv.status === 'waiting' || inv.status === 'error') && (

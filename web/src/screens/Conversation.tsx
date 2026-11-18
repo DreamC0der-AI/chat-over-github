@@ -113,7 +113,10 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
 
   const liveRec = live ? session.records.get(live.id) : undefined;
   const pending = live ? session.pending(live) : [];
-  const sending = live ? session.sending.get(live.id) ?? [] : [];
+  // A sent message keeps its bubble until the chat shows the stored copy, so nothing blinks.
+  const shownIds = new Set(items.map((it) => (it.kind === 'msg' ? it.m.id : '')));
+  const sending = (live ? session.sending.get(live.id) ?? [] : []).filter((p) => !p.sentId || !shownIds.has(p.sentId));
+  const busyLabel = session.chatBusy.get(convo.key);
   const err = group ? session.groupErrors.get(group.id) : undefined;
   const joined = !!live && live.members().length > 1;
   const peerLeft = !!live && dm && !!liveRec?.peerLeft && !joined;
@@ -131,7 +134,9 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
             <strong className="convo-title">{title}</strong>
             <Hint className="hint lock" label="End-to-end encrypted" text={<>End-to-end encrypted. Messages are encrypted in this browser before they're saved to GitHub{space ? <>, in <span className="mono">{space.split('/')[1]}</span></> : ''}.</>}>{Icon.lock(12)}</Hint>
           </span>
-          {!dm && group && <span className="convo-sub">{group.members().length} {group.members().length === 1 ? 'member' : 'members'}</span>}
+          {busyLabel ? (
+            <span className="convo-sub busy" role="status"><span className="spinner" />{busyLabel}</span>
+          ) : !dm && group && <span className="convo-sub">{group.members().length} {group.members().length === 1 ? 'member' : 'members'}</span>}
         </div>
         <div className="convo-actions">
           {dm && peer && <TrustBadge peer={peer} onClick={() => setVerify(peer.address)} />}
@@ -147,7 +152,7 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
       {peerLeft && (
         <div className="flash warn banner">
           <span><strong>{title} left this chat.</strong></span>
-          {session.isOwner(live!) && <button className="btn danger" disabled={busy} onClick={() => run(async () => { if (await ask(CLOSE_ASK)) await session.closeChat(live!); })}>Close chat</button>}
+          {session.isOwner(live!) && <button className="btn danger" disabled={busy || !!busyLabel} onClick={() => run(async () => { if (await ask(CLOSE_ASK)) await session.chatAction(convo.key, 'Closing chat…', () => session.closeChat(live!)); })}>{busyLabel ? <><span className="spinner" /> Closing…</> : 'Close chat'}</button>}
         </div>
       )}
       {!live && (
@@ -157,7 +162,7 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
             <Hint text={group ? "GitHub doesn't let you open it right now. If access comes back, it carries on." : 'Your copy of the messages stays here until you delete it.'} />
           </span>
           <span className="row">
-            {dm && peerAddr && !session.blocked.has(peerAddr) && <button className="btn primary" disabled={busy} onClick={startNew}>Start a new chat with {title}</button>}
+            {dm && peerAddr && !session.blocked.has(peerAddr) && <button className="btn primary" disabled={busy} onClick={startNew}>{busy ? <><span className="spinner" /> Starting…</> : `Start a new chat with ${title}`}</button>}
             <button className="btn" disabled={busy} onClick={() => run(async () => { if (await ask(deleteAsk(dm ? title : undefined))) { await session.deleteHistory(convo.key); go('/'); } })}>Delete chat</button>
           </span>
         </div>
@@ -205,7 +210,7 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
                   <button className="meta-btn" onClick={() => session.discardSend(live!.id, p.id)}>Remove</button>
                 </span>
               ) : (
-                <span className="msg-meta"><span className="spinner" style={{ width: 10, height: 10 }} /> {p.file ? 'Uploading…' : 'Sending…'}</span>
+                <span className="msg-meta" role="status">{p.sentId ? null : <><span className="spinner" /> {p.file ? 'Uploading…' : 'Sending…'}</>}</span>
               )}
             </div>
           ))}
@@ -215,7 +220,7 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
         </div>
       </div>
       {live ? (
-        <Composer session={session} group={live} disabledReason={peerLeft ? `${title} left this chat` : !joined ? 'Waiting for the other person to join…' : undefined} error={err} />
+        <Composer session={session} group={live} disabledReason={busyLabel ?? (peerLeft ? `${title} left this chat` : !joined ? 'Waiting for the other person to join…' : undefined)} error={err} />
       ) : (
         <div className="composer ended">This chat has ended</div>
       )}
@@ -235,21 +240,27 @@ function TrustBadge({ peer, onClick }: { peer: PeerInfo; onClick: () => void }) 
 function Message({ m, session, group, showAuthor, first = true, last = true, onOpen }: { m: MsgRecord; session: Session; group?: Group; showAuthor: boolean; first?: boolean; last?: boolean; onOpen: (v: Viewing) => void }) {
   if (m.kind === 'system') return <div className="sys" title={m.body}>{(m.body ?? '').replace(/\. .*$/, '').replace(/\.$/, '')}</div>;
   const who = loginFrom(m.from);
-  const reactions = Object.entries(m.reactions ?? {});
+  const reactions = session.shownReactions(m);
   const act = (fn: () => Promise<unknown>) => fn().catch((e) => toast(describeError(e)));
-  const canAct = !m.deleted && !!group?.active;
+  const deleting = !m.deleted && session.deleting.has(`${m.groupId}/${m.id}`);
+  const canAct = !m.deleted && !deleting && !!group?.active;
+  const react = (emoji: string) => {
+    if (!group) return;
+    const mineNow = !!reactions.find((r) => r.emoji === emoji)?.who.includes(session.address);
+    act(() => session.react(group, m.id, emoji, !mineNow));
+  };
   const attach = !m.deleted && m.kind === 'attachment' && !!m.file;
   return (
     <div className={`msg${m.mine ? ' mine' : ''}${first ? '' : ' cont'}`}>
       {showAuthor && !m.mine && first && <span className="msg-author">{who}</span>}
       <div className="bubble-line">
-        <div className={`bubble${m.deleted ? ' deleted' : ''}${attach ? ` attachment${group && isImage(m.file!.mime) ? ' has-media' : ''}${m.caption ? ' has-caption' : ''}` : ''}`} title={new Date(m.ts).toLocaleString()}>
+        <div className={`bubble${m.deleted ? ' deleted' : ''}${deleting ? ' pending' : ''}${attach ? ` attachment${group && isImage(m.file!.mime) ? ' has-media' : ''}${m.caption ? ' has-caption' : ''}` : ''}`} title={new Date(m.ts).toLocaleString()}>
           {m.deleted ? 'Message deleted' : attach ? (group ? <AttachmentView session={session} group={group} file={m.file!} caption={m.caption} onOpen={onOpen} /> : <span className="muted">📎 {m.file!.name ?? 'file'} (no longer available)</span>) : m.body}
         </div>
         {canAct && (
           <span className="msg-actions" role="toolbar" aria-label="Message actions">
             {EMOJI.map((e) => (
-              <button key={e} onClick={() => act(() => session.react(group!, m.id, e))} aria-label={`React ${e}`}>{e}</button>
+              <button key={e} onClick={() => react(e)} aria-label={`React ${e}`}>{e}</button>
             ))}
             {m.mine && <button className="del" aria-label="Delete message" title="Delete for everyone" onClick={() => act(async () => { if (await ask({ title: 'Delete this message for everyone?', confirm: 'Delete', danger: true })) await session.deleteMessage(group!, m.id); })}>{Icon.trash()}</button>}
           </span>
@@ -257,14 +268,16 @@ function Message({ m, session, group, showAuthor, first = true, last = true, onO
       </div>
       {reactions.length > 0 && (
         <div className="reactions">
-          {reactions.map(([e, who]) => (
-            <button key={e} className={`reaction${who.includes(session.address) ? ' me' : ''}`} title={who.map(loginFrom).join(', ')} disabled={!group?.active} onClick={() => group && act(() => session.react(group, m.id, e))}>
-              {e} <span>{who.length}</span>
+          {reactions.map(({ emoji, who, pending }) => (
+            <button key={emoji} className={`reaction${who.includes(session.address) ? ' me' : ''}${pending ? ' pending' : ''}`} title={pending ? 'Sending…' : who.map(loginFrom).join(', ')} aria-busy={pending || undefined} disabled={!group?.active || deleting} onClick={() => !pending && react(emoji)}>
+              {emoji} <span>{who.length}</span>
             </button>
           ))}
         </div>
       )}
-      {(last || m.edited) && (
+      {deleting ? (
+        <span className="msg-meta" role="status"><span className="spinner" /> Deleting…</span>
+      ) : (last || m.edited) && (
         <span className="msg-meta">
           {last && msgTime(m.ts)}
           {m.edited && (last ? ' · edited' : 'Edited')}
@@ -343,14 +356,7 @@ function Composer({ session, group, disabledReason, error }: { session: Session;
       void run(() => session.sendFiles(group, files, body || undefined));
       return;
     }
-    void run(async () => {
-      try {
-        await session.send(group, body);
-      } catch (e) {
-        setText(body);
-        throw e;
-      }
-    });
+    void run(() => session.send(group, body));
   };
   const canSend = !disabledReason && (!!text.trim() || drafts.length > 0);
   return (
