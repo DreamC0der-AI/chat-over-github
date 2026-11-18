@@ -118,7 +118,12 @@ describe.each(worlds)('chat on %s', (_n, make) => {
     const [ga] = await alice.chat.acceptInvites();
     await g.sync();
     const e0 = g.epoch;
-    for (let i = 0; i < 4; i++) await g.send({ t: 'text', body: `m${i}` });
+    // Mail is ordered by its send time, then a random suffix: with the clock frozen, four sends
+    // in the same millisecond could come back in any order. Step the clock between them.
+    for (let i = 0; i < 4; i++) {
+      t += 1;
+      await g.send({ t: 'text', body: `m${i}` });
+    }
     expect(g.epoch).toBe(e0 + 1n);
     expect(texts(await ga!.sync())).toEqual(['m0', 'm1', 'm2', 'm3']);
     t += 8 * 86_400_000;

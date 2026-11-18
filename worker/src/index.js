@@ -3,6 +3,7 @@
 //   POST   /oauth/token          exchange an OAuth code or refresh token (needs the client secret)
 //   POST   /oauth/device/code    device-flow proxy (browsers can't call github.com directly: no CORS)
 //   POST   /oauth/device/token   device-flow polling proxy
+//   GET    /inbox                WebSocket: the caller's inbox pushes invitations and closure notices
 //   POST   /invites              inviter registers a GitHub repo invitation for the invitee
 //   GET    /invites              invitee lists pending invitations addressed to them
 //   DELETE /invites/:id          invitee (or inviter) removes an entry after accept/decline
@@ -10,29 +11,47 @@
 //   GET    /closures             a member lists closure notices addressed to them
 //   DELETE /closures/:id         the member removes a notice once their app has seen it
 //
-// Every /invites call carries the caller's GitHub user access token
-// (Authorization: Bearer ...). The Worker checks identity with GitHub on each call
-// and checks that the invitation really exists before storing it, so nobody can
-// plant or read someone else's entries. KV holds only
-//   inv:<invitee user id>:<invitation id> -> {id, from, from_id, created_at, expires_at}
-// with a TTL that matches GitHub's 7-day invitation expiry. No repo names, no messages.
-// Closure notices are
-//   cls:<member user id>:<sender user id>:<tag> -> {id, from, from_id, tag, at}
-// where tag is an opaque hash the members' apps derive from the chat; the Worker can't link
-// it to a repo. They also live 7 days. The sender is whoever's token made the call; the
-// members' apps check the sender owns the chat before believing a notice.
+// Every inbox call carries the caller's GitHub user access token (Authorization: Bearer ...,
+// or for the WebSocket, which browsers can't give headers, the subprotocol "bearer.<token>").
+// The Worker checks identity with GitHub on each call and checks that an invitation really
+// exists before storing it, so nobody can plant or read someone else's entries.
+//
+// Each user's inbox is one Durable Object (named by their GitHub user id) with its own SQLite
+// tables:
+//   invites:  {id, from, from_id, created_at, expires_at}   expires with GitHub's 7-day invitation
+//   closures: {id, from, from_id, tag, at}                    lives 7 days
+// No repo names, no messages. The tag of a closure is an opaque hash the members' apps derive
+// from the chat; the Worker can't link it to a repo. The sender is whoever's token made the
+// call; the members' apps check the sender owns the chat before believing a notice.
+// Open app tabs hold a hibernating WebSocket to their inbox, so an idle tab costs nothing and
+// new entries arrive at once instead of by polling.
+//
+// Until 2026-11-17 the inbox lived in Workers KV (binding INVITES). Each inbox copies its old
+// KV entries once, the first time it is used. KV entries expire within 7 days, after which the
+// INVITES binding can be removed.
 // Nothing is logged.
 
-const GH_API = "https://api.github.com";
-const GH_WEB = "https://github.com";
+import { DurableObject } from "cloudflare:workers";
+
+const GH_API_DEFAULT = "https://api.github.com";
+const GH_WEB_DEFAULT = "https://github.com";
 const INVITE_LIFETIME_S = 7 * 24 * 3600; // GitHub repository invitations expire after 7 days
-const MIN_TTL_S = 60; // KV minimum expirationTtl
+const MIN_TTL_S = 60; // don't file an invitation that is about to expire
+const WS_PROTOCOL = "inbox.v1";
+let GH_API = GH_API_DEFAULT;
+let GH_WEB = GH_WEB_DEFAULT;
 
 export default {
   async fetch(request, env) {
+    // Tests point these at a fake GitHub.
+    GH_API = env.GH_API || GH_API_DEFAULT;
+    GH_WEB = env.GH_WEB || GH_WEB_DEFAULT;
     const cors = corsHeaders(request, env);
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
     try {
+      const path = new URL(request.url).pathname.replace(/\/+$/, "");
+      // A WebSocket upgrade's response can't take extra headers, so it skips the CORS step.
+      if (path === "/inbox" && request.method === "GET") return await openInbox(request, env);
       const res = await route(request, env);
       for (const [k, v] of Object.entries(cors)) res.headers.set(k, v);
       return res;
@@ -110,6 +129,25 @@ async function ghLogin(path, params) {
 
 // ---------- Invite inbox ----------
 
+/** The inbox Durable Object of one GitHub user. */
+const inbox = (env, userId) => env.INBOX.get(env.INBOX.idFromName(String(userId)));
+
+async function openInbox(request, env) {
+  if ((request.headers.get("Upgrade") || "").toLowerCase() !== "websocket") throw new HttpError(426, "WebSocket required");
+  // Only our own pages may open a socket (a socket isn't covered by CORS).
+  const origin = request.headers.get("Origin");
+  if (origin && !allowedOrigins(env).includes(origin)) throw new HttpError(403, "origin not allowed");
+  const offered = (request.headers.get("Sec-WebSocket-Protocol") || "").split(",").map((s) => s.trim());
+  const fromProtocol = offered.find((p) => p.startsWith("bearer."));
+  const token = fromProtocol ? fromProtocol.slice(7) : bearer(request);
+  const me = await ghUser(token);
+  const forward = new Request(request);
+  forward.headers.set("X-Inbox-User", String(me.id));
+  if (offered.includes(WS_PROTOCOL)) forward.headers.set("X-Inbox-Protocol", WS_PROTOCOL);
+  else forward.headers.delete("X-Inbox-Protocol");
+  return inbox(env, me.id).fetch(forward);
+}
+
 async function createInvite(request, env) {
   const token = bearer(request);
   const body = await readJson(request);
@@ -131,8 +169,7 @@ async function createInvite(request, env) {
 
   const created = Date.parse(inv.created_at) || Date.now();
   const expiresAt = created + INVITE_LIFETIME_S * 1000;
-  const ttl = Math.floor((expiresAt - Date.now()) / 1000);
-  if (ttl < MIN_TTL_S) throw new HttpError(410, "invitation about to expire; re-invite");
+  if (expiresAt - Date.now() < MIN_TTL_S * 1000) throw new HttpError(410, "invitation about to expire; re-invite");
 
   const entry = {
     id: inviteId,
@@ -141,56 +178,28 @@ async function createInvite(request, env) {
     created_at: new Date(created).toISOString(),
     expires_at: new Date(expiresAt).toISOString(),
   };
-  await env.INVITES.put(key(inv.invitee.id, inviteId), JSON.stringify(entry), {
-    expirationTtl: ttl,
-    metadata: entry,
-  });
+  await inbox(env, inv.invitee.id).addInvite(inv.invitee.id, entry);
   return json({ ok: true, invitee_id: inv.invitee.id, expires_at: entry.expires_at }, 201);
 }
 
 async function listInvites(request, env) {
   const me = await ghUser(bearer(request));
-  const out = [];
-  let cursor;
-  do {
-    const page = await env.INVITES.list({ prefix: `inv:${me.id}:`, cursor });
-    for (const k of page.keys) {
-      if (k.metadata) out.push(k.metadata);
-      else {
-        const v = await env.INVITES.get(k.name);
-        if (v) out.push(JSON.parse(v));
-      }
-    }
-    cursor = page.list_complete ? undefined : page.cursor;
-  } while (cursor);
-  const now = Date.now();
-  return json({ invites: out.filter((e) => Date.parse(e.expires_at) > now) });
+  return json({ invites: await inbox(env, me.id).listInvites(me.id) });
 }
 
 async function deleteInvite(request, env, idStr) {
   const me = await ghUser(bearer(request));
   const inviteId = Number(idStr);
   // Invitee removes their own entry.
-  const own = key(me.id, inviteId);
-  if (await env.INVITES.get(own)) {
-    await env.INVITES.delete(own);
-    return json({ ok: true });
-  }
+  if (await inbox(env, me.id).removeInvite(me.id, inviteId)) return json({ ok: true });
   // Inviter may withdraw: the invitee id must be given and the entry must be from the caller.
   const url = new URL(request.url);
   const inviteeId = Number(url.searchParams.get("invitee_id"));
-  if (Number.isSafeInteger(inviteeId) && inviteeId > 0) {
-    const k = key(inviteeId, inviteId);
-    const v = await env.INVITES.get(k);
-    if (v && JSON.parse(v).from_id === me.id) {
-      await env.INVITES.delete(k);
-      return json({ ok: true });
-    }
+  if (Number.isSafeInteger(inviteeId) && inviteeId > 0 && inviteeId !== me.id) {
+    if (await inbox(env, inviteeId).removeInvite(inviteeId, inviteId, me.id)) return json({ ok: true });
   }
   throw new HttpError(404, "not found");
 }
-
-const key = (inviteeId, inviteId) => `inv:${inviteeId}:${inviteId}`;
 
 // ---------- Closure notices ----------
 
@@ -205,37 +214,203 @@ async function createClosure(request, env) {
   const target = await ghGetUser(token, to);
   if (target.id === me.id) throw new HttpError(400, "cannot notify yourself");
   const at = new Date().toISOString();
-  const entry = { id: `${me.id}:${tag}`, from: me.login, from_id: me.id, tag, at };
   // One notice per sender and chat: posting again just refreshes it.
-  await env.INVITES.put(`cls:${target.id}:${me.id}:${tag}`, JSON.stringify(entry), {
-    expirationTtl: INVITE_LIFETIME_S,
-    metadata: entry,
-  });
+  const entry = { id: `${me.id}:${tag}`, from: me.login, from_id: me.id, tag, at };
+  await inbox(env, target.id).addClosure(target.id, entry);
   return json({ ok: true }, 201);
 }
 
 async function listClosures(request, env) {
   const me = await ghUser(bearer(request));
-  const out = [];
-  let cursor;
-  do {
-    const page = await env.INVITES.list({ prefix: `cls:${me.id}:`, cursor });
-    for (const k of page.keys) {
-      if (k.metadata) out.push(k.metadata);
-      else {
-        const v = await env.INVITES.get(k.name);
-        if (v) out.push(JSON.parse(v));
-      }
-    }
-    cursor = page.list_complete ? undefined : page.cursor;
-  } while (cursor);
-  return json({ closures: out });
+  return json({ closures: await inbox(env, me.id).listClosures(me.id) });
 }
 
 async function deleteClosure(request, env, id) {
   const me = await ghUser(bearer(request));
-  await env.INVITES.delete(`cls:${me.id}:${id}`);
+  await inbox(env, me.id).removeClosure(me.id, id);
   return json({ ok: true });
+}
+
+// ---------- The inbox Durable Object ----------
+
+/**
+ * One user's inbox. Every method takes the owner's user id (the object is named by it), which
+ * the first call stores and uses to copy the user's old KV entries once.
+ *
+ * Pushed to open sockets, as JSON text:
+ *   {type:"snapshot", invites:[...], closures:[...]}   right after connecting
+ *   {type:"invite", invite} / {type:"invite-removed", id}
+ *   {type:"closure", closure} / {type:"closure-removed", id}
+ * The socket answers the text "ping" with "pong" without waking the object.
+ */
+export class Inbox extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.sql = ctx.storage.sql;
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS invites (id INTEGER PRIMARY KEY, body TEXT NOT NULL, expires INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS closures (id TEXT PRIMARY KEY, body TEXT NOT NULL, expires INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+    `);
+    ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+    this.ready = false;
+  }
+
+  // ---- RPC from the Worker ----
+
+  async addInvite(userId, entry) {
+    await this.open(userId);
+    const expires = Date.parse(entry.expires_at);
+    this.sql.exec("INSERT OR REPLACE INTO invites (id, body, expires) VALUES (?, ?, ?)", entry.id, JSON.stringify(entry), expires);
+    await this.wakeAt(expires);
+    this.push({ type: "invite", invite: entry });
+  }
+
+  async listInvites(userId) {
+    await this.open(userId);
+    return this.rows("invites");
+  }
+
+  /** Removes an invite; with fromId, only one that caller sent. True if one was removed. */
+  async removeInvite(userId, id, fromId) {
+    await this.open(userId);
+    const row = this.sql.exec("SELECT body FROM invites WHERE id = ?", id).toArray()[0];
+    if (!row) return false;
+    if (fromId !== undefined && JSON.parse(row.body).from_id !== fromId) return false;
+    this.sql.exec("DELETE FROM invites WHERE id = ?", id);
+    this.push({ type: "invite-removed", id });
+    return true;
+  }
+
+  async addClosure(userId, entry) {
+    await this.open(userId);
+    const expires = Date.now() + INVITE_LIFETIME_S * 1000;
+    this.sql.exec("INSERT OR REPLACE INTO closures (id, body, expires) VALUES (?, ?, ?)", entry.id, JSON.stringify(entry), expires);
+    await this.wakeAt(expires);
+    this.push({ type: "closure", closure: entry });
+  }
+
+  async listClosures(userId) {
+    await this.open(userId);
+    return this.rows("closures");
+  }
+
+  async removeClosure(userId, id) {
+    await this.open(userId);
+    const n = this.sql.exec("DELETE FROM closures WHERE id = ?", id).rowsWritten;
+    if (n) this.push({ type: "closure-removed", id });
+  }
+
+  // ---- WebSocket ----
+
+  async fetch(request) {
+    const userId = Number(request.headers.get("X-Inbox-User"));
+    if (!Number.isSafeInteger(userId) || userId <= 0) return new Response("bad request", { status: 400 });
+    await this.open(userId);
+    const [client, server] = Object.values(new WebSocketPair());
+    this.ctx.acceptWebSocket(server);
+    server.send(JSON.stringify({ type: "snapshot", invites: this.rows("invites"), closures: this.rows("closures") }));
+    const protocol = request.headers.get("X-Inbox-Protocol");
+    return new Response(null, { status: 101, webSocket: client, headers: protocol ? { "Sec-WebSocket-Protocol": protocol } : {} });
+  }
+
+  async webSocketMessage(ws, message) {
+    // Anything but the automatic ping: send a fresh snapshot.
+    if (message === "sync") ws.send(JSON.stringify({ type: "snapshot", invites: this.rows("invites"), closures: this.rows("closures") }));
+  }
+
+  async webSocketClose(ws, code, reason) {
+    try {
+      ws.close(code, reason);
+    } catch {
+      // already closed
+    }
+  }
+
+  async webSocketError() {}
+
+  // ---- expiry ----
+
+  async alarm() {
+    const now = Date.now();
+    for (const table of ["invites", "closures"]) {
+      const gone = this.sql.exec(`SELECT id FROM ${table} WHERE expires <= ?`, now).toArray();
+      if (!gone.length) continue;
+      this.sql.exec(`DELETE FROM ${table} WHERE expires <= ?`, now);
+      for (const { id } of gone) this.push({ type: table === "invites" ? "invite-removed" : "closure-removed", id });
+    }
+    const next = this.sql
+      .exec("SELECT MIN(e) AS e FROM (SELECT MIN(expires) AS e FROM invites UNION ALL SELECT MIN(expires) AS e FROM closures)")
+      .toArray()[0]?.e;
+    if (next) await this.ctx.storage.setAlarm(next);
+  }
+
+  // ---- helpers ----
+
+  /** Unexpired entries of a table, oldest first. */
+  rows(table) {
+    return this.sql
+      .exec(`SELECT body FROM ${table} WHERE expires > ? ORDER BY expires`, Date.now())
+      .toArray()
+      .map((r) => JSON.parse(r.body));
+  }
+
+  push(msg) {
+    const text = JSON.stringify(msg);
+    for (const ws of this.ctx.getWebSockets()) {
+      try {
+        ws.send(text);
+      } catch {
+        // closing
+      }
+    }
+  }
+
+  /** Make sure the alarm fires by the given time, to drop expired entries. */
+  async wakeAt(t) {
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null || current > t) await this.ctx.storage.setAlarm(t);
+  }
+
+  /** First use: remember whose inbox this is, and copy their entries from the old KV inbox. */
+  async open(userId) {
+    if (this.ready) return;
+    const owner = this.sql.exec("SELECT v FROM meta WHERE k = 'owner'").toArray()[0]?.v;
+    if (owner !== undefined && owner !== String(userId)) throw new Error("inbox owner mismatch");
+    if (owner === undefined) {
+      await this.importKv(userId);
+      this.sql.exec("INSERT OR REPLACE INTO meta (k, v) VALUES ('owner', ?)", String(userId));
+    }
+    this.ready = true;
+  }
+
+  async importKv(userId) {
+    const kv = this.env.INVITES;
+    if (!kv) return;
+    const now = Date.now();
+    let earliest = Infinity;
+    for (const [prefix, table] of [[`inv:${userId}:`, "invites"], [`cls:${userId}:`, "closures"]]) {
+      let cursor;
+      do {
+        const page = await kv.list({ prefix, cursor });
+        for (const k of page.keys) {
+          let e = k.metadata;
+          if (!e) {
+            const v = await kv.get(k.name);
+            e = v ? JSON.parse(v) : undefined;
+          }
+          if (!e || e.id === undefined) continue;
+          // KV gives the key's own expiry; invites also carry theirs.
+          const expires = table === "invites" ? Date.parse(e.expires_at) : (k.expiration ? k.expiration * 1000 : Date.parse(e.at) + INVITE_LIFETIME_S * 1000);
+          if (!(expires > now)) continue;
+          this.sql.exec(`INSERT OR IGNORE INTO ${table} (id, body, expires) VALUES (?, ?, ?)`, e.id, JSON.stringify(e), expires);
+          earliest = Math.min(earliest, expires);
+        }
+        cursor = page.list_complete ? undefined : page.cursor;
+      } while (cursor);
+    }
+    if (earliest !== Infinity) await this.wakeAt(earliest);
+  }
 }
 
 async function ghGetUser(token, login) {
@@ -309,10 +484,11 @@ function json(obj, status = 200, extra = {}) {
   });
 }
 
+const allowedOrigins = (env) => (env.ALLOWED_ORIGINS || "").split(",").map((s) => s.trim()).filter(Boolean);
+
 function corsHeaders(request, env) {
   const origin = request.headers.get("Origin");
-  const allowed = (env.ALLOWED_ORIGINS || "").split(",").map((s) => s.trim()).filter(Boolean);
-  if (!origin || !allowed.includes(origin)) return { Vary: "Origin" };
+  if (!origin || !allowedOrigins(env).includes(origin)) return { Vary: "Origin" };
   return {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
