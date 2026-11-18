@@ -29,4 +29,4 @@ npm run build          # writes the app into worker/public, ready for wrangler d
 npm run e2e            # mock build + in-memory GitHub and Worker + Playwright, three people
 ```
 
-`npm run e2e` needs Playwright. It covers a DM, a group, removal, a second device, invitations, Delete/Close/Quit/Block and first-run install.
+`npm run e2e` needs Playwright. It covers a DM, a group, removal, a second device, invitations, Delete/Close/Quit/Block and first-run install, then (`tools/e2e-pending.mjs`, with GitHub writes slowed down or failing) the pending states and the one-tab-per-account rule.

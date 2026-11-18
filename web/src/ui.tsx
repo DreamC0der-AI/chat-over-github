@@ -154,12 +154,14 @@ export function timeLabel(ts: number) {
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
-/** Run an async action with busy and error state. */
+/** Run an async action with busy and error state. `doing` names the running action, for the button that shows a spinner. */
 export function useAction() {
   const [busy, setBusy] = useState(false);
+  const [doing, setDoing] = useState<string>();
   const [error, setError] = useState<string>();
-  const run = async <T,>(fn: () => Promise<T>): Promise<T | undefined> => {
+  const run = async <T,>(fn: () => Promise<T>, tag?: string): Promise<T | undefined> => {
     setBusy(true);
+    setDoing(tag);
     setError(undefined);
     try {
       return await fn();
@@ -168,9 +170,10 @@ export function useAction() {
       return undefined;
     } finally {
       setBusy(false);
+      setDoing(undefined);
     }
   };
-  return { busy, error, setError, run };
+  return { busy, doing, error, setError, run };
 }
 
 /** Where to put a floating box (menu or hint) next to its trigger, kept inside the window. */

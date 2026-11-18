@@ -312,7 +312,16 @@ code { background: var(--subtle); padding: 1px 5px; border-radius: 5px; }
 .msg.mine .file-size { color: rgba(255,255,255,.8); }
 .file-act { width: 34px; height: 34px; flex: none; border: 0; border-radius: 50%; background: none; color: inherit; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
 .file-act:hover:not(:disabled) { background: rgba(127,127,127,.16); }
-.msg.mine .spinner { border-color: rgba(255,255,255,.35); border-top-color: #fff; }
+.msg.mine .bubble .spinner { border-color: rgba(255,255,255,.35); border-top-color: #fff; }
+/* Pending: anything on its way to GitHub is shown at once, faded, with a small spinner where there is room. */
+.msg-meta .spinner, .convo-sub .spinner, .chat-item .right .spinner { width: 10px; height: 10px; border-width: 1.5px; }
+.reaction.pending { opacity: .6; cursor: progress; animation: breathe 1.2s ease-in-out infinite; }
+.reaction.pending:disabled, .reaction:disabled { cursor: default; }
+@keyframes breathe { 50% { opacity: .35; } }
+.convo-sub.busy { display: inline-flex; align-items: center; gap: 6px; }
+.btn .spinner { width: 12px; height: 12px; border-color: currentColor; border-top-color: transparent; opacity: .8; }
+.elsewhere { text-align: center; align-items: center; padding-top: 18vh; }
+.elsewhere p { margin: 0; }
 .msg-meta.failed { color: var(--danger); }
 .meta-btn { border: 0; background: none; padding: 0; font: inherit; font-weight: 600; color: var(--accent); cursor: pointer; }
 .meta-btn:hover { text-decoration: underline; }
