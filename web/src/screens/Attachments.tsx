@@ -6,7 +6,7 @@ import { Icon } from '../ui';
 export const isImage = (mime?: string) => !!mime && /^image\/(png|jpe?g|gif|webp|avif|bmp|svg\+xml)$/i.test(mime);
 export const fileSize = (n: number) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.ceil(n / 1024))} KB`);
 
-function saveBlob(url: string, name: string) {
+export function saveBlob(url: string, name: string) {
   const a = document.createElement('a');
   a.href = url;
   a.download = name;
