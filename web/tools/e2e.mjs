@@ -112,12 +112,42 @@ try {
   await alice.page.getByRole('button', { name: /Verified/ }).waitFor();
   check(true, 'marked verified');
 
-  // attachment
+  // attachments: a file card, then a picture shown inline with an upload state
   await alice.page.locator('input[type=file]').setInputFiles({ name: 'note.txt', mimeType: 'text/plain', buffer: Buffer.from('secret file contents') });
-  await bob.page.locator('.file', { hasText: 'note.txt' }).waitFor({ timeout: 30000 });
-  await bob.page.locator('.file', { hasText: 'note.txt' }).getByRole('button', { name: 'Download' }).click();
-  await bob.page.locator('.file', { hasText: 'note.txt' }).getByRole('link', { name: 'Save' }).waitFor({ timeout: 15000 });
-  check(true, 'attachment sent and decrypted');
+  await alice.page.locator('.tray-item', { hasText: 'note.txt' }).waitFor();
+  await alice.page.getByRole('button', { name: 'Send', exact: true }).click();
+  await bob.page.locator('.file-card', { hasText: 'note.txt' }).waitFor({ timeout: 30000 });
+  const [dl] = await Promise.all([bob.page.waitForEvent('download', { timeout: 15000 }), bob.page.locator('.file-card', { hasText: 'note.txt' }).getByRole('button', { name: 'Download' }).click()]);
+  const dlPath = await dl.path();
+  check((await import('node:fs')).readFileSync(dlPath, 'utf8') === 'secret file contents', 'file attachment sent, decrypted and downloaded');
+
+  const PNG = await (async () => {
+    // A small gradient picture, built here so the test needs no fixture file.
+    const { deflateSync, crc32 } = await import('node:zlib');
+    const w = 240, h = 160, rows = [];
+    for (let y = 0; y < h; y++) { rows.push(0); for (let x = 0; x < w; x++) rows.push((x * 255 / w) | 0, (y * 255 / h) | 0, 200); }
+    const chunk = (t, d) => { const len = Buffer.alloc(4); len.writeUInt32BE(d.length); const td = Buffer.concat([Buffer.from(t), d]); const c = Buffer.alloc(4); c.writeUInt32BE(crc32(td) >>> 0); return Buffer.concat([len, td, c]); };
+    const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr.set([8, 2, 0, 0, 0], 8);
+    return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(Buffer.from(rows))), chunk('IEND', Buffer.alloc(0))]);
+  })();
+  await alice.page.locator('input[type=file]').setInputFiles({ name: 'photo.png', mimeType: 'image/png', buffer: PNG });
+  await alice.page.locator('.tray-item.pic img').waitFor();
+  await alice.page.locator('#composer').fill('look at this');
+  await alice.page.locator('#composer').press('Enter');
+  await alice.page.locator('.media.pending img').waitFor({ timeout: 5000 });
+  check(true, 'sent picture shows at once with an upload state');
+  await alice.page.locator('.msg.mine .media img[alt="photo.png"]').waitFor({ timeout: 30000 });
+  await bob.page.locator('.media img[alt="photo.png"]').waitFor({ timeout: 30000 });
+  const cap = await bob.page.locator('.attach', { has: bob.page.locator('img[alt="photo.png"]') }).locator('.attach-caption').innerText();
+  check(cap === 'look at this', 'received picture renders inline with its caption');
+  await bob.page.locator('.media', { has: bob.page.locator('img[alt="photo.png"]') }).click();
+  await bob.page.locator('.lightbox img').waitFor();
+  await bob.page.screenshot({ path: `${SHOTS}/lightbox-bob.png` });
+  await bob.page.keyboard.press('Escape');
+  await bob.page.locator('.lightbox').waitFor({ state: 'detached' });
+  await bob.page.screenshot({ path: `${SHOTS}/images-bob.png` });
+  await alice.page.screenshot({ path: `${SHOTS}/images-alice.png` });
+  check(true, 'picture opens full size and closes with Esc');
 
   // Group
   const carol = await person('carol');

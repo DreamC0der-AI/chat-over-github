@@ -58,6 +58,19 @@ export interface MsgRecord {
   reply?: string;
 }
 
+/** An outgoing message that isn't in the chat yet. A file has a local preview until it's sent. */
+export interface Sending {
+  id: string;
+  ts: number;
+  body?: string;
+  file?: File;
+  preview?: string;
+  caption?: string;
+  failed?: string;
+}
+
+export const MAX_FILE_BYTES = 10 * 1024 * 1024;
+
 export interface ChatRecord {
   groupId: string;
   invited: string[];
@@ -184,8 +197,10 @@ export class Session {
   /** The conversation on screen. */
   activeConvo?: string;
   lastPollError?: string;
-  /** Message ids being sent, per group, for the "sending…" bubble. */
-  sending = new Map<string, { id: string; body: string; ts: number }[]>();
+  /** Messages on their way out, per group, for the "sending…" bubble and the failed state. */
+  sending = new Map<string, Sending[]>();
+  /** Decrypted attachments this tab has opened or sent, by blob ref. Memory only, so no new plaintext lands on disk. */
+  private files = new Map<string, Promise<Blob>>();
 
   private version = 0;
   private listeners = new Set<() => void>();
@@ -1013,10 +1028,43 @@ export class Session {
     void this.syncGroup(g);
   }
 
-  async sendFile(g: Group, file: File) {
-    if (file.size > 10 * 1024 * 1024) throw new Error('Files up to 10 MB for now.');
-    const data = new Uint8Array(await file.arrayBuffer());
-    await g.sendAttachment(data, { name: file.name, mime: file.type || undefined });
+  /** Send files in order. Each shows at once with its local preview, and stays as "not sent" with Retry if it fails. The caption goes with the first. */
+  async sendFiles(g: Group, files: File[], caption?: string) {
+    const big = files.find((f) => f.size > MAX_FILE_BYTES);
+    if (big) throw new Error(`${big.name} is over ${MAX_FILE_BYTES / 1024 / 1024} MB.`);
+    const items: Sending[] = files.map((file, i) => ({ id: Math.random().toString(36).slice(2), ts: Date.now(), file, caption: i === 0 ? caption : undefined, preview: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined }));
+    this.sending.set(g.id, [...(this.sending.get(g.id) ?? []), ...items]);
+    this.bump();
+    for (const item of items) await this.upload(g, item);
+  }
+
+  async retrySend(g: Group, id: string) {
+    const item = this.sending.get(g.id)?.find((p) => p.id === id);
+    if (!item?.file) return;
+    item.failed = undefined;
+    this.bump();
+    await this.upload(g, item);
+  }
+
+  discardSend(groupId: string, id: string) {
+    const item = this.sending.get(groupId)?.find((p) => p.id === id);
+    if (item?.preview) URL.revokeObjectURL(item.preview);
+    this.sending.set(groupId, (this.sending.get(groupId) ?? []).filter((p) => p.id !== id));
+    this.bump();
+  }
+
+  private async upload(g: Group, item: Sending) {
+    const file = item.file!;
+    try {
+      const data = new Uint8Array(await file.arrayBuffer());
+      await g.sendAttachment(data, { name: file.name, mime: file.type || undefined, caption: item.caption });
+    } catch (e) {
+      await this.syncGroup(g).catch(() => undefined);
+      item.failed = !g.active ? 'This chat has ended' : describeError(e);
+      this.bump();
+      return;
+    }
+    this.discardSend(g.id, item.id);
     void this.syncGroup(g);
   }
 
@@ -1028,9 +1076,15 @@ export class Session {
     await g.send({ t: 'delete', ref });
   }
 
-  async fetchFile(g: Group, file: AttachmentRef): Promise<Blob> {
-    const data = await g.fetchAttachment(file);
-    return new Blob([data as Uint8Array<ArrayBuffer>], { type: file.mime || 'application/octet-stream' });
+  /** Download and decrypt an attachment once per tab; later views reuse it. */
+  fetchFile(g: Group, file: AttachmentRef): Promise<Blob> {
+    let p = this.files.get(file.ref);
+    if (!p) {
+      p = g.fetchAttachment(file).then((data) => new Blob([data as Uint8Array<ArrayBuffer>], { type: file.mime || 'application/octet-stream' }));
+      p.catch(() => this.files.delete(file.ref));
+      this.files.set(file.ref, p);
+    }
+    return p;
   }
 
   private async put(m: MsgRecord) {
@@ -1066,10 +1120,14 @@ export class Session {
         await this.put({ ...base, kind: 'text', body: msg.body, reply: msg.reply });
         await touch(msg.body);
         break;
-      case 'attachment':
+      case 'attachment': {
+        // Our own upload: keep the local copy so the picture shows without downloading it again.
+        const local = mine ? this.sending.get(g.id)?.find((p) => p.file && p.file.name === msg.file.name && p.file.size === msg.file.size) : undefined;
+        if (local?.file && !this.files.has(msg.file.ref)) this.files.set(msg.file.ref, Promise.resolve(local.file));
         await this.put({ ...base, kind: 'attachment', file: msg.file, caption: msg.caption });
-        await touch(`📎 ${msg.file.name ?? 'file'}`);
+        await touch(msg.caption || (msg.file.mime?.startsWith('image/') ? '📷 Photo' : `📎 ${msg.file.name ?? 'file'}`));
         break;
+      }
       case 'edit': {
         const cur = await this.db.get<MsgRecord>('messages', [g.id, msg.ref]);
         if (cur && cur.fromFp === m.from.fingerprint) await this.put({ ...cur, body: msg.body, edited: true });
