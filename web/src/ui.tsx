@@ -38,12 +38,16 @@ export function initials(name: string) {
   return ((parts[0]?.[0] ?? '?') + (parts[1]?.[0] ?? parts[0]?.[1] ?? '')).toUpperCase();
 }
 
+/** Logins whose avatar failed to load, so a remounted avatar goes straight to initials. */
+const failedAvatars = new Set<string>();
+
 export function Avatar({ name, login, square, size }: { name: string; login?: string; square?: boolean; size?: 'sm' | 'lg' | 'xl' }) {
   const [bg, fg] = tint(name);
-  const [failed, setFailed] = useState(false);
+  const [failedNow, setFailed] = useState(false);
+  const failed = failedNow || (!!login && failedAvatars.has(login));
   return (
     <span className={`avatar${square ? ' square' : ''}${size ? ' ' + size : ''}`} style={{ background: bg, color: fg }} aria-hidden="true">
-      {login && !failed ? <img src={`https://github.com/${encodeURIComponent(login)}.png?size=96`} alt="" onError={() => setFailed(true)} referrerPolicy="no-referrer" /> : initials(name)}
+      {login && !failed ? <img src={`https://github.com/${encodeURIComponent(login)}.png?size=96`} alt="" onError={() => { failedAvatars.add(login); setFailed(true); }} referrerPolicy="no-referrer" /> : initials(name)}
     </span>
   );
 }

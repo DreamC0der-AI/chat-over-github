@@ -29,6 +29,25 @@ function sameRun(a: Item | undefined, b: Item | undefined) {
 }
 
 type Item = { kind: 'msg'; m: MsgRecord; group?: Group } | { kind: 'divider'; id: string; text: string };
+type MsgItem = Extract<Item, { kind: 'msg' }>;
+type Run = { kind: 'run'; msgs: MsgItem[]; newDay: boolean } | Extract<Item, { kind: 'divider' }>;
+
+/** Groups consecutive messages into runs; a new day always starts a new run. */
+function runs(items: Item[]): Run[] {
+  const out: Run[] = [];
+  let prevMsg: MsgItem | undefined;
+  items.forEach((it, i) => {
+    if (it.kind === 'divider') {
+      out.push(it);
+      return;
+    }
+    const cur = out[out.length - 1];
+    if (cur?.kind === 'run' && sameRun(items[i - 1], it)) cur.msgs.push(it);
+    else out.push({ kind: 'run', msgs: [it], newDay: !prevMsg || dayKey(prevMsg.m.ts) !== dayKey(it.m.ts) });
+    prevMsg = it;
+  });
+  return out;
+}
 
 export function Conversation({ session, convo }: { session: Session; convo: Convo }) {
   const [items, setItems] = useState<Item[]>([]);
@@ -141,17 +160,24 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
         }}
       >
         <div className="messages-inner">
-          {items.map((it, i) => {
-            if (it.kind === 'divider') return <div key={it.id} className="sys divider">{it.text}</div>;
-            let prevMsg: Item | undefined;
-            for (let j = i - 1; j >= 0 && !prevMsg; j--) if (items[j]!.kind === 'msg') prevMsg = items[j];
-            const newDay = prevMsg?.kind !== 'msg' || dayKey(prevMsg.m.ts) !== dayKey(it.m.ts);
-            const first = !sameRun(items[i - 1], it);
-            const last = !sameRun(it, items[i + 1]);
+          {runs(items).map((run) => {
+            if (run.kind === 'divider') return <div key={run.id} className="sys divider">{run.text}</div>;
+            const head = run.msgs[0]!;
+            const who = loginFrom(head.m.from);
+            if (head.m.kind === 'system') return <Message key={`${head.m.groupId}/${head.m.id}`} m={head.m} session={session} group={head.group} showAuthor={false} />;
+            // A run is keyed by its first message, so when a new message joins it the
+            // run (and its one avatar) stays mounted instead of moving to a new element.
             return (
-              <Fragment key={`${it.m.groupId}/${it.m.id}`}>
-                {newDay && <div className="day-divider" role="separator"><span>{dayLabel(it.m.ts)}</span></div>}
-                <Message m={it.m} session={session} group={it.group} showAuthor={!dm} first={first} last={last} />
+              <Fragment key={`${head.m.groupId}/${head.m.id}`}>
+                {run.newDay && <div className="day-divider" role="separator"><span>{dayLabel(head.m.ts)}</span></div>}
+                <div className={`run${head.m.mine ? ' mine' : ''}`}>
+                  {!head.m.mine && <span className="msg-avatar"><Avatar name={who} login={who} size="sm" /></span>}
+                  <div className="run-msgs">
+                    {run.msgs.map((it, j) => (
+                      <Message key={it.m.id} m={it.m} session={session} group={it.group} showAuthor={!dm} first={j === 0} last={j === run.msgs.length - 1} />
+                    ))}
+                  </div>
+                </div>
               </Fragment>
             );
           })}
@@ -191,7 +217,6 @@ function Message({ m, session, group, showAuthor, first = true, last = true }: {
   const canAct = !m.deleted && !!group?.active;
   return (
     <div className={`msg${m.mine ? ' mine' : ''}${first ? '' : ' cont'}`}>
-      {!m.mine && last && <span className="msg-avatar"><Avatar name={who} login={who} size="sm" /></span>}
       {showAuthor && !m.mine && first && <span className="msg-author">{who}</span>}
       <div className="bubble-line">
         <div className={`bubble${m.deleted ? ' deleted' : ''}`} title={new Date(m.ts).toLocaleString()}>

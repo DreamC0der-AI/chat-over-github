@@ -85,6 +85,21 @@ try {
   check(true, 'bob received alice\'s reply');
   await alice.page.screenshot({ path: `${SHOTS}/dm-alice.png` });
 
+  // A message joining a run must not remount the avatar beside it (it used to flash).
+  const marked = await bob.page.evaluate(() => {
+    const els = document.querySelectorAll('.msg-avatar .avatar');
+    const el = els[els.length - 1];
+    if (el) el.dataset.e2eMark = '1';
+    return els.length;
+  });
+  await sendMsg(alice, 'one more in the same run');
+  await bubble(bob, 'one more in the same run').waitFor({ timeout: 30000 });
+  const kept = await bob.page.evaluate(() => {
+    const els = document.querySelectorAll('.msg-avatar .avatar');
+    return { n: els.length, sameEl: els[els.length - 1]?.dataset.e2eMark === '1' };
+  });
+  check(marked === 1 && kept.n === 1 && kept.sameEl, `avatar stays mounted when a message joins the run (${JSON.stringify({ marked, ...kept })})`);
+
   // Verify safety number match on both sides
   await menu(alice, 'Verify bob');
   const sa = await alice.page.locator('.safety').innerText();
