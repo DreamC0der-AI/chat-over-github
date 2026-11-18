@@ -1,0 +1,20 @@
+{
+  "name": "chat-over-github",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "provider",
+    "web"
+  ],
+  "scripts": {
+    "typecheck": "npm run typecheck -w provider && npm run typecheck -w web",
+    "test": "npm test -w provider && npm test --prefix worker",
+    "build": "npm run build -w web",
+    "e2e": "npm run e2e -w web"
+  },
+  "overrides": {
+    "ts-mls": {
+      "@noble/curves": "2.4.0"
+    }
+  }
+}

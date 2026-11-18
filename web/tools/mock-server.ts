@@ -8,7 +8,7 @@ import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
-import { MockGitHub } from '../../../tests/github-mock';
+import { MockGitHub } from '../../provider/tests/github-mock.ts';
 
 const port = Number(process.argv[2] ?? 8787);
 const root = join(process.cwd(), 'dist-mock');

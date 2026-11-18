@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { MemoryWorld, type StorageProvider } from '../src/storage/index.js';
-import { safetyNumber, PersonalData, backupRootKey, restoreRootKey, createRootKey, DirectoryWriter, IdentityRegistry, MemoryPinStore } from '../src/chat/index.js';
+import { MemoryWorld, type StorageProvider } from 'keyhold/storage';
+import { safetyNumber, PersonalData, backupRootKey, restoreRootKey, createRootKey, DirectoryWriter, IdentityRegistry, MemoryPinStore } from 'keyhold/chat';
 import { makeUser, addDevice, githubWorld, texts, type TestUserOptions } from './chat-helpers.js';
 
 type World = { name: string; session(u: string): StorageProvider; addr(u: string): string; raw: unknown };
@@ -336,7 +336,7 @@ describe('personal synced store (box 12) and root backup (box 9)', () => {
     await expect(restoreRootKey(p.vault, K, 'other-account')).rejects.toMatchObject({ code: 'decrypt_failed' });
     // the restored root can certify a new device in the directory
     const writer = new DirectoryWriter(p.directory, w.addr('alice'));
-    const { issueDeviceCertificate } = await import('../src/chat/index.js');
+    const { issueDeviceCertificate } = await import('keyhold/chat');
     await writer.publish(back, issueDeviceCertificate(back, new Uint8Array(32).fill(1), 'd1', w.addr('alice')));
     const reg = new IdentityRegistry(p.directory);
     const look = await reg.lookup(w.addr('alice'));

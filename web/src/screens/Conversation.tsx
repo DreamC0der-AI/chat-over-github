@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { Group } from '@keyhold/chat/index';
-import type { AttachmentRef } from '@keyhold/chat/messages';
+import type { Group } from 'keyhold/chat';
+import type { AttachmentRef } from 'keyhold/chat';
 import { describeError, loginFrom, type Convo, type MsgRecord, type PeerInfo, type Session } from '../lib/session';
 import { endedText } from './Home';
 import { ask, Avatar, ErrorFlash, go, Hint, Icon, timeLabel, toast, useAction } from '../ui';

@@ -1,12 +1,15 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-import { fileURLToPath } from 'node:url';
 
-export default defineConfig({
+// The production build goes straight into the Worker's static assets folder.
+export default defineConfig(({ mode }) => ({
   plugins: [react()],
-  resolve: { alias: { '@keyhold': fileURLToPath(new URL('../../src', import.meta.url)) } },
-  build: { target: 'es2022', sourcemap: false, chunkSizeWarningLimit: 2000 },
+  build: {
+    target: 'es2022',
+    sourcemap: false,
+    chunkSizeWarningLimit: 2000,
+    ...(mode === 'mock' ? {} : { outDir: '../worker/public', emptyOutDir: true }),
+  },
   esbuild: { target: 'es2022' },
   optimizeDeps: { esbuildOptions: { target: 'es2022' } },
-  server: { fs: { allow: ['../..'] } },
-});
+}));

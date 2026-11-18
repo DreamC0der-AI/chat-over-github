@@ -9,9 +9,9 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { execFile } from 'node:child_process';
-import { githubProvider, toAddress } from '../src/providers/github/index.js';
-import { memoryDevice, resolveFeatures } from '../src/storage/index.js';
-import { Chat, createRootKey, createDeviceIdentity, DirectoryWriter, IdentityRegistry, MemoryPinStore, newDeviceId } from '../src/chat/index.js';
+import { githubProvider, toAddress } from '../src/index.js';
+import { memoryDevice, resolveFeatures } from 'keyhold/storage';
+import { Chat, createRootKey, createDeviceIdentity, DirectoryWriter, IdentityRegistry, MemoryPinStore, newDeviceId } from 'keyhold/chat';
 
 const WORKER = process.env.KEYHOLD_WORKER ?? 'https://chat-over-github.akagishigerutokyo.workers.dev';
 const API = 'https://api.github.com';

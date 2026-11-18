@@ -225,7 +225,8 @@ try {
   // (her second browser joins the new room by itself, from the synced chat list; it can only
   // read what is sent after it joined)
   await openChat(alice2, 'bob');
-  await alice2.page.locator('#composer:enabled').waitFor({ timeout: 60000 });
+  // The new room is found by the repo scan, which runs once a minute, then joined: allow two minutes.
+  await alice2.page.locator('#composer:enabled').waitFor({ timeout: 120000 });
   await alice2.page.waitForTimeout(3000);
   await sendMsg(bob, 'for both browsers');
   await bubble(alice2, 'for both browsers').waitFor({ timeout: 60000 });

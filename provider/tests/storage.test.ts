@@ -9,7 +9,7 @@ import {
   NOT_STORED,
   MemoryWorld,
   type StorageProvider,
-} from '../src/storage/index.js';
+} from 'keyhold/storage';
 import { githubWorld } from './chat-helpers.js';
 
 // The agreed mapping from the design (group-encryption-design.md, sections 4 and 6).

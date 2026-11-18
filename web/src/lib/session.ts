@@ -2,10 +2,10 @@
  * One signed-in account in this browser: Keyhold chat over the GitHub provider, the local
  * stores, and a polling loop that keeps chats up to date without burning the rate limit.
  */
-import { githubProvider, toAddress, loginOf } from '@keyhold/providers/github/index';
-import type { FetchFn } from '@keyhold/providers/github/client';
-import { resolveFeatures } from '@keyhold/storage/features';
-import type { DeviceStorage, StorageProvider } from '@keyhold/storage/interfaces';
+import { githubProvider, toAddress, loginOf } from 'chat-over-github-provider';
+import type { FetchFn } from 'chat-over-github-provider';
+import { resolveFeatures } from 'keyhold/storage';
+import type { DeviceStorage, StorageProvider } from 'keyhold/storage';
 import {
   Chat,
   createDeviceIdentity,
@@ -29,11 +29,11 @@ import {
   type RootKey,
   type DeviceCertificate,
   type LookupResult,
-} from '@keyhold/chat/index';
-import type { AttachmentRef } from '@keyhold/chat/messages';
-import { sha256, toHex } from '@keyhold/util/bytes';
-import { generateRecoveryCode, parseRecoveryCode } from '@keyhold/keys/recovery';
-import { hkdfAesKey, hkdfBytes } from '@keyhold/util/hkdf';
+} from 'keyhold/chat';
+import type { AttachmentRef } from 'keyhold/chat';
+import { sha256, toHex } from 'keyhold/util';
+import { generateRecoveryCode, parseRecoveryCode } from 'keyhold/keys';
+import { hkdfAesKey, hkdfBytes } from 'keyhold/util';
 import { CONFIG, installUrl } from '../config';
 import { currentToken, type AuthState } from './auth';
 import { Db, IdbPinStore, idbDevice } from './idb';

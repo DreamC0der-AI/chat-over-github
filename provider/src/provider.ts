@@ -18,8 +18,7 @@
  * Everything written is ciphertext or signed public data. Repo names, descriptions and topics
  * are plaintext, so they are neutral and identical for every chat.
  */
-import { randomBytes, toHex } from '../../util/bytes.js';
-import { KeyholdError } from '../../util/errors.js';
+import { KeyholdError, randomBytes, toHex } from 'keyhold/util';
 import type {
   Address,
   Bytes,
@@ -32,7 +31,7 @@ import type {
   SpaceRef,
   StorageProvider,
   Versioned,
-} from '../../storage/interfaces.js';
+} from 'keyhold/storage';
 import { GitHubClient, type FetchFn } from './client.js';
 
 export interface GitHubProviderOptions {

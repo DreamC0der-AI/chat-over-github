@@ -1,5 +1,5 @@
-import { MemoryWorld, memoryDevice, resolveFeatures, type BuildOptions, type StorageProvider } from '../src/storage/index.js';
-import { Chat, createDeviceIdentity, createRootKey, DirectoryWriter, IdentityRegistry, MemoryPinStore, newDeviceId, type RotationPolicy } from '../src/chat/index.js';
+import { MemoryWorld, memoryDevice, resolveFeatures, type BuildOptions, type StorageProvider } from 'keyhold/storage';
+import { Chat, createDeviceIdentity, createRootKey, DirectoryWriter, IdentityRegistry, MemoryPinStore, newDeviceId, type RotationPolicy } from 'keyhold/chat';
 
 export interface TestUserOptions {
   build?: BuildOptions;
@@ -41,7 +41,7 @@ export const texts = (r: { messages: { message: { t: string; body?: string } }[]
   r.messages.filter((m) => m.message.t === 'text').map((m) => (m.message as { body: string }).body);
 
 import { MockGitHub } from './github-mock.js';
-import { githubProvider, toAddress } from '../src/providers/github/index.js';
+import { githubProvider, toAddress } from '../src/index.js';
 
 /** A GitHub "world": one mock GitHub, and a provider session per user. */
 export function githubWorld() {

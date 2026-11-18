@@ -4,10 +4,10 @@
  */
 import { describe, expect, it } from 'vitest';
 import * as mls from 'ts-mls';
-import { MemoryWorld } from '../src/storage/index.js';
-import { ciphersuite, recipientTag, encodeTicket, signTicket, type Group } from '../src/chat/index.js';
-import { b64, jsonBytes } from '../src/util/codec.js';
-import { sha256 } from '../src/util/bytes.js';
+import { MemoryWorld } from 'keyhold/storage';
+import { ciphersuite, recipientTag, encodeTicket, signTicket, type Group } from 'keyhold/chat';
+import { b64, jsonBytes } from 'keyhold/util';
+import { sha256 } from 'keyhold/util';
 import { makeUser, addDevice, githubWorld, texts } from './chat-helpers.js';
 
 const internals = (g: Group) => g as unknown as { state: mls.ClientState; meta: { logNext: number; lastHash: string; space: string; groupId: string } };
@@ -29,7 +29,7 @@ async function rogueCommit(g: Group, proposals: mls.Proposal[]) {
 }
 
 /** Commit an external join by hand (a modified client), carrying any ticket bytes. */
-async function rogueExternalJoin(u: { chat: import('../src/chat/index.js').Chat; provider: import('../src/storage/index.js').StorageProvider }, space: string, ticket: Uint8Array) {
+async function rogueExternalJoin(u: { chat: import('keyhold/chat').Chat; provider: import('keyhold/storage').StorageProvider }, space: string, ticket: Uint8Array) {
   const cs = await ciphersuite();
   const raw = await u.provider.orderedLog.read(space, 0);
   const last = JSON.parse(new TextDecoder().decode(raw[raw.length - 1]));
@@ -87,7 +87,7 @@ describe('malicious member (modified client)', () => {
   it('a commit from a member that changes the policy without being admin is rejected', async () => {
     const { g, gc } = await setupGroup();
     await gc.sync();
-    const { encodePolicy } = await import('../src/chat/policy.js');
+    const { encodePolicy } = await import('keyhold/chat');
     const st = internals(gc).state;
     const exts = st.groupContext.extensions.filter((e) => e.extensionType !== 0xf0a1);
     await rogueCommit(gc, [{ proposalType: 'group_context_extensions', groupContextExtensions: { extensions: [...exts, encodePolicy({ ...gc.policy, admins: [gc.chat.identity.fingerprint] })] } }]);
