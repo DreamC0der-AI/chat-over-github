@@ -1,10 +1,10 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Group } from 'keyhold/chat';
-import type { AttachmentRef } from 'keyhold/chat';
 import { describeError, loginFrom, type Convo, type MsgRecord, type PeerInfo, type Session } from '../lib/session';
 import { endedText } from './Home';
 import { ask, Avatar, ErrorFlash, go, Hint, Icon, timeLabel, toast, useAction } from '../ui';
 import { ChatMenu, CLOSE_ASK, deleteAsk, VerifyModal } from './ChatMenu';
+import { AttachmentView, DraftTray, isImage, Lightbox, PendingAttachment, toDrafts, type Draft, type Viewing } from './Attachments';
 
 const clock = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 const msgTime = (ts: number) => (timeLabel(ts) === clock(ts) ? clock(ts) : `${timeLabel(ts)} ${clock(ts)}`);
@@ -53,6 +53,8 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
   const [items, setItems] = useState<Item[]>([]);
   const [verify, setVerify] = useState<string>();
   const [peer, setPeer] = useState<PeerInfo>();
+  const [viewing, setViewing] = useState<Viewing>();
+  const innerRef = useRef<HTMLDivElement>(null);
   const v = session.getVersion();
   const dm = convo.dm;
   const live = convo.live;
@@ -98,6 +100,16 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
     const el = listRef.current;
     if (el && atBottom.current) el.scrollTop = el.scrollHeight;
   }, [items.length, live && session.sending.get(live.id)?.length]);
+
+  // Pictures load after the text: keep the newest message in view while they do.
+  useEffect(() => {
+    const el = listRef.current;
+    const inner = innerRef.current;
+    if (!el || !inner) return;
+    const ro = new ResizeObserver(() => { if (atBottom.current) el.scrollTop = el.scrollHeight; });
+    ro.observe(inner);
+    return () => ro.disconnect();
+  }, []);
 
   const liveRec = live ? session.records.get(live.id) : undefined;
   const pending = live ? session.pending(live) : [];
@@ -159,12 +171,12 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
           atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
         }}
       >
-        <div className="messages-inner">
+        <div className="messages-inner" ref={innerRef}>
           {runs(items).map((run) => {
             if (run.kind === 'divider') return <div key={run.id} className="sys divider">{run.text}</div>;
             const head = run.msgs[0]!;
             const who = loginFrom(head.m.from);
-            if (head.m.kind === 'system') return <Message key={`${head.m.groupId}/${head.m.id}`} m={head.m} session={session} group={head.group} showAuthor={false} />;
+            if (head.m.kind === 'system') return <Message key={`${head.m.groupId}/${head.m.id}`} m={head.m} session={session} group={head.group} showAuthor={false} onOpen={setViewing} />;
             // A run is keyed by its first message, so when a new message joins it the
             // run (and its one avatar) stays mounted instead of moving to a new element.
             return (
@@ -174,7 +186,7 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
                   {!head.m.mine && <span className="msg-avatar"><Avatar name={who} login={who} size="sm" /></span>}
                   <div className="run-msgs">
                     {run.msgs.map((it, j) => (
-                      <Message key={it.m.id} m={it.m} session={session} group={it.group} showAuthor={!dm} first={j === 0} last={j === run.msgs.length - 1} />
+                      <Message key={it.m.id} m={it.m} session={session} group={it.group} showAuthor={!dm} first={j === 0} last={j === run.msgs.length - 1} onOpen={setViewing} />
                     ))}
                   </div>
                 </div>
@@ -183,8 +195,18 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
           })}
           {sending.map((p) => (
             <div key={p.id} className="msg mine">
-              <div className="bubble-line"><div className="bubble pending">{p.body}</div></div>
-              <span className="msg-meta"><span className="spinner" style={{ width: 10, height: 10 }} /> Sending…</span>
+              <div className="bubble-line">
+                {p.file ? <div className={`bubble attachment${p.preview ? ' has-media' : ''}${p.caption ? ' has-caption' : ''}`}><PendingAttachment p={p} /></div> : <div className="bubble pending">{p.body}</div>}
+              </div>
+              {p.failed ? (
+                <span className="msg-meta failed" role="alert">
+                  {Icon.alert(12)} Not sent
+                  <button className="meta-btn" onClick={() => void session.retrySend(live!, p.id)}>Retry</button>
+                  <button className="meta-btn" onClick={() => session.discardSend(live!.id, p.id)}>Remove</button>
+                </span>
+              ) : (
+                <span className="msg-meta"><span className="spinner" style={{ width: 10, height: 10 }} /> {p.file ? 'Uploading…' : 'Sending…'}</span>
+              )}
             </div>
           ))}
           {live && !joined && !peerLeft && pending.length > 0 && (
@@ -197,6 +219,7 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
       ) : (
         <div className="composer ended">This chat has ended</div>
       )}
+      {viewing && <Lightbox v={viewing} onClose={() => setViewing(undefined)} />}
       {verify && <VerifyModal session={session} address={verify} onClose={() => setVerify(undefined)} />}
     </>
   );
@@ -209,18 +232,19 @@ function TrustBadge({ peer, onClick }: { peer: PeerInfo; onClick: () => void }) 
   return null;
 }
 
-function Message({ m, session, group, showAuthor, first = true, last = true }: { m: MsgRecord; session: Session; group?: Group; showAuthor: boolean; first?: boolean; last?: boolean }) {
+function Message({ m, session, group, showAuthor, first = true, last = true, onOpen }: { m: MsgRecord; session: Session; group?: Group; showAuthor: boolean; first?: boolean; last?: boolean; onOpen: (v: Viewing) => void }) {
   if (m.kind === 'system') return <div className="sys" title={m.body}>{(m.body ?? '').replace(/\. .*$/, '').replace(/\.$/, '')}</div>;
   const who = loginFrom(m.from);
   const reactions = Object.entries(m.reactions ?? {});
   const act = (fn: () => Promise<unknown>) => fn().catch((e) => toast(describeError(e)));
   const canAct = !m.deleted && !!group?.active;
+  const attach = !m.deleted && m.kind === 'attachment' && !!m.file;
   return (
     <div className={`msg${m.mine ? ' mine' : ''}${first ? '' : ' cont'}`}>
       {showAuthor && !m.mine && first && <span className="msg-author">{who}</span>}
       <div className="bubble-line">
-        <div className={`bubble${m.deleted ? ' deleted' : ''}`} title={new Date(m.ts).toLocaleString()}>
-          {m.deleted ? 'Message deleted' : m.kind === 'attachment' && m.file ? (group ? <FileView session={session} group={group} file={m.file} caption={m.caption} /> : <span className="muted">📎 {m.file.name ?? 'file'} (no longer available)</span>) : m.body}
+        <div className={`bubble${m.deleted ? ' deleted' : ''}${attach ? ` attachment${group && isImage(m.file!.mime) ? ' has-media' : ''}${m.caption ? ' has-caption' : ''}` : ''}`} title={new Date(m.ts).toLocaleString()}>
+          {m.deleted ? 'Message deleted' : attach ? (group ? <AttachmentView session={session} group={group} file={m.file!} caption={m.caption} onOpen={onOpen} /> : <span className="muted">📎 {m.file!.name ?? 'file'} (no longer available)</span>) : m.body}
         </div>
         {canAct && (
           <span className="msg-actions" role="toolbar" aria-label="Message actions">
@@ -250,45 +274,16 @@ function Message({ m, session, group, showAuthor, first = true, last = true }: {
   );
 }
 
-function FileView({ session, group, file, caption }: { session: Session; group: Group; file: AttachmentRef; caption?: string }) {
-  const [url, setUrl] = useState<string>();
-  const { busy, error, run } = useAction();
-  const isImage = file.mime?.startsWith('image/');
-  useEffect(() => () => { if (url) URL.revokeObjectURL(url); }, [url]);
-  const load = () => run(async () => {
-    const blob = await session.fetchFile(group, file);
-    const u = URL.createObjectURL(blob);
-    setUrl(u);
-    return u;
-  });
-  const size = file.size > 1024 * 1024 ? `${(file.size / 1024 / 1024).toFixed(1)} MB` : `${Math.ceil(file.size / 1024)} KB`;
-  return (
-    <div className="stack" style={{ gap: 6 }}>
-      {isImage && url ? (
-        <a href={url} download={file.name} target="_blank" rel="noreferrer"><img src={url} alt={file.name ?? 'image'} style={{ maxWidth: 280, maxHeight: 280, borderRadius: 6, display: 'block' }} /></a>
-      ) : (
-        <div className="file">
-          {Icon.clip()}
-          <span>{file.name ?? 'file'} <span className="muted small">{size}</span></span>
-          {url ? (
-            <a className="btn" href={url} download={file.name ?? 'file'}>Save</a>
-          ) : (
-            <button className="btn" disabled={busy} onClick={() => load()}>{busy ? <span className="spinner" /> : isImage ? 'Show' : 'Download'}</button>
-          )}
-        </div>
-      )}
-      {caption && <span>{caption}</span>}
-      {error && <span className="small" style={{ color: 'var(--danger)' }}>{error}</span>}
-    </div>
-  );
-}
-
 function Composer({ session, group, disabledReason, error }: { session: Session; group: Group; disabledReason?: string; error?: string }) {
   const draftKey = `kh.draft.${group.id}`;
   const [text, setText] = useState(() => sessionStorage.getItem(draftKey) ?? '');
-  const { busy, error: sendError, run } = useAction();
+  const [drafts, setDrafts] = useState<Draft[]>([]);
+  const [dragging, setDragging] = useState(false);
+  const { error: sendError, run } = useAction();
   const fileRef = useRef<HTMLInputElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const draftsRef = useRef(drafts);
+  draftsRef.current = drafts;
   useEffect(() => {
     sessionStorage.setItem(draftKey, text);
     const ta = taRef.current;
@@ -297,10 +292,57 @@ function Composer({ session, group, disabledReason, error }: { session: Session;
       ta.style.height = `${Math.min(ta.scrollHeight, 160)}px`;
     }
   }, [text]);
+  useEffect(() => () => draftsRef.current.forEach((d) => d.url && URL.revokeObjectURL(d.url)), []);
+  const add = (files: File[]) => {
+    if (disabledReason || !files.length) return;
+    const next = toDrafts(files, (f) => toast(`${f.name} is too big to send.`));
+    if (next.length) setDrafts((d) => [...d, ...next].slice(0, 10));
+    taRef.current?.focus();
+  };
+  const remove = (id: string) => setDrafts((ds) => {
+    const d = ds.find((x) => x.id === id);
+    if (d?.url) URL.revokeObjectURL(d.url);
+    return ds.filter((x) => x.id !== id);
+  });
+
+  // Drop files anywhere on the page to attach them.
+  useEffect(() => {
+    if (disabledReason) return;
+    let depth = 0;
+    const hasFiles = (e: DragEvent) => !!e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files');
+    const enter = (e: DragEvent) => { if (hasFiles(e)) { depth++; setDragging(true); } };
+    const leave = (e: DragEvent) => { if (hasFiles(e) && --depth <= 0) { depth = 0; setDragging(false); } };
+    const over = (e: DragEvent) => { if (hasFiles(e)) e.preventDefault(); };
+    const drop = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth = 0;
+      setDragging(false);
+      add(Array.from(e.dataTransfer!.files));
+    };
+    window.addEventListener('dragenter', enter);
+    window.addEventListener('dragleave', leave);
+    window.addEventListener('dragover', over);
+    window.addEventListener('drop', drop);
+    return () => {
+      window.removeEventListener('dragenter', enter);
+      window.removeEventListener('dragleave', leave);
+      window.removeEventListener('dragover', over);
+      window.removeEventListener('drop', drop);
+    };
+  }, [disabledReason]);
+
   const send = () => {
     const body = text.trim();
-    if (!body || disabledReason) return;
+    if (disabledReason || (!body && !drafts.length)) return;
     setText('');
+    if (drafts.length) {
+      const files = drafts.map((d) => d.file);
+      drafts.forEach((d) => d.url && URL.revokeObjectURL(d.url));
+      setDrafts([]);
+      void run(() => session.sendFiles(group, files, body || undefined));
+      return;
+    }
     void run(async () => {
       try {
         await session.send(group, body);
@@ -310,34 +352,46 @@ function Composer({ session, group, disabledReason, error }: { session: Session;
       }
     });
   };
+  const canSend = !disabledReason && (!!text.trim() || drafts.length > 0);
   return (
     <div className="composer">
       {(sendError || error) && <ErrorFlash error={sendError ?? `Sync problem: ${error}`} />}
-      <div className="composer-row">
-        <button className="btn icon ghost" aria-label="Attach file" title="Attach file" disabled={!!disabledReason || busy} onClick={() => fileRef.current?.click()}>{Icon.clip()}</button>
-        <input ref={fileRef} type="file" hidden onChange={(e) => {
-          const f = e.target.files?.[0];
-          e.target.value = '';
-          if (f) void run(() => session.sendFile(group, f));
-        }} />
-        <label htmlFor="composer" className="sr">Message</label>
-        <textarea
-          id="composer"
-          ref={taRef}
-          rows={1}
-          value={text}
-          placeholder={disabledReason ?? `Message ${session.title(group)}`}
-          disabled={!!disabledReason}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-              e.preventDefault();
-              send();
-            }
-          }}
-        />
-        <button className="send" onClick={send} disabled={!!disabledReason || !text.trim()} aria-label="Send" title="Send (Enter). Shift+Enter for a new line.">{Icon.send()}</button>
+      <div className={`composer-box${drafts.length ? ' with-tray' : ''}`}>
+        {drafts.length > 0 && <DraftTray drafts={drafts} onRemove={remove} />}
+        <div className="composer-row">
+          <button className="btn icon ghost" aria-label="Attach files" title="Attach files" disabled={!!disabledReason} onClick={() => fileRef.current?.click()}>{Icon.clip()}</button>
+          <input ref={fileRef} type="file" multiple hidden onChange={(e) => {
+            const fs = Array.from(e.target.files ?? []);
+            e.target.value = '';
+            add(fs);
+          }} />
+          <label htmlFor="composer" className="sr">Message</label>
+          <textarea
+            id="composer"
+            ref={taRef}
+            rows={1}
+            value={text}
+            placeholder={disabledReason ?? (drafts.length ? 'Add a caption' : `Message ${session.title(group)}`)}
+            disabled={!!disabledReason}
+            onChange={(e) => setText(e.target.value)}
+            onPaste={(e) => {
+              const fs = Array.from(e.clipboardData.files);
+              if (fs.length) {
+                e.preventDefault();
+                add(fs);
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                send();
+              }
+            }}
+          />
+          <button className="send" onClick={send} disabled={!canSend} aria-label="Send" title="Send (Enter). Shift+Enter for a new line.">{Icon.send()}</button>
+        </div>
       </div>
+      {dragging && <div className="drop-zone" aria-hidden="true"><span>{Icon.image(28)} Drop to attach</span></div>}
     </div>
   );
 }
