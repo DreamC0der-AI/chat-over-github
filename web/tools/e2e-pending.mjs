@@ -73,6 +73,7 @@ try {
   await msg(alice, 'Good morning').locator('.reaction').waitFor({ timeout: 30000 });
   await alice.page.waitForTimeout(6000);
   check((await msg(alice, 'Good morning').locator('.reaction').count()) === 1, "the other person's reaction stays with a second tab open");
+  await tab2.screenshot({ path: `${SHOTS}/one-tab.png` });
   await tab2.close();
 
   // Sending a text: the bubble shows at once, faded, with "Sending…".
