@@ -95,7 +95,7 @@ export function Settings({ session, route }: { session: Session; route: string }
                   <div className="box-row"><div className="fingerprint mono">{fp.match(/.{1,8}/g)?.join(' ')}</div></div>
                 </section>
                 <section className="box">
-                  <div className="box-header"><h3>Blocked</h3><Hint text="Invitations from blocked people are turned down without asking you. Block someone from a chat's … menu." /></div>
+                  <div className="box-header"><h3>Blocked</h3><Hint text="Invitations from blocked people are turned down without asking you. Block someone in Contacts or from a chat's … menu." /></div>
                   {session.blocked.size === 0 ? (
                     <div className="box-row muted">No one</div>
                   ) : (
@@ -247,7 +247,7 @@ function SyncBox({ session }: { session: Session }) {
     <section className="box">
       <div className="box-header">
         <h3>Sync across browsers</h3>
-        <Hint text={<>Your chat list, deleted and closed chats, read marks, blocks and declined invitations are kept, encrypted, in <span className="mono">{session.login}/{session.homeRepo}</span>. Your other browsers apply them within about a minute.</>} />
+        <Hint text={<>Your chat list, contacts and their verified keys, deleted and closed chats, read marks, blocks and declined invitations are kept, encrypted, in <span className="mono">{session.login}/{session.homeRepo}</span>. Your other browsers apply them within about a minute.</>} />
         <span className="spacer" />
         {session.syncOn ? <span className="label green">On</span> : <span className="label">Off</span>}
       </div>

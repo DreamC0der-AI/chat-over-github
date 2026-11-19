@@ -118,18 +118,29 @@ try {
   check(marked === 1 && kept.n === 1 && kept.sameEl, `avatar stays mounted when a message joins the run (${JSON.stringify({ marked, ...kept })})`);
 
   // Verify safety number match on both sides
-  await menu(alice, 'Verify bob');
+  await menu(alice, 'Safety number');
   const sa = await alice.page.locator('.safety').innerText();
-  // The header offers verify too, before a chat is verified (a new browser has no marks yet).
-  await bob.page.locator('.convo-head').getByRole('button', { name: 'Not verified' }).click();
+  // Verifying lives in Contacts: the chat header shows no shield until a chat is verified.
+  check(!(await bob.page.locator('.convo-head .trust').count()), 'unverified chat shows no shield in the header');
+  await bob.page.getByRole('link', { name: 'Contacts' }).click();
+  await bob.page.locator('.contact-item', { hasText: 'alice' }).click();
   const sb = await bob.page.locator('.safety').innerText();
   check(sa === sb && sa.length > 50, 'safety numbers match');
   await alice.page.getByRole('button', { name: /mark as verified/ }).click();
   await closeDialog(alice);
   await closeDialog(bob);
   await alice.page.locator('.convo-head').getByRole('button', { name: 'Verified', exact: true }).waitFor();
-  check(await bob.page.locator('.convo-head').getByRole('button', { name: 'Not verified' }).isVisible(), 'unverified chat shows a verify button in the header');
   check(true, 'marked verified');
+  await bob.page.locator('.chat-item', { hasText: 'alice' }).click();
+  await alice.page.getByRole('link', { name: 'Contacts' }).click();
+  await alice.page.locator('.contact-item', { hasText: 'bob' }).locator('.trust.ok').waitFor();
+  check(true, 'Contacts shows bob as verified');
+  await alice.page.screenshot({ path: `${SHOTS}/contacts.png` });
+  await alice.page.locator('.contact-item', { hasText: 'bob' }).click();
+  await alice.page.locator('.verified-note').waitFor();
+  await alice.page.screenshot({ path: `${SHOTS}/contact.png` });
+  await closeDialog(alice);
+  await alice.page.locator('.chat-item', { hasText: 'bob' }).click();
 
   // attachments: a file card, then a picture shown inline with an upload state
   await alice.page.locator('input[type=file]').setInputFiles({ name: 'note.txt', mimeType: 'text/plain', buffer: Buffer.from('secret file contents') });
@@ -171,6 +182,7 @@ try {
   // Group
   const carol = await person('carol');
   await setup(carol);
+  await alice.page.getByRole('link', { name: 'Contacts' }).click();
   await alice.page.getByRole('button', { name: 'New group' }).click();
   await alice.page.getByLabel('Group name').fill('Weekend hikers');
   await alice.page.getByLabel('Invite people').fill('bob, carol');
@@ -213,6 +225,9 @@ try {
   await alice2.page.locator('.chat-item', { hasText: 'bob' }).click();
   await alice2.page.locator('.sys.divider', { hasText: 'Earlier messages aren’t on this browser' }).waitFor({ timeout: 10000 });
   check(true, 'second device says earlier messages are elsewhere');
+  // The verified mark from alice's first browser came with sync: no new first contact here.
+  await alice2.page.locator('.convo-head').getByRole('button', { name: 'Verified', exact: true }).waitFor({ timeout: 30000 });
+  check(true, 'second device shows the verified mark from the first');
   await bob.page.locator('.chat-item', { hasText: 'alice' }).click();
   await sendMsg(bob, 'message for both alice devices');
   await bubble(alice2, 'message for both alice devices').waitFor({ timeout: 45000 });
