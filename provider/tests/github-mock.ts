@@ -57,6 +57,8 @@ export class MockGitHub {
   private git: GitObjects = { blobs: new Map(), trees: new Map(), commits: new Map() };
   /** Test hook: moves the head right before the next ref update, as another writer would. */
   raceNextRefUpdate = 0;
+  /** Test hook: the Git Data API answers 500 (as an unexpected outage would). */
+  gitDataDown = false;
   readonly api = 'https://api.github.test';
   readonly worker = 'https://worker.test';
 
@@ -213,6 +215,7 @@ export class MockGitHub {
       return resp(200, { sha: `c-${r.owner}/${r.name}@${r.head}`, commit: { tree: { sha: `t-${r.owner}/${r.name}@${r.head}` } } });
     }
     if (rest.startsWith('git/') && method !== 'GET' && !this.canWrite(r, user)) return resp(r.private ? 404 : 403, { message: 'no write access' });
+    if (this.gitDataDown && rest.startsWith('git/') && method !== 'GET') return resp(500, { message: 'mock: down' });
     if (rest === 'git/blobs' && method === 'POST') {
       if (body.encoding !== 'base64') return resp(422, { message: 'mock: base64 only' });
       const content = Buffer.from(body.content, 'base64');

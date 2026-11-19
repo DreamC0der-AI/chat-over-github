@@ -260,6 +260,12 @@ describe('github: a burst of mail', () => {
     w.gh.raceNextRefUpdate = 1;
     const more = await a.mailbox.postMany!(s, [bytes('4'), bytes('5')]);
     expect((await a.mailbox.list(s, l1.cursor)).items.map((i) => [i.id, str(i.data)])).toEqual([[more[0], '4'], [more[1], '5']]);
+    // If the Git Data API fails for another reason, the batch still goes out, one file each.
+    w.gh.gitDataDown = true;
+    const l2 = await a.mailbox.list(s);
+    const slow = await a.mailbox.postMany!(s, [bytes('6'), bytes('7')]);
+    expect((await a.mailbox.list(s, l2.cursor)).items.map((i) => [i.id, str(i.data)])).toEqual([[slow[0], '6'], [slow[1], '7']]);
+    w.gh.gitDataDown = false;
     // Someone without access can't post a batch either.
     const b = w.session('bob');
     await expect(b.mailbox.postMany!(s, [bytes('x'), bytes('y')])).rejects.toMatchObject({ code: 'forbidden' });
