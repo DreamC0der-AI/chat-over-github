@@ -54,7 +54,7 @@ export function Install({ session }: { session: Session }) {
         </div>
         <div className="box-row stack">
           <div className="row" style={{ justifyContent: 'space-between' }}>
-            <span><strong>1. Create a private repo named <code>{home}</code></strong> <Hint text={'Keyhold Chat only gets access to repos you pick, and GitHub makes you pick at least one. The name and "Private" are filled in for you, so just press Create repository. The app keeps your encrypted settings and key backup there.'} /></span>
+            <span><strong>1. Create a private repo named <code>{home}</code></strong> <Hint text={'Chat over GitHub only gets access to repos you pick, and GitHub makes you pick at least one. The name and "Private" are filled in for you, so just press Create repository. The app keeps your encrypted settings and key backup there.'} /></span>
             {created && <span className="label green">Done</span>}
           </div>
           <div className="row">

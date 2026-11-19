@@ -31,7 +31,7 @@ export function SignIn({ onSignedIn, initialError }: { onSignedIn: (a: AuthState
       <div className="narrow">
         <div className="center stack" style={{ alignItems: 'center', gap: 16, marginTop: 24 }}>
           <span className="logo big">{Icon.logo()}</span>
-          <h1>Keyhold Chat</h1>
+          <h1>Chat over GitHub</h1>
         </div>
         <div className="box">
           <div className="box-body stack">
