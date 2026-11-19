@@ -107,6 +107,11 @@ export interface ChatRecord {
   peerLeft?: boolean;
   /** Ended and deleted: nothing of it is shown or kept, only this tombstone. */
   purged?: boolean;
+  /**
+   * This browser only (not synced): when this browser joined a chat the account was already in,
+   * so earlier messages, which stay in each browser, aren't here.
+   */
+  joinedAt?: number;
 }
 
 /** What the chat list shows: a DM is one entry per person, whatever rooms it went through. */
@@ -149,6 +154,11 @@ export interface PendingInvite {
   attempts: number;
   nextTry: number;
   dismissed?: boolean;
+  /**
+   * The account is already in this chat (another of our browsers made or joined it): this browser
+   * is only catching up, nobody invited us.
+   */
+  mine?: boolean;
 }
 
 export interface PeerInfo {
@@ -1352,7 +1362,8 @@ export class Session {
         // another of our devices made the chat. Anything else was accepted outside this app
         // (on github.com), so it still waits for Accept here.
         // Also a chat another of our browsers already joined (from the synced chat list).
-        let accepted = owner === this.login.toLowerCase() || [...this.records.values()].some((r) => r.space === space && !r.ended && !r.purged);
+        const mine = owner === this.login.toLowerCase() || [...this.records.values()].some((r) => r.space === space && !r.ended && !r.purged);
+        let accepted = mine;
         for (const [k, v] of this.invites) {
           if (k.startsWith('notice:') && v.status !== 'invited' && v.from === from) {
             this.invites.delete(k);
@@ -1360,7 +1371,7 @@ export class Session {
             break;
           }
         }
-        this.invites.set(space, { key: space, space, from, status: accepted ? 'joining' : 'invited', since: now, attempts: 0, nextTry: 0 });
+        this.invites.set(space, { key: space, space, from, status: accepted ? 'joining' : 'invited', since: now, attempts: 0, nextTry: 0, mine });
       }
       // Accepted notices whose repo never showed up go away after a few minutes.
       for (const [k, v] of this.invites) if (k.startsWith('notice:') && v.status !== 'invited' && now - v.since > 5 * 60_000) this.invites.delete(k);
@@ -1379,7 +1390,12 @@ export class Session {
         const g = await chat.join(inv.space);
         if (g) {
           this.invites.delete(inv.key);
-          this.fill(g);
+          const r = this.fill(g);
+          // Catching up on a chat the account was already in: its history stays in the other browsers.
+          if (inv.mine && !r.joinedAt && r.createdAt < Date.now() - 60_000) {
+            r.joinedAt = Date.now();
+            await this.saveRecord(r);
+          }
           await this.syncGroup(g);
           continue;
         }
@@ -1451,6 +1467,11 @@ export class Session {
     }
     this.invites.delete(key);
     this.bump();
+  }
+
+  /** What this browser knows of a chat by its repo, e.g. from another browser's synced chat list. */
+  chatBySpace(space: string): ChatRecord | undefined {
+    return [...this.records.values()].find((r) => r.space === space && !r.purged);
   }
 
   /** Invitations that haven't turned into a chat yet, for the sidebar. */
