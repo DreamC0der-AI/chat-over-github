@@ -20,18 +20,13 @@ export const go = (path: string) => {
   location.hash = path;
 };
 
-const TINTS = [
-  ['#dafbe1', '#116329'],
-  ['#fff1e5', '#953800'],
-  ['#fbefff', '#6e40c9'],
-  ['#ddf4ff', '#0550ae'],
-  ['#fff8c5', '#7d4e00'],
-  ['#ffebe9', '#a40e26'],
-];
+/** Six avatar tints; the colours for each theme are --t0..--t5 in styles.css. */
+const TINTS = 6;
 function tint(key: string) {
   let h = 0;
   for (const c of key) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  return TINTS[h % TINTS.length]!;
+  const i = h % TINTS;
+  return [`var(--t${i}-bg)`, `var(--t${i}-fg)`] as const;
 }
 export function initials(name: string) {
   const parts = name.replace(/^@/, '').split(/[\s_-]+/).filter(Boolean);
@@ -114,6 +109,27 @@ export const Icon = {
   ),
   image: (s = 20) => (
     <svg width={s} height={s} viewBox="0 0 24 24" {...P} aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5" /><circle cx="9" cy="10" r="1.8" /><path d="m21 16-5-5-9 9" /></svg>
+  ),
+  palette: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" {...P} aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor" /></svg>
+  ),
+  devices: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" {...P} aria-hidden="true"><rect x="2" y="4" width="15" height="11" rx="2" /><path d="M6 19h7M9.5 15v4" /><rect x="16" y="9" width="6" height="11" rx="1.5" /></svg>
+  ),
+  privacy: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" {...P} aria-hidden="true"><path d="M12 3 4 6v6c0 5 3.4 8.3 8 9 4.6-.7 8-4 8-9V6z" /><path d="m9 12 2 2 4-4" /></svg>
+  ),
+  storage: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" {...P} aria-hidden="true"><ellipse cx="12" cy="5.5" rx="8" ry="2.5" /><path d="M4 5.5v13c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5v-13M4 12c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5" /></svg>
+  ),
+  person: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" {...P} aria-hidden="true"><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></svg>
+  ),
+  chevron: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" {...P} aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
+  ),
+  check: (s = 16) => (
+    <svg width={s} height={s} viewBox="0 0 24 24" {...P} strokeWidth={2.6} aria-hidden="true"><path d="M5 12.5 10 17l9-10" /></svg>
   ),
   gear: () => (
     <svg width="16" height="16" viewBox="0 0 24 24" {...P} aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" /></svg>

@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { clampSide, saveSideWidth, SIDE_DEFAULT, SIDE_MAX, SIDE_MIN, sideWidth } from '../lib/prefs';
 import { loginFrom, type Convo, type PendingInvite, type Session } from '../lib/session';
 import { Avatar, ErrorFlash, go, Hint, Icon, Modal, timeLabel, useAction, useSession } from '../ui';
 import { ChatMenu } from './ChatMenu';
@@ -10,6 +11,12 @@ export function Home({ session, route }: { session: Session; route: string }) {
   const convo = chatId ? session.convo(chatId) : undefined;
   const [modal, setModal] = useState<'dm' | 'group'>();
   const [q, setQ] = useState('');
+  const [sideW, setSideW] = useState(() => clampSide(sideWidth()));
+  useEffect(() => {
+    const fit = () => setSideW(clampSide(sideWidth()));
+    addEventListener('resize', fit);
+    return () => removeEventListener('resize', fit);
+  }, []);
 
   useEffect(() => {
     session.setActive(convo?.key);
@@ -29,7 +36,7 @@ export function Home({ session, route }: { session: Session; route: string }) {
 
   return (
     <div className="app">
-      <div className={`main${convo ? ' has-chat' : ''}`}>
+      <div className={`main${convo ? ' has-chat' : ''}`} style={{ '--side-w': `${sideW}px` } as CSSProperties}>
         <nav className="sidebar" aria-label="Chats">
           <div className="sidebar-head">
             <h1 className="side-title">Chats</h1>
@@ -52,6 +59,7 @@ export function Home({ session, route }: { session: Session; route: string }) {
             )}
           </ul>
           <Me session={session} />
+          <SideResizer width={sideW} onChange={setSideW} />
         </nav>
         <main className="content">
           {convo ? (
@@ -69,6 +77,63 @@ export function Home({ session, route }: { session: Session; route: string }) {
       {modal === 'dm' && <NewDm session={session} onClose={() => setModal(undefined)} onGroup={() => setModal('group')} />}
       {modal === 'group' && <NewGroup session={session} onClose={() => setModal(undefined)} />}
     </div>
+  );
+}
+
+/** The chat list's right edge: drag to resize, double-click to reset, arrow keys when focused. */
+function SideResizer({ width, onChange }: { width: number; onChange: (w: number) => void }) {
+  const drag = useRef<{ x: number; w: number }>();
+  const [dragging, setDragging] = useState(false);
+  const set = (w: number) => {
+    const c = clampSide(w);
+    onChange(c);
+    saveSideWidth(c);
+  };
+  return (
+    <div
+      className={`side-resizer${dragging ? ' dragging' : ''}`}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize chat list"
+      aria-valuemin={SIDE_MIN}
+      aria-valuemax={SIDE_MAX}
+      aria-valuenow={width}
+      tabIndex={0}
+      title="Drag to resize. Double-click to reset."
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.currentTarget.setPointerCapture(e.pointerId);
+        drag.current = { x: e.clientX, w: width };
+        setDragging(true);
+        document.body.classList.add('resizing');
+      }}
+      onPointerMove={(e) => {
+        if (drag.current) onChange(clampSide(drag.current.w + e.clientX - drag.current.x));
+      }}
+      onPointerUp={(e) => {
+        if (!drag.current) return;
+        set(drag.current.w + e.clientX - drag.current.x);
+        drag.current = undefined;
+        setDragging(false);
+        document.body.classList.remove('resizing');
+      }}
+      onLostPointerCapture={() => {
+        drag.current = undefined;
+        setDragging(false);
+        document.body.classList.remove('resizing');
+      }}
+      onDoubleClick={() => set(SIDE_DEFAULT)}
+      onKeyDown={(e) => {
+        const step = e.shiftKey ? 48 : 16;
+        if (e.key === 'ArrowLeft') set(width - step);
+        else if (e.key === 'ArrowRight') set(width + step);
+        else if (e.key === 'Home') set(SIDE_MIN);
+        else if (e.key === 'End') set(SIDE_MAX);
+        else return;
+        e.preventDefault();
+      }}
+    />
   );
 }
 
@@ -182,7 +247,7 @@ function Me({ session }: { session: Session }) {
         <Avatar name={session.login} login={session.login} />
         <span className="me-name">{session.login}</span>
       </a>
-      {!session.syncOn && <a href="#/settings" className="small">Turn on sync</a>}
+      {!session.syncOn && <a href="#/settings/devices" className="small">Turn on sync</a>}
       <Hint className={`sync-dot${err ? ' warn' : ''}`} label={err ? 'Sync problem' : 'Up to date'} text={status}><span /></Hint>
       <a href="#/settings" className="btn icon ghost" aria-label="Settings" title="Settings">{Icon.gear()}</a>
     </div>

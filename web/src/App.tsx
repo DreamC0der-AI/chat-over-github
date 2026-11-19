@@ -78,7 +78,7 @@ function Signed({ auth, onSignOut }: { auth: AuthState; onSignOut: () => void })
     case 'restore':
       return <Restore session={session} />;
     case 'ready':
-      return route === '/settings' ? <Settings session={session} /> : <Home session={session} route={route} />;
+      return route === '/settings' || route.startsWith('/settings/') ? <Settings session={session} route={route} /> : <Home session={session} route={route} />;
   }
 }
 
