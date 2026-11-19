@@ -22,7 +22,7 @@ This is an app built on [keyhold](https://github.com/DreamC0der-AI/keyhold), the
 ```
 npm install        # builds keyhold from GitHub on install
 npm run typecheck
-npm test           # provider tests (vitest) and Worker tests (node --test)
+npm test           # provider tests, app scenarios (vitest) and Worker tests (node --test)
 npm run build      # web app -> worker/public
 npm run e2e        # browser checks against an in-memory GitHub and Worker (needs Playwright)
 npm run test:changed   # only the tests your changes need (see below)
@@ -34,7 +34,13 @@ cd worker && npx wrangler deploy
 
 `npm run test:changed` looks at the files changed since `origin/main` and runs what they need. The rules are at the top of `scripts/test.mjs`: a screen-only change (`web/src/screens/`, `ui.tsx`, `styles.css`, `web/public/`, `index.html`) runs the type check, the build and the three screen checks (menu, layout, pending), not the multi-person flow; a Worker change runs the Worker tests; docs run nothing; app logic, the provider, packages and anything unrecognised run everything. Pull requests on GitHub run the same selection; pushes to `main` run everything.
 
-The browser checks (`web/tools/e2e*.mjs`) run at the same time, each on its own port with its own mock backend; `npm run e2e -- flow menu` runs a subset. They never wait on the app's real timers: the mock build runs the same sync schedule ten times faster, and `window.__chat.syncNow()` runs a full sync step at once. A check that something does *not* happen runs a few sync rounds, then looks. Wait for results (`waitFor`), not for time.
+There are three kinds of tests:
+
+- **Provider tests** (`provider/tests`): the GitHub storage provider and keyhold against a fake GitHub.
+- **App scenarios** (`web/tests`, a few seconds): the chat rules, such as invitations, joining, sending, reactions, Delete/Close/Quit/Block, groups, and a second browser catching up. They run the app's own logic (`web/src/lib/session.ts`) for several people and browsers in one process, against the in-memory GitHub and Worker (`web/tools/mock-backend.ts`), with no browser. No timer runs: each browser's sync step runs only when the scenario says (`w.until(...)`, `w.rounds()`), so a scenario gives the same result on any machine. New chat behaviour gets a scenario here first.
+- **Browser checks** (`web/tools/e2e*.mjs`, about 25 s): that the screens are wired to that logic, such as buttons, dialogs, menus and what shows where.
+
+The browser checks run at the same time, each on its own port with its own mock backend; `npm run e2e -- flow menu` runs a subset. They never wait on the app's real timers: the mock build runs the same sync schedule ten times faster, and `window.__chat.syncNow()` runs a full sync step at once. A check that something does *not* happen runs a few sync rounds, then looks. Wait for results (`waitFor`), not for time.
 
 On the Mac, use node@24 (`PATH=/opt/homebrew/opt/node@24/bin:$PATH`).
 

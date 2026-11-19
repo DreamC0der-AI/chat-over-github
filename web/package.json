@@ -9,20 +9,23 @@
     "build:mock": "vite build --mode mock --outDir dist-mock",
     "mock-server": "node --experimental-strip-types tools/mock-server.ts",
     "e2e": "npm run build:mock && esbuild tools/mock-server.ts --bundle --platform=node --format=esm --outfile=tools/mock-server.mjs && node tools/e2e-run.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
-    "react": "18.3.1",
-    "react-dom": "18.3.1",
+    "chat-over-github-provider": "0.1.0",
     "keyhold": "github:DreamC0der-AI/keyhold#e40c2b7b1de263872a1bf9344245e6815d6c953b",
-    "chat-over-github-provider": "0.1.0"
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
   },
   "devDependencies": {
     "@types/react": "18.3.12",
     "@types/react-dom": "18.3.1",
     "@vitejs/plugin-react": "4.3.4",
+    "esbuild": "^0.25.0",
+    "fake-indexeddb": "^6.2.8",
     "typescript": "5.9.3",
     "vite": "5.4.11",
-    "esbuild": "^0.25.0"
+    "vitest": "^3.2.7"
   }
 }
