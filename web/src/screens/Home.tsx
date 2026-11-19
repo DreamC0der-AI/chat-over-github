@@ -19,7 +19,7 @@ export function Home({ session, route }: { session: Session; route: string }) {
   const convos = session.conversations();
   const unread = convos.reduce((n, c) => n + c.unread, 0);
   useEffect(() => {
-    document.title = unread ? `(${unread}) Keyhold Chat` : 'Keyhold Chat';
+    document.title = unread ? `(${unread}) Chat over GitHub` : 'Chat over GitHub';
   }, [unread]);
 
   const shown = useMemo(
@@ -141,7 +141,7 @@ function InviteRow({ session, inv }: { session: Session; inv: PendingInvite }) {
     : 'Could not join yet';
   const why =
     inv.status === 'invited' ? 'Accept opens the chat. Decline also turns the invitation down on GitHub.'
-    : inv.status === 'waiting' ? `${from}'s app has to confirm your identity. That happens as soon as they have Keyhold Chat open.`
+    : inv.status === 'waiting' ? `${from}'s app has to confirm your identity. That happens as soon as they have Chat over GitHub open.`
     : undefined;
   return (
     <div className="row invite-row">
@@ -207,7 +207,7 @@ function NewDm({ session, onClose, onGroup }: { session: Session; onClose: () =>
         }}
       >
         <div className="field">
-          <span className="field-label"><label htmlFor="dm-login">GitHub username</label><Hint text="They get a GitHub repo invitation, and the chat opens when they accept it here. Not on Keyhold Chat yet? Send them this page's address. Starting a chat creates a private repo with a random name on your account." /></span>
+          <span className="field-label"><label htmlFor="dm-login">GitHub username</label><Hint text="They get a GitHub repo invitation, and the chat opens when they accept it here. Not on Chat over GitHub yet? Send them this page's address. Starting a chat creates a private repo with a random name on your account." /></span>
           <input id="dm-login" className="input" value={login} onChange={(e) => setLogin(e.target.value)} placeholder="octocat" autoFocus autoComplete="off" />
         </div>
         {theirs && (

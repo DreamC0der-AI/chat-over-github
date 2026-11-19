@@ -54,9 +54,7 @@ export function Avatar({ name, login, square, size }: { name: string; login?: st
 
 const P = { fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' } as const;
 export const Icon = {
-  logo: () => (
-    <svg width="18" height="18" viewBox="0 0 24 24" {...P} stroke="#fff" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z" /></svg>
-  ),
+  logo: () => <img src="/logo.svg" alt="" />,
   lock: (s = 12) => (
     <svg width={s} height={s} viewBox="0 0 24 24" {...P} strokeWidth={2.4} aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg>
   ),

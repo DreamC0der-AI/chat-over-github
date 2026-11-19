@@ -86,7 +86,7 @@ function OpenElsewhere() {
   return (
     <div className="page"><div className="narrow elsewhere">
       <h1>Open in another tab</h1>
-      <p className="muted">Keyhold Chat runs in one tab at a time.</p>
+      <p className="muted">Chat over GitHub runs in one tab at a time.</p>
       <button className="btn primary" onClick={takeOverTab}>Use here</button>
     </div></div>
   );
