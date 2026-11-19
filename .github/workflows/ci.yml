@@ -8,6 +8,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The test picker compares against the PR's base branch.
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -18,8 +21,15 @@ jobs:
       - run: npm ci
       # The Worker isn't a workspace; its tests need its own wrangler.
       - run: npm ci --prefix worker
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
+      # Pull requests run the tests their changes need (rules in scripts/test.mjs); main runs everything.
+      - id: plan
+        run: node scripts/test.mjs --dry ${{ github.event_name == 'pull_request' && format('--base origin/{0}', github.base_ref) || '--all' }}
+      - if: steps.plan.outputs.e2e == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-1
       # Install the package first, then the browser build that exact version expects.
-      - run: npm i --no-save playwright@1 && npx playwright install --with-deps chromium && npm run e2e
+      - if: steps.plan.outputs.e2e == 'true'
+        run: npm i --no-save playwright@1 && npx playwright install --with-deps chromium
+      - run: node scripts/test.mjs ${{ github.event_name == 'pull_request' && format('--base origin/{0}', github.base_ref) || '--all' }}

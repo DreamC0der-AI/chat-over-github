@@ -183,13 +183,30 @@ const PERSONAL_KEY_INFO = 'keyhold-chat-web/v1/personal-store';
 const PERSONAL_KEY_SLOT = 'chat-web/personal-key';
 /** What each synced chat field does when two browsers change it at once. */
 const CHAT_RULES: Record<string, MergeRule> = { space: 'once', kind: 'once', peer: 'once', name: 'once', createdAt: 'once', ended: 'once', clearedAt: 'max', peerLeft: 'once', purged: 'once' };
-const ACTIVE_POLL_MS = 4_000;
-const IDLE_POLL_MS = 20_000;
-const WARM_POLL_MS = 6_000;
-const HIDDEN_POLL_MS = 90_000;
-const INVITE_POLL_MS = 15_000;
-const FULL_SYNC_ACTIVE_MS = 12_000;
-const FULL_SYNC_WARM_MS = 30_000;
+/**
+ * The sync schedule: how often each kind of check runs. One sync step (tick) reads it; the loop
+ * only decides when to call that step. The mock build (tests) runs the same schedule on a faster
+ * clock, and can ask for a step right away with window.__chat.syncNow(), so tests never wait on
+ * real-world timers. Production timings are the numbers below, unscaled.
+ */
+const SCHEDULE_SCALE = CONFIG.mock ? ((globalThis as { __syncScale?: number }).__syncScale ?? 0.1) : 1;
+const at = (ms: number) => Math.round(ms * SCHEDULE_SCALE);
+const LOOP_MS = at(1_500);
+const ACTIVE_POLL_MS = at(4_000);
+const IDLE_POLL_MS = at(20_000);
+const WARM_POLL_MS = at(6_000);
+const HIDDEN_POLL_MS = at(90_000);
+const INVITE_POLL_MS = at(15_000);
+const INVITE_PENDING_POLL_MS = at(5_000);
+const PERSONAL_FLUSH_MS = at(2_000);
+const PERSONAL_PULL_MS = at(8_000);
+const PERSONAL_FULL_PULL_MS = at(30_000);
+const FULL_SYNC_ACTIVE_MS = at(12_000);
+const FULL_SYNC_WARM_MS = at(30_000);
+const SPACE_SCAN_MS = at(60_000);
+const SPACE_SCAN_PENDING_MS = at(15_000);
+const INVITE_RETRY_MS = at(10_000);
+const INVITE_RETRY_MAX_MS = at(3 * 60_000);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export const loginFrom = (address: string) => {
@@ -251,6 +268,8 @@ export class Session {
   /** When each chat last had a full sync, as a fallback for GitHub's slow change check. */
   private lastFullSync = new Map<string, number>();
   private kick?: () => void;
+  /** syncNow() callers waiting for the next sync step to finish. */
+  private afterTick: (() => void)[] = [];
   /** People this account blocked: their invitations are declined by themselves. */
   blocked = new Set<string>();
   /** Rooms to end once the current sync is done (a close arrived while syncing). */
@@ -562,6 +581,13 @@ export class Session {
         this.kick?.();
       });
       this.inbox.start();
+    }
+    // Test hooks, mock build only: run a sync step now, and read state when a check fails.
+    if (CONFIG.mock) {
+      (window as { __chat?: object }).__chat = {
+        syncNow: () => this.syncNow(),
+        debug: () => ({ invites: this.pendingInvites(), groups: Object.fromEntries(this.groupErrors), pollError: this.lastPollError, syncError: this.syncError }),
+      };
     }
     void this.loop();
   }
@@ -1377,6 +1403,13 @@ export class Session {
     }
     for (const inv of [...this.invites.values()]) {
       if (inv.status !== 'invited') continue;
+      // Another of our browsers joined this chat, and its synced chat list only arrived after the
+      // repo scan saw the invitation: nobody needs to accept it here, just catch up.
+      if (inv.space && [...this.records.values()].some((r) => r.space === inv.space && !r.ended && !r.purged)) {
+        inv.status = 'joining';
+        inv.mine = true;
+        continue;
+      }
       // Blocked people's invitations are turned down without asking.
       if (this.blocked.has(inv.from)) {
         await this.declineInvite(inv.key).catch(() => undefined);
@@ -1388,7 +1421,7 @@ export class Session {
     }
     // Listing every repo the app can see costs a few requests: do it when asked, while something
     // is pending, or once a minute.
-    const scanEvery = this.invites.size ? 15_000 : 60_000;
+    const scanEvery = this.invites.size ? SPACE_SCAN_PENDING_MS : SPACE_SCAN_MS;
     if (force || now - this.lastSpaceScan >= scanEvery) {
       this.lastSpaceScan = now;
       have = known();
@@ -1432,7 +1465,8 @@ export class Session {
           this.invites.delete(inv.key);
           const r = this.fill(g);
           // Catching up on a chat the account was already in: its history stays in the other browsers.
-          if (inv.mine && !r.joinedAt && r.createdAt < Date.now() - 60_000) {
+          // "Already" means it existed before this browser was added, not some fixed age.
+          if (inv.mine && !r.joinedAt && r.createdAt < (this.identity?.cert.issuedAt ?? Date.now())) {
             r.joinedAt = Date.now();
             await this.saveRecord(r);
           }
@@ -1448,7 +1482,7 @@ export class Session {
         inv.error = describeError(e);
       }
       inv.attempts++;
-      inv.nextTry = Date.now() + Math.min(10_000 * 2 ** Math.min(inv.attempts - 1, 5), 3 * 60_000);
+      inv.nextTry = Date.now() + Math.min(INVITE_RETRY_MS * 2 ** Math.min(inv.attempts - 1, 5), INVITE_RETRY_MAX_MS);
     }
     this.bump();
   }
@@ -1563,8 +1597,28 @@ export class Session {
     return true;
   }
 
+  /**
+   * Run every check now instead of when its timer comes due, and resolve once that full sync step
+   * has finished. The schedule is untouched otherwise.
+   */
+  syncNow(): Promise<void> {
+    if (this.stopped || !this.chat) return Promise.resolve();
+    this.lastInvites = 0;
+    this.lastClosures = 0;
+    this.lastPull = 0;
+    this.lastFullPull = 0;
+    this.lastFlush = 0;
+    this.lastCheck.clear();
+    this.lastFullSync.clear();
+    return new Promise<void>((resolve) => {
+      this.afterTick.push(resolve);
+      this.kick?.();
+    });
+  }
+
   private async loop() {
     while (!this.stopped) {
+      const waiting = this.afterTick.splice(0);
       try {
         await this.tick();
         this.lastPollError = undefined;
@@ -1572,8 +1626,9 @@ export class Session {
         this.lastPollError = describeError(e);
         this.bump();
       }
+      for (const done of waiting) done();
       await new Promise<void>((resolve) => {
-        const t = setTimeout(resolve, 1500);
+        const t = setTimeout(resolve, LOOP_MS);
         this.kick = () => {
           clearTimeout(t);
           resolve();
@@ -1586,7 +1641,7 @@ export class Session {
     if (!this.chat) return;
     const now = Date.now();
     const hidden = document.visibilityState === 'hidden';
-    if (now - this.lastInvites > (hidden ? HIDDEN_POLL_MS : this.invites.size ? 5_000 : INVITE_POLL_MS)) {
+    if (now - this.lastInvites > (hidden ? HIDDEN_POLL_MS : this.invites.size ? INVITE_PENDING_POLL_MS : INVITE_POLL_MS)) {
       this.lastInvites = now;
       await this.checkInvites();
     }
@@ -1624,14 +1679,14 @@ export class Session {
     const p = this.personal;
     if (!p) return;
     try {
-      if (p.pending && now - this.lastFlush > 2_000) {
+      if (p.pending && now - this.lastFlush > PERSONAL_FLUSH_MS) {
         this.lastFlush = now;
         await p.flush();
       }
-      if (now - this.lastPull > (hidden ? HIDDEN_POLL_MS : 8_000)) {
+      if (now - this.lastPull > (hidden ? HIDDEN_POLL_MS : PERSONAL_PULL_MS)) {
         this.lastPull = now;
         // GitHub's change check can lag a minute, so read anyway every half minute.
-        if ((await this.headChanged(`${this.login}/${this.homeRepo}`)) || now - this.lastFullPull > 30_000) {
+        if ((await this.headChanged(`${this.login}/${this.homeRepo}`)) || now - this.lastFullPull > PERSONAL_FULL_PULL_MS) {
           this.lastFullPull = now;
           await this.pull();
         }

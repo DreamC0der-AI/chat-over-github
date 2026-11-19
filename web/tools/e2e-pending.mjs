@@ -36,6 +36,8 @@ async function writes(p, mode) {
     return route.continue().catch(() => {});
   });
 }
+// Run the app's sync step now instead of waiting for its timers (see window.__chat in session.ts).
+const syncRounds = async (p, n = 2) => { for (let i = 0; i < n; i++) await p.page.evaluate(() => window.__chat?.syncNow()); };
 const msg = (p, text) => p.page.locator('.msg', { hasText: text }).first();
 async function quickReact(p, text, emoji) {
   await msg(p, text).locator('.bubble').click({ button: 'right' });
@@ -74,7 +76,7 @@ try {
   await tab2.getByRole('heading', { name: 'Open in another tab' }).waitFor({ timeout: 10000 }).then(() => check(true, 'second tab says the chat is open in another tab'), () => check(false, 'second tab says the chat is open in another tab'));
   await quickReact(bob, 'Good morning', '❤️');
   await msg(alice, 'Good morning').locator('.reaction').waitFor({ timeout: 30000 });
-  await alice.page.waitForTimeout(6000);
+  await syncRounds(alice, 3);
   check((await msg(alice, 'Good morning').locator('.reaction').count()) === 1, "the other person's reaction stays with a second tab open");
   await tab2.screenshot({ path: `${SHOTS}/one-tab.png` });
   await tab2.close();
@@ -98,7 +100,7 @@ try {
   check(true, 'reaction settles as mine');
   await msg(bob, 'party').locator('.reaction').waitFor({ timeout: 30000 });
   check(true, 'the other side sees the reaction');
-  await alice.page.waitForTimeout(2500);
+  await syncRounds(alice, 2);
   check((await msg(alice, 'party').locator('.reaction').count()) === 1, 'reaction is still there after it settles');
 
   // Taking it back is pending too.

@@ -139,7 +139,7 @@ try {
   check((await p.page.locator('.settings-side').isVisible()) && (await p.page.locator('.settings-main').isVisible()), 'desktop shows the section list and the section side by side');
   await p.page.getByRole('link', { name: 'Chats' }).click();
   await p.page.locator('.chat-item').first().waitFor();
-  await p.page.getByRole('link', { name: 'Turn on sync' }).click().catch(() => {});
+  await p.page.getByRole('link', { name: 'Turn on sync' }).click({ timeout: 1000 }).catch(() => {}); // only shown while sync is off
   if ((await p.page.evaluate(() => location.hash)) === '#/settings/devices') check(true, '"Turn on sync" opens Devices and sync');
 
   // ---- phone
