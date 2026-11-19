@@ -3,7 +3,6 @@
  * message cache and small app records. One database per GitHub account.
  */
 import type { DeviceKeystore, DeviceStorage, EphemeralKeyStore } from 'keyhold/storage';
-import type { Pin, PinStore } from 'keyhold/chat';
 
 const STORES = ['keystore', 'ephemeral', 'kv', 'messages'] as const;
 type StoreName = (typeof STORES)[number];
@@ -141,11 +140,4 @@ class IdbEphemeral implements EphemeralKeyStore {
 
 export function idbDevice(db: Db): DeviceStorage {
   return { keystore: new IdbKeystore(db), ephemeral: new IdbEphemeral(db) };
-}
-
-/** Trust-on-first-use pins, kept on this device. */
-export class IdbPinStore implements PinStore {
-  constructor(private db: Db) {}
-  get(address: string) { return this.db.get<Pin>('kv', `pin:${address}`); }
-  set(address: string, pin: Pin) { return this.db.put('kv', pin, `pin:${address}`); }
 }

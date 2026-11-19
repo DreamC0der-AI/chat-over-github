@@ -26,7 +26,7 @@ export function ChatMenu({ session, convo, className }: { session: Session; conv
           return (
             <>
               <MenuItem icon={dm ? Icon.info() : Icon.people()} onClick={pick(() => setInfo(true))}>{dm ? 'Chat info' : 'Members'}</MenuItem>
-              {dm && peer && <MenuItem icon={Icon.shield(true, 16)} onClick={pick(() => setVerify(peer))}>Verify {convo.title}</MenuItem>}
+              {dm && peer && <MenuItem icon={Icon.shield(true, 16)} onClick={pick(() => setVerify(peer))}>Safety number</MenuItem>}
               <div className="menu-sep" role="separator" />
               <MenuItem icon={Icon.trash()} disabled={busy} onClick={pick(() => act(async () => {
                 if (!(await ask(deleteAsk(dm ? convo.title : undefined)))) return;
@@ -132,6 +132,15 @@ function ChatInfo({ session, convo, onClose, onVerify }: { session: Session; con
 }
 
 export function VerifyModal({ session, address, onClose }: { session: Session; address: string; onClose: () => void }) {
+  return (
+    <Modal title={`Verify ${loginFrom(address)}`} onClose={onClose}>
+      <VerifyPanel session={session} address={address} />
+    </Modal>
+  );
+}
+
+/** Safety number and the verify or accept-new-key button. In the verify dialog and on a contact. */
+export function VerifyPanel({ session, address }: { session: Session; address: string }) {
   const [p, setP] = useState<PeerInfo>();
   const { busy, error, run } = useAction();
   const login = loginFrom(address);
@@ -139,32 +148,31 @@ export function VerifyModal({ session, address, onClose }: { session: Session; a
   useEffect(() => {
     void session.peer(address, true).then(setP);
   }, [address, v]);
+  if (!p) return <span className="spinner" />;
+  if (p.status === 'none') return <p>{login} hasn't created an identity yet.</p>;
+  if (p.status === 'error') return <ErrorFlash error={p.error} />;
   return (
-    <Modal title={`Verify ${login}`} onClose={onClose}>
-      {!p ? <span className="spinner" /> : p.status === 'none' ? (
-        <p>{login} hasn't created an identity yet.</p>
-      ) : p.status === 'error' ? (
-        <ErrorFlash error={p.error} />
-      ) : (
-        <>
-          {p.status === 'key-changed' && (
-            <div className="flash warn">{login}'s identity key changed. Compare the new number before you accept it.</div>
-          )}
-          <p className="verify-lead">
-            Compare with {login} in person or on a call.{' '}
-            <Hint text={<>If the numbers match on both screens, nobody is in the middle. Their key fingerprint: <span className="mono">{p.fingerprint?.slice(0, 32)}…</span></>} />
-          </p>
-          <div className="safety">{p.safety?.split(' ').map((g, i) => <span key={i}>{g}</span>)}</div>
-          <ErrorFlash error={error} />
-          {p.status === 'key-changed' ? (
-            <button className="btn primary block" disabled={busy} onClick={() => run(() => session.acceptKeyChange(address))}>{busy ? <><span className="spinner" /> Saving…</> : 'Numbers match, accept the new key'}</button>
-          ) : p.verified ? (
-            <div className="verified-note">{Icon.shield(true, 16)} Verified</div>
-          ) : (
-            <button className="btn primary block" disabled={busy} onClick={() => run(() => session.markVerified(address))}>{busy ? <><span className="spinner" /> Saving…</> : 'Numbers match, mark as verified'}</button>
-          )}
-        </>
+    <>
+      {p.status === 'key-changed' && (
+        <div className="flash warn">
+          {p.otherBrowser
+            ? <>Another of your browsers trusts a different key for {login}. Compare the number before you accept the one shown here.</>
+            : <>{login}'s identity key changed. Compare the new number before you accept it.</>}
+        </div>
       )}
-    </Modal>
+      <p className="verify-lead">
+        Compare with {login} in person or on a call.{' '}
+        <Hint text={<>If the numbers match on both screens, nobody is in the middle. Verified marks apply on all your browsers. Their key fingerprint: <span className="mono">{p.fingerprint?.slice(0, 32)}…</span></>} />
+      </p>
+      <div className="safety">{p.safety?.split(' ').map((g, i) => <span key={i}>{g}</span>)}</div>
+      <ErrorFlash error={error} />
+      {p.status === 'key-changed' ? (
+        <button className="btn primary block" disabled={busy} onClick={() => run(() => session.acceptKeyChange(address))}>{busy ? <><span className="spinner" /> Saving…</> : 'Numbers match, accept the new key'}</button>
+      ) : p.verified ? (
+        <div className="verified-note">{Icon.shield(true, 16)} Verified</div>
+      ) : (
+        <button className="btn primary block" disabled={busy} onClick={() => run(() => session.markVerified(address))}>{busy ? <><span className="spinner" /> Saving…</> : 'Numbers match, mark as verified'}</button>
+      )}
+    </>
   );
 }

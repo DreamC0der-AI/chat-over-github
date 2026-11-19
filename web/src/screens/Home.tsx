@@ -3,12 +3,14 @@ import { clampSide, saveSideWidth, SIDE_DEFAULT, SIDE_MAX, SIDE_MIN, sideWidth }
 import { loginFrom, type Convo, type PendingInvite, type Session } from '../lib/session';
 import { Avatar, ErrorFlash, go, Hint, Icon, Modal, timeLabel, useAction, useSession } from '../ui';
 import { ChatMenu } from './ChatMenu';
+import { Contacts } from './Contacts';
 import { Conversation } from './Conversation';
 
 export function Home({ session, route }: { session: Session; route: string }) {
   useSession(session);
   const chatId = route.startsWith('/c/') ? decodeURIComponent(route.slice(3)) : undefined;
   const convo = chatId ? session.convo(chatId) : undefined;
+  const contacts = route === '/contacts';
   const [modal, setModal] = useState<'dm' | 'group'>();
   const [q, setQ] = useState('');
   const [sideW, setSideW] = useState(() => clampSide(sideWidth()));
@@ -36,11 +38,11 @@ export function Home({ session, route }: { session: Session; route: string }) {
 
   return (
     <div className="app">
-      <div className={`main${convo ? ' has-chat' : ''}`} style={{ '--side-w': `${sideW}px` } as CSSProperties}>
+      <div className={`main${convo || contacts ? ' has-chat' : ''}`} style={{ '--side-w': `${sideW}px` } as CSSProperties}>
         <nav className="sidebar" aria-label="Chats">
           <div className="sidebar-head">
             <h1 className="side-title">Chats</h1>
-            <button className="btn icon ghost" aria-label="New group" title="New group" onClick={() => setModal('group')}>{Icon.people()}</button>
+            <a href="#/contacts" className={`btn icon ghost${contacts ? ' selected' : ''}`} aria-label="Contacts" title="Contacts" aria-current={contacts ? 'page' : undefined}>{Icon.people()}</a>
             <button className="btn icon primary" aria-label="New chat" title="New chat" onClick={() => setModal('dm')}>{Icon.compose()}</button>
           </div>
           <div className="search">
@@ -62,7 +64,9 @@ export function Home({ session, route }: { session: Session; route: string }) {
           <SideResizer width={sideW} onChange={setSideW} />
         </nav>
         <main className="content">
-          {convo ? (
+          {contacts ? (
+            <Contacts session={session} onNewGroup={() => setModal('group')} />
+          ) : convo ? (
             <Conversation key={convo.key} session={session} convo={convo} />
           ) : chatId ? (
             <div className="empty"><p>This chat isn't on this browser.</p><a href="#/">Back to chats</a></div>

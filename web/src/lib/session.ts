@@ -37,7 +37,8 @@ import { hkdfAesKey, hkdfBytes } from 'keyhold/util';
 import { CONFIG, installUrl } from '../config';
 import { currentToken, type AuthState } from './auth';
 import { InboxSocket } from './inbox-socket';
-import { Db, IdbPinStore, idbDevice } from './idb';
+import { Db, idbDevice } from './idb';
+import { ContactBook } from './contacts';
 
 export type Phase = 'loading' | 'install' | 'new-identity' | 'restore' | 'ready' | 'error';
 
@@ -168,12 +169,31 @@ export interface PendingInvite {
   mine?: boolean;
 }
 
+/** One person on the Contacts screen. */
+export interface Person {
+  address: string;
+  login: string;
+  /** The DM with them (the live one if there is one). */
+  dm?: Convo;
+  /** Groups you share. */
+  groups: Convo[];
+  blocked: boolean;
+  verified: boolean;
+  /** Another browser of this account trusts a different key for them. */
+  conflict: boolean;
+  firstSeen?: number;
+}
+
 export interface PeerInfo {
   address: string;
   status: LookupResult['status'] | 'error';
   fingerprint?: string;
   safety?: string;
   verified?: boolean;
+  /** When this account first saw their key (any of its browsers). */
+  firstSeen?: number;
+  /** key-changed because another of this account's browsers trusts a different key (not GitHub). */
+  otherBrowser?: boolean;
   error?: string;
 }
 
@@ -240,6 +260,8 @@ export class Session {
   device!: DeviceStorage;
   provider!: StorageProvider & { client: { requests: number } };
   registry!: IdentityRegistry;
+  /** Trusted keys and verified marks for the people this account talks to (synced). */
+  contacts!: ContactBook;
   identity?: DeviceIdentity;
   chat?: Chat;
   records = new Map<string, ChatRecord>();
@@ -367,7 +389,12 @@ export class Session {
       chatPrefix: CONFIG.chatPrefix,
       description: `End-to-end encrypted chat data. Only the members' chat app can read it. Open it at ${location.origin}`,
     });
-    this.registry = new IdentityRegistry(this.provider.directory, new IdbPinStore(this.db));
+    this.contacts = new ContactBook(this.db, loginFrom, (a) => {
+      this.peers.delete(a);
+      this.bump();
+    });
+    await this.contacts.load();
+    this.registry = new IdentityRegistry(this.provider.directory, this.contacts);
   }
 
   async decidePhase() {
@@ -694,6 +721,9 @@ export class Session {
     for (const a of this.blocked) await this.syncBlock(a, true);
     for (const sp of this.declined) await this.syncDeclined(sp);
     await this.pull();
+    // Keys this browser pinned go up (after the pull, so a different synced key is a conflict, not overwritten).
+    this.contacts.personal = this.personal;
+    await this.contacts.migrate();
     await this.flushPersonal();
   }
 
@@ -747,6 +777,7 @@ export class Session {
     for (const ch of await this.personal.changes()) {
       const v = ch.value;
       if (ch.collection === 'chats') await this.applyChat(ch.key, v);
+      else if (ch.collection === 'contacts') await this.contacts.applyRemote(ch.key, v);
       else if (ch.collection === 'readMarks') {
         const r = this.records.get(ch.key);
         if (r && typeof v.at === 'number' && v.at >= r.lastTs && r.unread) {
@@ -1850,6 +1881,33 @@ export class Session {
 
   // ---- people ----
 
+  /**
+   * Everyone this account talks to, for the Contacts screen: people with a DM, members of its
+   * groups, and anyone whose key it remembers (synced), with trust state known without a lookup.
+   */
+  people(): Person[] {
+    const by = new Map<string, Person>();
+    const get = (address: string) => {
+      let p = by.get(address);
+      if (!p) {
+        p = { address, login: loginFrom(address), groups: [], blocked: this.blocked.has(address), verified: this.contacts.verified(address), conflict: this.contacts.conflict(address), firstSeen: this.contacts.firstSeen(address) };
+        by.set(address, p);
+      }
+      return p;
+    };
+    for (const c of this.conversations()) {
+      if (c.dm) {
+        if (c.peer && (!get(c.peer).dm || c.live)) get(c.peer).dm = c;
+      } else {
+        const g = c.live ?? c.current;
+        for (const m of g?.members() ?? []) if (m.address !== this.address) get(m.address).groups.push(c);
+      }
+    }
+    for (const a of this.contacts.addresses()) if (a !== this.address) get(a);
+    by.delete(this.address);
+    return [...by.values()].sort((x, y) => x.login.localeCompare(y.login));
+  }
+
   peer(address: string, refresh = false): Promise<PeerInfo> {
     if (refresh) this.peers.delete(address);
     let p = this.peers.get(address);
@@ -1866,12 +1924,16 @@ export class Session {
       if (r.status === 'none') return { address, status: 'none' };
       const fp = r.view.fingerprint;
       const pin = await this.registry.pins.get(address);
+      // Another browser of this account trusts a different key: same warning as a key change on GitHub.
+      const otherBrowser = r.status === 'ok' && this.contacts.conflict(address);
       return {
         address,
-        status: r.status,
+        status: otherBrowser ? 'key-changed' : r.status,
         fingerprint: fp,
         safety: await safetyNumber(this.identity!.fingerprint, fp),
-        verified: r.status === 'ok' && !!pin?.verified,
+        verified: r.status === 'ok' && !otherBrowser && !!pin?.verified,
+        firstSeen: this.contacts.firstSeen(address),
+        ...(otherBrowser ? { otherBrowser } : {}),
       };
     } catch (e) {
       return { address, status: 'error', error: describeError(e) };
@@ -1880,13 +1942,19 @@ export class Session {
 
   async markVerified(address: string) {
     await this.registry.markVerified(address);
+    await this.flushPersonal().catch(() => undefined);
     this.peers.delete(address);
     this.bump();
   }
 
+  /** The user compared numbers and trusts the key GitHub serves now: in this browser and, through sync, all of them. */
   async acceptKeyChange(address: string) {
     const r = await this.registry.lookup(address);
-    if (r.status === 'key-changed') await this.registry.acceptKeyChange(address, r.view);
+    if (r.status === 'key-changed' || (r.status === 'ok' && this.contacts.conflict(address))) {
+      this.contacts.willAccept(address);
+      await this.registry.acceptKeyChange(address, r.view);
+    }
+    await this.flushPersonal().catch(() => undefined);
     this.peers.delete(address);
     this.bump();
   }
