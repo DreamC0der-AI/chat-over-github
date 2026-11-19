@@ -71,6 +71,10 @@ export class Browser {
 
 export interface World {
   backend: ReturnType<typeof mockBackend>;
+  /** Every request the apps made to GitHub or the Worker, in order. */
+  requests: { method: string; url: string }[];
+  /** While true, every request fails as if the network were down. */
+  offline: boolean;
   /** A browser signed in as `login`. Not set up yet: call setup() or restore(). */
   browser(login: string, idb?: IDBFactory): Promise<Browser>;
   /** The same browser after a reload: a new app on the same IndexedDB. */
@@ -90,12 +94,16 @@ export async function world(): Promise<World> {
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     if (!url.startsWith(ORIGIN)) return realFetch(input, init);
+    w.requests.push({ method: init?.method ?? 'GET', url: url.slice(ORIGIN.length - 1) });
+    if (w.offline) return Promise.reject(new TypeError('Failed to fetch'));
     return backend.fetch(url, { method: init?.method, headers: init?.headers as Record<string, string>, body: init?.body as string | undefined });
   }) as typeof fetch;
   const all: Browser[] = [];
 
   const w: World = {
     backend,
+    requests: [],
+    offline: false,
     async browser(login, idb = new IDBFactory()) {
       const token = `tok-${login}`;
       const me = (await (await backend.fetch(`${ORIGIN}gh/user`, { headers: { authorization: `Bearer ${token}` } })).json()) as { id: number };
