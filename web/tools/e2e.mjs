@@ -191,7 +191,7 @@ try {
   await alice.page.locator('.chat-item', { hasText: 'bob' }).click();
   await bubble(alice, 'message for both alice devices').waitFor({ timeout: 45000 });
   check(true, 'both alice devices read the new message');
-  await alice2.page.goto(BASE + '#/settings');
+  await alice2.page.goto(BASE + '#/settings/devices');
   await alice2.page.locator('.label', { hasText: 'This browser' }).waitFor();
   check((await alice2.page.locator('.box-row', { hasText: 'Added' }).count()) === 2, 'two devices listed');
   await alice2.page.screenshot({ path: `${SHOTS}/settings.png` });
