@@ -1,6 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { Icon } from '../ui';
 
 export const EMOJI = ['👍', '❤️', '😂', '🎉', '👀'];
 
@@ -89,7 +88,7 @@ export function MsgPopup({ anchor, label, onClose, children, className = '' }: {
 }
 
 /** The five quick reactions. Ones you've already added show as selected and take it back. */
-export function EmojiRow({ mineOf, onPick, more }: { mineOf: (e: string) => 'yes' | 'no' | 'pending'; onPick: (e: string) => void; more?: () => void }) {
+export function EmojiRow({ mineOf, onPick }: { mineOf: (e: string) => 'yes' | 'no' | 'pending'; onPick: (e: string) => void }) {
   return (
     <div className="emoji-row">
       {EMOJI.map((e) => {
@@ -100,11 +99,6 @@ export function EmojiRow({ mineOf, onPick, more }: { mineOf: (e: string) => 'yes
           </button>
         );
       })}
-      {more && (
-        <button type="button" role="menuitem" className="emoji more" aria-label="More actions" title="More actions" onClick={more}>
-          {Icon.more()}
-        </button>
-      )}
     </div>
   );
 }

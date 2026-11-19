@@ -237,10 +237,8 @@ function TrustBadge({ peer, onClick }: { peer: PeerInfo; onClick: () => void }) 
   return null;
 }
 
-type Popup = { kind: 'quick' | 'menu'; anchor: Anchor };
-
 function Message({ m, session, group, showAuthor, first = true, last = true, onOpen }: { m: MsgRecord; session: Session; group?: Group; showAuthor: boolean; first?: boolean; last?: boolean; onOpen: (v: Viewing) => void }) {
-  const [popup, setPopup] = useState<Popup>();
+  const [popup, setPopup] = useState<Anchor>();
   const bubbleRef = useRef<HTMLDivElement>(null);
   const long = useLongPress((el) => openMenu({ rect: el.getBoundingClientRect(), mine: !!m.mine, prefer: 'below' }));
   if (m.kind === 'system') return <div className="sys" title={m.body}>{(m.body ?? '').replace(/\. .*$/, '').replace(/\.$/, '')}</div>;
@@ -265,7 +263,7 @@ function Message({ m, session, group, showAuthor, first = true, last = true, onO
   const hasMenu = canAct || !!text || canDownload;
   const close = () => setPopup(undefined);
   function openMenu(anchor: Anchor) {
-    if (hasMenu) setPopup({ kind: 'menu', anchor });
+    if (hasMenu) setPopup(anchor);
   }
   const besideBubble = (prefer: 'above' | 'below'): Anchor | undefined => {
     const r = bubbleRef.current?.getBoundingClientRect();
@@ -308,33 +306,17 @@ function Message({ m, session, group, showAuthor, first = true, last = true, onO
             const selected = !!sel && !sel.isCollapsed && bubbleRef.current?.contains(sel.anchorNode);
             if (!long.fired.current && (selected || (e.target as HTMLElement).closest('a'))) return;
             e.preventDefault();
-            if (popup?.kind === 'menu') return;
-            openMenu(long.fired.current ? besideBubble('below')! : { x: e.clientX, y: e.clientY });
+            if (popup) return;
+            // A long press, or the keyboard's menu key (no pointer position), opens beside the bubble.
+            const keyboard = e.clientX === 0 && e.clientY === 0;
+            openMenu(long.fired.current || keyboard ? besideBubble('below')! : { x: e.clientX, y: e.clientY });
           }}
         >
           {m.deleted ? 'Message deleted' : attach ? (group ? <AttachmentView session={session} group={group} file={m.file!} caption={m.caption} onOpen={onOpen} /> : <span className="muted">📎 {m.file!.name ?? 'file'} (no longer available)</span>) : m.body}
         </div>
-        {canAct && (
-          <button
-            type="button"
-            className="react-btn"
-            aria-label="Add reaction"
-            title="Add reaction"
-            aria-haspopup="menu"
-            aria-expanded={popup?.kind === 'quick'}
-            onClick={() => (popup ? close() : setPopup({ kind: 'quick', anchor: besideBubble('above')! }))}
-          >
-            {Icon.smile()}
-          </button>
-        )}
       </div>
-      {popup?.kind === 'quick' && (
-        <MsgPopup anchor={popup.anchor} label="Add reaction" onClose={close} className="quick">
-          <EmojiRow mineOf={mineOf} onPick={pick} more={() => setPopup({ kind: 'menu', anchor: besideBubble('above')! })} />
-        </MsgPopup>
-      )}
-      {popup?.kind === 'menu' && (
-        <MsgPopup anchor={popup.anchor} label="Message actions" onClose={close} className="full">
+      {popup && (
+        <MsgPopup anchor={popup} label="Message actions" onClose={close} className="full">
           {canAct && <EmojiRow mineOf={mineOf} onPick={pick} />}
           {canAct && (text || canDownload || m.mine) && <div className="menu-sep" />}
           {text && <MenuItem icon={Icon.copy()} onClick={copy}>{attach ? 'Copy caption' : 'Copy text'}</MenuItem>}
