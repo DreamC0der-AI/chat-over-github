@@ -115,6 +115,16 @@ try {
   await alice.page.screenshot({ path: `${SHOTS}/pending-delete.png` });
   await alice.page.locator('.bubble.deleted').waitFor({ timeout: 15000 });
   check(true, 'deleted message settles');
+  // The chat list stops showing the deleted text, on both sides and after a reload.
+  const rowPreview = (p, peer) => p.page.locator('.chat-item', { hasText: peer }).locator('.preview');
+  await rowPreview(alice, 'bob').filter({ hasText: 'Message deleted' }).waitFor({ timeout: 5000 }).catch(() => {});
+  check((await rowPreview(alice, 'bob').innerText()) === 'Message deleted', 'sender: chat list says "Message deleted", not the deleted text');
+  await rowPreview(bob, 'alice').filter({ hasText: 'Message deleted' }).waitFor({ timeout: 30000 }).catch(() => {});
+  check((await rowPreview(bob, 'alice').innerText()) === 'Message deleted', 'receiver: chat list says "Message deleted", not the deleted text');
+  await bob.page.reload();
+  await rowPreview(bob, 'alice').waitFor({ timeout: 30000 });
+  check((await rowPreview(bob, 'alice').innerText()) === 'Message deleted', 'after a reload the chat list still says "Message deleted"');
+  await bob.page.locator('.chat-item', { hasText: 'alice' }).click();
 
   // Failures: a text stays as "Not sent" with Retry; a reaction goes back with a message.
   await writes(alice, 'fail');

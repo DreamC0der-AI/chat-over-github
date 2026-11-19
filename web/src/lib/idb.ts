@@ -80,6 +80,19 @@ export class Db {
       };
     });
   }
+  /** The newest stored message of one chat room that passes `keep`, walking back from the end. */
+  lastMessage<T>(groupId: string, keep: (m: T) => boolean): Promise<T | undefined> {
+    let found: T | undefined;
+    return this.run('messages', 'readonly', (s) => {
+      const req = s.index('byGroup').openCursor(IDBKeyRange.bound([groupId, -Infinity], [groupId, Infinity]), 'prev');
+      req.onsuccess = () => {
+        const c = req.result;
+        if (!c) return;
+        if (keep(c.value as T)) found = c.value as T;
+        else c.continue();
+      };
+    }).then(() => found);
+  }
   messages<T>(groupId: string): Promise<T[]> {
     return this.run('messages', 'readonly', (s) =>
       s.index('byGroup').getAll(IDBKeyRange.bound([groupId, -Infinity], [groupId, Infinity])),

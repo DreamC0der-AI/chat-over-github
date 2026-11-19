@@ -79,6 +79,13 @@ export interface Reacting {
   sent?: boolean;
 }
 
+/** What the chat list shows for a message: deleted text never shows there, and an edit shows its new text. */
+export function previewText(m: MsgRecord): string {
+  if (m.deleted) return 'Message deleted';
+  if (m.kind === 'attachment' && m.file) return m.caption || (m.file.mime?.startsWith('image/') ? '📷 Photo' : `📎 ${m.file.name ?? 'file'}`);
+  return m.body ?? '';
+}
+
 /** How long a finished action keeps its local state, so the screen never shows a gap before the stored copy appears. */
 const SETTLE_MS = 2_000;
 
@@ -531,6 +538,7 @@ export class Session {
       const r = await this.db.get<ChatRecord>('kv', k);
       if (r) this.records.set(r.groupId, r);
     }
+    await this.repairPreviews();
     for (const g of this.chat.groups.values()) this.fill(g);
     for (const k of await this.db.keys('kv', 'declined:')) this.declined.add(k.slice('declined:'.length));
     for (const k of await this.db.keys('kv', 'block:')) this.blocked.add(k.slice('block:'.length));
@@ -556,6 +564,21 @@ export class Session {
       void this.saveRecord(r);
     }
     return r;
+  }
+  /** Rows saved before deletes and edits updated the preview may still hold a deleted message's text: redo them from the stored messages. */
+  private async repairPreviews() {
+    if (await this.db.get('kv', 'previews:v2')) return;
+    for (const r of this.records.values()) {
+      if (r.lastText === undefined || r.purged) continue;
+      const last = await this.db.lastMessage<MsgRecord>(r.groupId, (m) => m.kind !== 'system');
+      if (!last) continue;
+      const text = previewText(last);
+      if (text !== r.lastText) {
+        r.lastText = text;
+        await this.db.put('kv', r, `chat:${r.groupId}`);
+      }
+    }
+    await this.db.put('kv', true, 'previews:v2');
   }
   private saveRecord(r: ChatRecord) {
     this.push(r);
@@ -1171,6 +1194,15 @@ export class Session {
     await this.put({ groupId, id: `sys-${ts}-${Math.random().toString(36).slice(2, 8)}`, ts, from: '', fromFp: '', mine: false, kind: 'system', body });
   }
 
+  /** A message changed after it arrived: if the chat list shows it, show what it is now. */
+  private async refreshPreview(r: ChatRecord, changed: MsgRecord) {
+    if (changed.ts < r.lastTs) return;
+    const text = previewText(changed);
+    if (r.lastText === text) return;
+    r.lastText = text;
+    await this.saveRecord(r);
+  }
+
   private async onMessage(g: Group, m: ReceivedMessage) {
     const msg = m.message;
     const mine = m.from.fingerprint === this.identity?.fingerprint;
@@ -1200,17 +1232,25 @@ export class Session {
         const local = mine ? this.sending.get(g.id)?.find((p) => p.file && p.file.name === msg.file.name && p.file.size === msg.file.size) : undefined;
         if (local?.file && !this.files.has(msg.file.ref)) this.files.set(msg.file.ref, Promise.resolve(local.file));
         await this.put({ ...base, kind: 'attachment', file: msg.file, caption: msg.caption });
-        await touch(msg.caption || (msg.file.mime?.startsWith('image/') ? '📷 Photo' : `📎 ${msg.file.name ?? 'file'}`));
+        await touch(previewText({ ...base, kind: 'attachment', file: msg.file, caption: msg.caption }));
         break;
       }
       case 'edit': {
         const cur = await this.db.get<MsgRecord>('messages', [g.id, msg.ref]);
-        if (cur && cur.fromFp === m.from.fingerprint) await this.put({ ...cur, body: msg.body, edited: true });
+        if (cur && cur.fromFp === m.from.fingerprint && !cur.deleted) {
+          const now: MsgRecord = { ...cur, body: msg.body, edited: true };
+          await this.put(now);
+          await this.refreshPreview(r, now);
+        }
         break;
       }
       case 'delete': {
         const cur = await this.db.get<MsgRecord>('messages', [g.id, msg.ref]);
-        if (cur && cur.fromFp === m.from.fingerprint) await this.put({ ...cur, deleted: true, body: undefined, file: undefined, caption: undefined });
+        if (cur && cur.fromFp === m.from.fingerprint) {
+          const gone: MsgRecord = { ...cur, deleted: true, body: undefined, file: undefined, caption: undefined };
+          await this.put(gone);
+          await this.refreshPreview(r, gone);
+        }
         break;
       }
       case 'react': {
