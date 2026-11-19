@@ -120,13 +120,15 @@ try {
   // Verify safety number match on both sides
   await menu(alice, 'Verify bob');
   const sa = await alice.page.locator('.safety').innerText();
-  await menu(bob, 'Verify alice');
+  // The header offers verify too, before a chat is verified (a new browser has no marks yet).
+  await bob.page.locator('.convo-head').getByRole('button', { name: 'Not verified' }).click();
   const sb = await bob.page.locator('.safety').innerText();
   check(sa === sb && sa.length > 50, 'safety numbers match');
   await alice.page.getByRole('button', { name: /mark as verified/ }).click();
   await closeDialog(alice);
   await closeDialog(bob);
-  await alice.page.getByRole('button', { name: /Verified/ }).waitFor();
+  await alice.page.locator('.convo-head').getByRole('button', { name: 'Verified', exact: true }).waitFor();
+  check(await bob.page.locator('.convo-head').getByRole('button', { name: 'Not verified' }).isVisible(), 'unverified chat shows a verify button in the header');
   check(true, 'marked verified');
 
   // attachments: a file card, then a picture shown inline with an upload state

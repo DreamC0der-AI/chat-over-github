@@ -62,8 +62,9 @@ export const Icon = {
   clip: () => (
     <svg width="16" height="16" viewBox="0 0 24 24" {...P} aria-hidden="true"><path d="m21 11-8.5 8.5a5 5 0 0 1-7-7L14 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 7" /></svg>
   ),
-  shield: (ok: boolean, s = 14) => (
-    <svg width={s} height={s} viewBox="0 0 24 24" {...P} strokeWidth={2.4} aria-hidden="true"><path d="M12 3 4 6v6c0 5 3.4 8.3 8 9 4.6-.7 8-4 8-9V6z" />{ok ? <path d="m9 12 2 2 4-4" /> : <path d="M12 8v4M12 16h.01" />}</svg>
+  /** ok: check mark; false: warning mark; null: plain outline (not verified yet). */
+  shield: (ok: boolean | null, s = 14) => (
+    <svg width={s} height={s} viewBox="0 0 24 24" {...P} strokeWidth={2.4} aria-hidden="true"><path d="M12 3 4 6v6c0 5 3.4 8.3 8 9 4.6-.7 8-4 8-9V6z" />{ok === null ? null : ok ? <path d="m9 12 2 2 4-4" /> : <path d="M12 8v4M12 16h.01" />}</svg>
   ),
   more: () => (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.9" /><circle cx="12" cy="12" r="1.9" /><circle cx="19" cy="12" r="1.9" /></svg>
