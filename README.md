@@ -24,9 +24,17 @@ npm install        # builds keyhold from GitHub on install
 npm run typecheck
 npm test           # provider tests (vitest) and Worker tests (node --test)
 npm run build      # web app -> worker/public
-npm run e2e        # browser check against an in-memory GitHub and Worker (needs Playwright)
+npm run e2e        # browser checks against an in-memory GitHub and Worker (needs Playwright)
+npm run test:changed   # only the tests your changes need (see below)
+npm run test:all       # everything
 cd worker && npx wrangler deploy
 ```
+
+## Testing
+
+`npm run test:changed` looks at the files changed since `origin/main` and runs what they need. The rules are at the top of `scripts/test.mjs`: a screen-only change (`web/src/screens/`, `ui.tsx`, `styles.css`, `web/public/`, `index.html`) runs the type check, the build and the three screen checks (menu, layout, pending), not the multi-person flow; a Worker change runs the Worker tests; docs run nothing; app logic, the provider, packages and anything unrecognised run everything. Pull requests on GitHub run the same selection; pushes to `main` run everything.
+
+The browser checks (`web/tools/e2e*.mjs`) run at the same time, each on its own port with its own mock backend; `npm run e2e -- flow menu` runs a subset. They never wait on the app's real timers: the mock build runs the same sync schedule ten times faster, and `window.__chat.syncNow()` runs a full sync step at once. A check that something does *not* happen runs a few sync rounds, then looks. Wait for results (`waitFor`), not for time.
 
 On the Mac, use node@24 (`PATH=/opt/homebrew/opt/node@24/bin:$PATH`).
 

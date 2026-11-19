@@ -24,7 +24,8 @@ async function person(login, phone) {
   const code = await page.locator('.code-box').innerText({ timeout: 30000 });
   await page.getByLabel(/Type the last block/).fill(code.split('-').pop());
   await page.getByRole('button', { name: 'Continue to chats' }).click();
-  await page.getByRole('heading', { name: /Pick a chat/ }).waitFor().catch(() => {});
+  // The chat list is up (a phone shows no "Pick a chat" heading).
+  await page.getByRole('button', { name: 'New chat' }).first().waitFor();
   return { ctx, page, login };
 }
 const msg = (p, text) => p.page.locator('.msg', { hasText: text }).last();
@@ -168,7 +169,7 @@ try {
   await alice.page.locator('.lightbox').waitFor({ timeout: 3000 });
   check(true, 'clicking a picture still opens it');
   await alice.page.keyboard.press('Escape');
-  await alice.page.locator('.lightbox [aria-label=Close]').click().catch(() => {});
+  await alice.page.locator('.lightbox [aria-label=Close]').click({ timeout: 1000 }).catch(() => {}); // already closed by Esc
 
   // Delete still works through the menu, with its pending state.
   await alice.page.mouse.click(mine.x + 10, mine.y + 10, { button: 'right' });

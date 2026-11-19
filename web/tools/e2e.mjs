@@ -35,10 +35,24 @@ async function setup(p) {
   return code;
 }
 
+// Run the app's sync step now, n times over, instead of waiting for its timers. A check that
+// something does NOT happen waits a few full sync rounds, which is exactly what a timer would give.
+const syncRounds = async (p, n = 2) => { for (let i = 0; i < n; i++) await p.page.evaluate(() => window.__chat?.syncNow()); };
+const until = async (p, cond, timeout = 30000) => {
+  for (const end = Date.now() + timeout; Date.now() < end;) { if (await cond()) return true; await p.page.waitForTimeout(100); }
+  return false;
+};
+
+// Type and send, then wait until our own bubble shows (it does at once, as pending). Right after
+// switching chats the composer can still be the previous chat's and gets cleared, so type again.
 async function sendMsg(p, text) {
-  await p.page.waitForTimeout(500);
-  await p.page.locator('#composer').fill(text);
-  await p.page.locator('#composer').press('Enter');
+  for (let i = 0; i < 3; i++) {
+    await p.page.locator('#composer:enabled').waitFor();
+    await p.page.locator('#composer').fill(text);
+    await p.page.locator('#composer').press('Enter');
+    if (await p.page.locator('.msg.mine .bubble', { hasText: text }).first().waitFor({ timeout: 3000 }).then(() => true, () => false)) return;
+  }
+  throw new Error(`${p.login}: "${text}" never showed as sent`);
 }
 async function accept(p, from, timeout = 45000) {
   const row = p.page.locator('div.row', { hasText: `${from} invited you` }).filter({ has: p.page.getByRole('button', { name: 'Accept' }) }).first();
@@ -68,7 +82,7 @@ try {
   check(true, 'alice started DM');
 
   await bob.page.getByText('alice invited you').waitFor({ timeout: 45000 });
-  await bob.page.waitForTimeout(3000);
+  await syncRounds(bob, 3);
   check(!(await bob.page.locator('.chat-item', { hasText: 'alice' }).count()), 'bob sees an invitation and nothing joins before he accepts');
   await bob.page.screenshot({ path: `${SHOTS}/invite-accept.png` });
   await accept(bob, 'alice');
@@ -76,7 +90,7 @@ try {
   check(true, 'bob accepted and joined the DM');
   await bob.page.locator('.chat-item', { hasText: 'alice' }).click();
   await sendMsg(bob, 'hi alice, it works');
-  await bubble(alice, 'hi alice, it works').waitFor({ timeout: 30000 }).catch(() => {});
+  await bubble(alice, 'hi alice, it works').waitFor({ timeout: 5000 }).catch(() => {});
   await alice.page.locator('.chat-item', { hasText: 'bob' }).click();
   await bubble(alice, 'hi alice, it works').waitFor({ timeout: 30000 });
   check(true, 'alice received bob\'s message');
@@ -236,7 +250,7 @@ try {
   const invs = await dave.page.evaluate(() => fetch('/gh/user/repository_invitations', { headers: { Authorization: 'Bearer tok-dave' } }).then((r) => r.json()).catch(() => []));
   await dave.page.evaluate(() => { location.hash = '#/'; }); await dave.page.reload();
   await dave.page.getByRole('heading', { name: /Pick a chat/ }).waitFor({ timeout: 20000 });
-  await dave.page.waitForTimeout(20000);
+  await syncRounds(dave, 3);
   check(!(await dave.page.getByText('carol invited you').count()) && !(await dave.page.locator('.chat-item', { hasText: 'carol' }).count()), `dave declined carol's invitation and it stayed gone (open GitHub invitations: ${Array.isArray(invs) ? invs.length : '?'})`);
 
   const openChat = async (p, name) => {
@@ -285,7 +299,7 @@ try {
   await openChat(alice2, 'bob');
   // The new room is found by the repo scan, which runs once a minute, then joined: allow two minutes.
   await alice2.page.locator('#composer:enabled').waitFor({ timeout: 120000 });
-  await alice2.page.waitForTimeout(3000);
+  await syncRounds(alice2, 1);
   await sendMsg(bob, 'for both browsers');
   await bubble(alice2, 'for both browsers').waitFor({ timeout: 60000 });
   await bubble(alice, 'for both browsers').waitFor({ timeout: 60000 });
@@ -309,13 +323,8 @@ try {
   check(true, 'alice closed the chat dave quit');
   // Deleting an ended chat removes it from her other browser's list too
   await menu(alice, 'Delete chat');
-  await alice.page.waitForTimeout(500);
-  check((await count(alice, 'dave')) === 0, 'ended chat deleted from the list');
-  let gone = false;
-  for (let i = 0; i < 20 && !gone; i++) {
-    gone = (await count(alice2, 'dave')) === 0;
-    if (!gone) await alice2.page.waitForTimeout(3000);
-  }
+  check(await until(alice, async () => (await count(alice, 'dave')) === 0, 5000), 'ended chat deleted from the list');
+  const gone = await until(alice2, async () => (await count(alice2, 'dave')) === 0, 60000);
   check(gone, "and from alice's second browser");
 
   // Block: dave blocks alice; her next invitation is turned down without asking
@@ -327,7 +336,7 @@ try {
   await alice.page.getByLabel('GitHub username').fill('dave');
   await alice.page.getByRole('button', { name: 'Start chat' }).click();
   await alice.page.locator('.sys', { hasText: 'Invitation sent to @dave' }).waitFor({ timeout: 30000 });
-  await dave.page.waitForTimeout(25000);
+  await syncRounds(dave, 3);
   check(!(await dave.page.getByText('alice invited you').count()), 'blocked person\'s invitation never shows');
 
   // Both start a DM with each other at once: the apps settle on one room (rule 2)
@@ -336,12 +345,12 @@ try {
   await carol.page.getByLabel('GitHub username').fill('bob');
   await Promise.all([bob.page.getByRole('button', { name: 'Start chat' }).click(), carol.page.getByRole('button', { name: 'Start chat' }).click()]);
   const settled = async () => {
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < 400; i++) {
       const ok = (await count(bob, 'carol')) === 1 && (await count(carol, 'bob')) === 1
         && !(await bob.page.getByText('carol invited you').count()) && !(await carol.page.getByText('bob invited you').count());
       const live = await Promise.all([bob, carol].map((p) => p.page.locator('#composer').isEnabled().catch(() => false)));
       if (ok && live.every(Boolean)) return true;
-      await bob.page.waitForTimeout(3000);
+      await bob.page.waitForTimeout(300);
     }
     for (const p of [bob, carol]) {
       log(`state ${p.login}`, await count(p, p === bob ? 'carol' : 'bob'), JSON.stringify(await p.page.locator('.chat-list').innerText()));
@@ -379,6 +388,7 @@ try {
   for (const [i, p] of people.entries()) {
     const sys = await p.page.locator('.sys, .bubble, .flash, .status-bar').allInnerTexts().catch(() => []);
     log(`--- ${p.login}#${i}`, JSON.stringify(sys));
+    log(`    state ${p.login}#${i}`, JSON.stringify(await p.page.evaluate(() => window.__chat?.debug()).catch(() => null)));
     await p.page.screenshot({ path: `${SHOTS}/fail-${p.login}-${i}.png` }).catch(() => {});
   }
 } finally {

@@ -16,7 +16,7 @@ Decrypted messages are kept only in this browser (IndexedDB). Keys live in Index
 
 ## Polling and rate limit
 
-Each chat's repo is checked with a conditional `GET /repos/{space}/commits?per_page=1` (`If-None-Match`). A 304 doesn't count against GitHub's rate limit, so the full `sync()` only runs when something was written. The open chat is checked every 4 s, recently active ones every 6 s, others every 20 s, everything every 90 s while the tab is hidden. The invite inbox is checked every 15 s and the list of repos once a minute.
+Each chat's repo is checked with a conditional `GET /repos/{space}/commits?per_page=1` (`If-None-Match`). A 304 doesn't count against GitHub's rate limit, so the full `sync()` only runs when something was written. The open chat is checked every 4 s, recently active ones every 6 s, others every 20 s, everything every 90 s while the tab is hidden. The invite inbox is checked every 15 s and the list of repos once a minute. All of these live in one schedule at the top of `src/lib/session.ts`; the mock build runs it ten times faster for tests.
 
 ## Develop
 
@@ -26,7 +26,7 @@ Run these from the repo root:
 npm install            # also builds keyhold from GitHub (pinned commit in package.json)
 npm run dev -w web     # against real GitHub; sign-in needs the Worker origin, so use the mock for local work
 npm run build          # writes the app into worker/public, ready for wrangler deploy
-npm run e2e            # mock build + in-memory GitHub and Worker + Playwright, three people
+npm run e2e            # mock build + in-memory GitHub and Worker + Playwright, all checks at once
 ```
 
 `npm run e2e` needs Playwright. It covers a DM, a group, removal, a second device, invitations, Delete/Close/Quit/Block and first-run install, then (`tools/e2e-pending.mjs`, with GitHub writes slowed down or failing) the pending states and the one-tab-per-account rule.
