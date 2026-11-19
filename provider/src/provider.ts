@@ -74,6 +74,15 @@ function fromB64(s: string): Uint8Array<ArrayBuffer> {
   return out;
 }
 
+/** Git's id for a file's bytes: sha1("blob <length>\0" + bytes), as the Contents API reports it. */
+async function gitBlobSha(b: Bytes): Promise<string> {
+  const head = new TextEncoder().encode(`blob ${b.length}\0`);
+  const all = new Uint8Array(head.length + b.length);
+  all.set(head);
+  all.set(b, head.length);
+  return toHex(new Uint8Array(await crypto.subtle.digest('SHA-1', all)));
+}
+
 function splitSpace(space: SpaceRef): [string, string] {
   const [o, r] = space.split('/');
   if (!o || !r) throw new KeyholdError('config', `bad space ${space}`);
@@ -103,10 +112,17 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
     const r = await gh.call('GET', contents(owner, repo, path));
     if (r.status === 404) return undefined;
     if (r.status !== 200 || Array.isArray(r.data)) throw new KeyholdError(r.status === 403 ? 'forbidden' : 'config', `read ${path}: ${r.status}`);
-    let data: Uint8Array<ArrayBuffer>;
-    if (r.data.encoding === 'base64' && typeof r.data.content === 'string' && (r.data.content.length > 0 || r.data.size === 0)) data = fromB64(r.data.content);
-    else {
-      // Files over 1 MB come without content: fetch the git blob instead.
+    let data: Uint8Array<ArrayBuffer> | undefined;
+    if (r.data.encoding === 'base64' && typeof r.data.content === 'string' && (r.data.content.length > 0 || r.data.size === 0)) {
+      data = fromB64(r.data.content);
+      // The Contents API may "detect" a text encoding in binary data (e.g. UTF-16) and hand back
+      // the bytes converted to UTF-8, which garbles anything sealed. Keep the content only if it
+      // is exactly the blob GitHub stored.
+      if ((await gitBlobSha(data)) !== r.data.sha) data = undefined;
+    }
+    if (!data) {
+      // Files over 1 MB come without content, and converted content is useless: the git blob
+      // endpoint always returns the stored bytes.
       const b = await gh.expect('GET', `/repos/${enc(owner)}/${enc(repo)}/git/blobs/${r.data.sha}`, [200]);
       data = fromB64(b.data.content);
     }

@@ -28,13 +28,19 @@ interface Repo {
 
 type Init = { method?: string; headers?: Record<string, string>; body?: string };
 
-const sha = (b: Buffer) => createHash('sha1').update(b).digest('hex');
+/** Git's blob id, like GitHub's file "sha". */
+const sha = (b: Buffer) => createHash('sha1').update(`blob ${b.length}\0`).update(b).digest('hex');
+
+/** What GitHub's Contents API does to a file it takes for UTF-16 text: re-encode it as UTF-8. */
+const asUtf16ToUtf8 = (b: Buffer) => Buffer.from(b.subarray(0, b.length & ~1).swap16().toString('utf16le'), 'utf8');
 
 export class MockGitHub {
   readonly users = new Map<string, { id: number; token: string }>();
   readonly repos = new Map<string, Repo>();
   readonly inbox = new Map<number, { id: number; from: string; from_id: number; created_at: string; expires_at: string }[]>();
   readonly log: string[] = [];
+  /** Test hook: paths whose Contents API content GitHub "converts" from UTF-16 (the blob stays intact). */
+  readonly transcoded = new Set<string>();
   /** Remaining requests before a 403 rate-limit response (per token). */
   readonly budget = new Map<string, number>();
   private nextId = 1000;
@@ -152,7 +158,7 @@ export class MockGitHub {
         const f = r.files.get(path);
         if (f) {
           const big = f.content.length > 1024 * 1024;
-          return resp(200, { type: 'file', name: path.split('/').pop(), path, sha: f.sha, size: f.content.length, encoding: big ? 'none' : 'base64', content: big ? '' : f.content.toString('base64').replace(/(.{60})/g, '$1\n') });
+          return resp(200, { type: 'file', name: path.split('/').pop(), path, sha: f.sha, size: f.content.length, encoding: big ? 'none' : 'base64', content: big ? '' : (this.transcoded.has(path) ? asUtf16ToUtf8(Buffer.from(f.content)) : f.content).toString('base64').replace(/(.{60})/g, '$1\n') });
         }
         const prefix = path + '/';
         const names = new Map<string, { type: string; sha: string }>();
