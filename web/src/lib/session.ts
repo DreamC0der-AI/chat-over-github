@@ -181,6 +181,10 @@ const ROOT_BACKUP_INFO = 'keyhold-chat-web/v1/root-backup';
 /** The account key K for the personal store in the home repo, derived from the root key. */
 const PERSONAL_KEY_INFO = 'keyhold-chat-web/v1/personal-store';
 const PERSONAL_KEY_SLOT = 'chat-web/personal-key';
+/** This browser saw the app installed, with this home repo (kv). */
+const INSTALL_KEY = 'install';
+/** Snapshots of what this browser last wrote to the synced store (kv). */
+const PUSHED_KEY = 'sync:pushed';
 /** What each synced chat field does when two browsers change it at once. */
 const CHAT_RULES: Record<string, MergeRule> = { space: 'once', kind: 'once', peer: 'once', name: 'once', createdAt: 'once', ended: 'once', clearedAt: 'max', peerLeft: 'once', purged: 'once' };
 /**
@@ -283,6 +287,12 @@ export class Session {
   private lastFullPull = 0;
   private lastFlush = 0;
   private lastClosures = 0;
+  /** Start-up read of the synced store, running after the chat is on screen. */
+  private syncStarting?: Promise<unknown>;
+  private hasSyncKey = false;
+  private syncReady = false;
+  /** Opened from the stored install check; it gets checked once the chat shows. */
+  private verifyInstall = false;
   /** Live connection to the invite inbox; while it is up the inbox isn't polled. */
   private inbox?: InboxSocket;
   private peers = new Map<string, Promise<PeerInfo>>();
@@ -346,8 +356,6 @@ export class Session {
   /** The provider needs the install: before it, GitHub hides every repo from the app. */
   private async makeProvider() {
     if (this.provider) return;
-    const legacy = await this.ghJson(`/repos/${this.login}/${CONFIG.legacyHomeRepo}`);
-    this.homeRepo = legacy.status === 200 ? CONFIG.legacyHomeRepo : CONFIG.homeRepo;
     this.provider = githubProvider({
       fetch: this.ghFetch as unknown as FetchFn,
       token: 'set-per-request',
@@ -363,9 +371,17 @@ export class Session {
   }
 
   async decidePhase() {
-    if (!(await this.isInstalled())) {
-      this.phase = 'install';
-      return;
+    // This browser saw the install before: open from what it stored and check GitHub after the
+    // chat is on screen, so a reload needs no GitHub round trip before the first screen.
+    const known = await this.db.get<{ homeRepo: string }>('kv', INSTALL_KEY);
+    this.verifyInstall = !!known;
+    if (known) this.homeRepo = known.homeRepo;
+    else {
+      if (!(await this.isInstalled())) {
+        this.phase = 'install';
+        return;
+      }
+      await this.db.put('kv', { homeRepo: this.homeRepo }, INSTALL_KEY);
     }
     await this.makeProvider();
     this.identity = await loadDeviceIdentity(this.device);
@@ -410,9 +426,11 @@ export class Session {
     if (!mine) return false;
     // The home repo must be one the app can open. If it exists but wasn't selected in the
     // install, GitHub hides it from the app and the app can't create it either.
-    const home = await this.ghJson(`/repos/${this.login}/${CONFIG.homeRepo}`);
-    const legacy = home.status === 200 ? home : await this.ghJson(`/repos/${this.login}/${CONFIG.legacyHomeRepo}`);
-    if (home.status === 200 || legacy.status === 200) {
+    // Accounts made before chat-home keep their keyhold-home.
+    const legacy = await this.ghJson(`/repos/${this.login}/${CONFIG.legacyHomeRepo}`);
+    const home = legacy.status === 200 ? legacy : await this.ghJson(`/repos/${this.login}/${CONFIG.homeRepo}`);
+    if (home.status === 200) {
+      this.homeRepo = legacy.status === 200 ? CONFIG.legacyHomeRepo : CONFIG.homeRepo;
       this.homeNotSelected = false;
       return true;
     }
@@ -422,6 +440,7 @@ export class Session {
       body: JSON.stringify({ name: CONFIG.homeRepo, private: true, auto_init: true, description: 'Private home of my end-to-end encrypted chat app (encrypted settings and key backup).' }),
     });
     this.homeNotSelected = created.status === 422;
+    if (!this.homeNotSelected) this.homeRepo = CONFIG.homeRepo;
     return !this.homeNotSelected;
   }
 
@@ -498,8 +517,9 @@ export class Session {
     this.bump();
   }
 
+  /** On as soon as this browser has the key, even while the first sync is still reading. */
   get syncOn() {
-    return !!this.personal;
+    return this.hasSyncKey || !!this.personal;
   }
 
   /** Add this browser as a new device of an existing identity. */
@@ -559,6 +579,7 @@ export class Session {
   // ---- chats ----
 
   private async openChat() {
+    this.stopped = false;
     this.chat = await Chat.open({
       provider: this.provider,
       device: this.device,
@@ -575,7 +596,19 @@ export class Session {
     for (const g of this.chat.groups.values()) this.fill(g);
     for (const k of await this.db.keys('kv', 'declined:')) this.declined.add(k.slice('declined:'.length));
     for (const k of await this.db.keys('kv', 'block:')) this.blocked.add(k.slice('block:'.length));
-    await this.startSync().catch((e) => (this.syncError = describeError(e)));
+    this.hasSyncKey = !!(await this.device.keystore.get(PERSONAL_KEY_SLOT));
+    // The chat list and messages are already in this browser: show them now, and read what other
+    // browsers changed in the background (the sync step waits for this before its own sync work).
+    this.syncStarting = this.startSync()
+      .catch((e) => (this.syncError = describeError(e)))
+      .then(() => {
+        this.syncReady = true;
+        this.bump();
+      });
+    if (this.verifyInstall) {
+      this.verifyInstall = false;
+      void this.checkInstallStill();
+    }
     this.phase = 'ready';
     if (!CONFIG.mock) {
       this.inbox = new InboxSocket(CONFIG.worker, currentToken, () => {
@@ -594,6 +627,25 @@ export class Session {
       };
     }
     void this.loop();
+  }
+
+  /** Opened from the stored install check: make sure the install is still there. */
+  private async checkInstallStill() {
+    let ok: boolean;
+    try {
+      ok = await this.isInstalled();
+    } catch {
+      return; // offline or GitHub hiccup: keep going, the next load checks again
+    }
+    if (this.stopped) return;
+    if (ok) {
+      await this.db.put('kv', { homeRepo: this.homeRepo }, INSTALL_KEY);
+      return;
+    }
+    await this.db.del('kv', INSTALL_KEY);
+    this.stop();
+    this.phase = 'install';
+    this.bump();
   }
 
   record(groupId: string): ChatRecord {
@@ -631,14 +683,39 @@ export class Session {
     if (this.personal) return;
     const raw = await this.device.keystore.get(PERSONAL_KEY_SLOT);
     if (!raw) return;
+    this.hasSyncKey = true;
     const key = await crypto.subtle.importKey('raw', raw as Uint8Array<ArrayBuffer>, 'AES-GCM', false, ['encrypt', 'decrypt']);
+    // What this browser already wrote, so a reload doesn't write it all again.
+    const sent = await this.db.get<Record<string, string>>('kv', PUSHED_KEY);
+    if (sent) for (const [k, v] of Object.entries(sent)) if (!this.pushed.has(k)) this.pushed.set(k, v);
     this.personal = await PersonalData.open(this.provider.personal, key, this.identity!.deviceId);
-    // Everything this browser knows goes up once; merging makes repeats harmless.
+    // Everything this browser knows goes up once (only what changed since it last did).
     for (const r of this.records.values()) this.push(r);
-    for (const a of this.blocked) await this.personal.set('blocks', a, { blocked: true });
-    for (const sp of this.declined) await this.personal.set('settings', `declined:${sp}`, { value: true }, { value: 'once' });
+    for (const a of this.blocked) await this.syncBlock(a, true);
+    for (const sp of this.declined) await this.syncDeclined(sp);
     await this.pull();
-    await this.personal.flush();
+    await this.flushPersonal();
+  }
+
+  /** Write queued changes; once nothing is left queued, remember what has been written. */
+  private async flushPersonal() {
+    const p = this.personal;
+    if (!p) return;
+    await p.flush();
+    if (!p.pending) await this.db.put('kv', Object.fromEntries(this.pushed), PUSHED_KEY);
+  }
+
+  private async syncBlock(address: string, blocked: boolean) {
+    const mark = blocked ? 'on' : 'off';
+    if (!this.personal || this.pushed.get(`b/${address}`) === mark) return;
+    this.pushed.set(`b/${address}`, mark);
+    await this.personal.set('blocks', address, { blocked: blocked || undefined });
+  }
+
+  private async syncDeclined(space: string) {
+    if (!this.personal || this.pushed.has(`d/${space}`)) return;
+    this.pushed.set(`d/${space}`, 'on');
+    await this.personal.set('settings', `declined:${space}`, { value: true }, { value: 'once' });
   }
 
   /** Queue the synced fields of a chat, if they changed since last time. */
@@ -677,6 +754,7 @@ export class Session {
           await this.saveRecord(r);
         }
       } else if (ch.collection === 'blocks') {
+        this.pushed.set(`b/${ch.key}`, v.blocked ? 'on' : 'off');
         if (v.blocked) {
           if (!this.blocked.has(ch.key)) {
             this.blocked.add(ch.key);
@@ -685,6 +763,7 @@ export class Session {
         } else if (this.blocked.delete(ch.key)) await this.db.del('kv', `block:${ch.key}`);
       } else if (ch.collection === 'settings' && ch.key.startsWith('declined:') && v.value) {
         const sp = ch.key.slice('declined:'.length);
+        this.pushed.set(`d/${sp}`, 'on');
         if (!this.declined.has(sp)) {
           this.declined.add(sp);
           await this.db.put('kv', Date.now(), `declined:${sp}`);
@@ -733,7 +812,7 @@ export class Session {
     if (r.space && !this.declined.has(r.space)) {
       this.declined.add(r.space);
       await this.db.put('kv', Date.now(), `declined:${r.space}`);
-      await this.personal?.set('settings', `declined:${r.space}`, { value: true }, { value: 'once' });
+      await this.syncDeclined(r.space);
     }
   }
 
@@ -1062,7 +1141,7 @@ export class Session {
   async block(address: string) {
     this.blocked.add(address);
     await this.db.put('kv', Date.now(), `block:${address}`);
-    await this.personal?.set('blocks', address, { blocked: true });
+    await this.syncBlock(address, true);
     const c = this.liveDm(address);
     if (c?.live) {
       if (this.isOwner(c.live)) await this.closeChat(c.live);
@@ -1075,7 +1154,7 @@ export class Session {
   async unblock(address: string) {
     this.blocked.delete(address);
     await this.db.del('kv', `block:${address}`);
-    await this.personal?.set('blocks', address, { blocked: undefined });
+    await this.syncBlock(address, false);
     this.bump();
   }
 
@@ -1541,7 +1620,7 @@ export class Session {
     if (inv.space) {
       this.declined.add(inv.space);
       await this.db.put('kv', Date.now(), `declined:${inv.space}`);
-      await this.personal?.set('settings', `declined:${inv.space}`, { value: true }, { value: 'once' });
+      await this.syncDeclined(inv.space);
     }
     this.invites.delete(key);
     this.bump();
@@ -1605,8 +1684,10 @@ export class Session {
    * Run every check now instead of when its timer comes due, and resolve once that full sync step
    * has finished. The schedule is untouched otherwise.
    */
-  syncNow(): Promise<void> {
-    if (this.stopped || !this.chat) return Promise.resolve();
+  async syncNow(): Promise<void> {
+    if (this.stopped || !this.chat) return;
+    await this.syncStarting;
+    if (this.stopped) return;
     this.lastInvites = 0;
     this.lastClosures = 0;
     this.lastPull = 0;
@@ -1622,8 +1703,11 @@ export class Session {
     });
   }
 
+  private loopRun = 0;
   private async loop() {
-    while (!this.stopped) {
+    // A chat reopened after a stop (install came back) starts a new loop; an older one ends.
+    const run = ++this.loopRun;
+    while (!this.stopped && run === this.loopRun) {
       const waiting = this.afterTick.splice(0);
       try {
         await this.tick();
@@ -1684,12 +1768,20 @@ export class Session {
 
   /** Write queued changes soon after they happen; read other browsers' when the home repo changed. */
   private async syncPersonal(now: number, hidden: boolean) {
+    if (!this.syncReady) return;
     const p = this.personal;
-    if (!p) return;
+    if (!p) {
+      // The start-up read failed (offline?): try again now and then.
+      if (this.hasSyncKey && now - this.lastPull > PERSONAL_PULL_MS) {
+        this.lastPull = now;
+        await this.startSync().then(() => (this.syncError = undefined), (e) => (this.syncError = describeError(e)));
+      }
+      return;
+    }
     try {
       if (p.pending && now - this.lastFlush > PERSONAL_FLUSH_MS) {
         this.lastFlush = now;
-        await p.flush();
+        await this.flushPersonal();
       }
       if (now - this.lastPull > (hidden ? HIDDEN_POLL_MS : PERSONAL_PULL_MS)) {
         this.lastPull = now;
