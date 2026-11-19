@@ -28,6 +28,26 @@ describe('two browsers of one account', () => {
     await w.until(async () => (await alice2.texts(alice2.chat('bob'))).includes('for both browsers') && (await alice.texts(alice.chat('bob'))).includes('for both browsers'), 'both browsers get it');
   });
 
+  it('messages sent back to back reach both browsers of the receiver, none undecryptable', async () => {
+    w = await world();
+    const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
+    const code = await alice.setup();
+    await bob.setup();
+    await w.dm(alice, bob);
+    const alice2 = await w.browser('alice');
+    await alice2.restore(code);
+    await w.until(() => !!alice2.chat('bob')?.live, 'alice2 joined');
+    await bob.s.send(bob.chat('alice')!.live!, 'one');
+    await w.until(async () => (await alice2.texts(alice2.chat('bob'))).includes('one'), 'alice2 got the first');
+
+    // Enter pressed twice quickly: the second send starts before the first is posted.
+    const g = bob.chat('alice')!.live!;
+    await Promise.all([bob.s.send(g, 'two'), bob.s.send(g, 'three')]);
+    const all = async (b: typeof alice) => (await b.texts(b.chat('bob'))).filter((t) => ['one', 'two', 'three'].includes(t)).length === 3;
+    await w.until(async () => (await all(alice)) && (await all(alice2)), 'both browsers have all three');
+    for (const b of [alice, alice2]) expect((await b.notes(b.chat('bob'))).filter((n) => n.includes('could not be decrypted'))).toEqual([]);
+  });
+
   it('Delete chat, close, and deleting an ended chat reach the other browser', async () => {
     w = await world();
     const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
