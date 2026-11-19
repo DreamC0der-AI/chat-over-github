@@ -85,9 +85,6 @@ export const Icon = {
   info: () => (
     <svg width="16" height="16" viewBox="0 0 24 24" {...P} aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v6M12 7.5h.01" /></svg>
   ),
-  smile: (s = 18) => (
-    <svg width={s} height={s} viewBox="0 0 24 24" {...P} aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0" /><path d="M9 9.5h.01M15 9.5h.01" strokeWidth={2.6} /></svg>
-  ),
   copy: () => (
     <svg width="16" height="16" viewBox="0 0 24 24" {...P} aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V6a2 2 0 0 1 2-2h9" /></svg>
   ),

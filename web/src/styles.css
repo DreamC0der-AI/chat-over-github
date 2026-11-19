@@ -267,22 +267,10 @@ code { background: var(--subtle); padding: 1px 5px; border-radius: 5px; }
 .msg.mine .bubble.deleted { background: none; color: var(--faint); }
 .bubble.pending { opacity: .55; }
 
-/* Hover: one small smiley beside the bubble's top corner (the side facing the middle).
-   Click it for the quick emoji row; right-click or long-press the bubble for the full menu. */
-.react-btn {
-  position: absolute; top: 2px; left: calc(100% + 4px); z-index: 2;
-  width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%;
-  display: inline-flex; align-items: center; justify-content: center;
-  background: none; color: var(--faint); cursor: pointer;
-  opacity: 0; transition: opacity .12s, background-color .12s, color .12s;
-}
-.msg.mine .react-btn { left: auto; right: calc(100% + 4px); }
-.msg:hover .react-btn, .react-btn:focus-visible, .msg.popup-open .react-btn { opacity: 1; }
-.react-btn:hover, .react-btn[aria-expanded='true'] { background: var(--hover); color: var(--fg); }
+/* Right-click (long press on touch screens) opens the message menu: emoji row, then actions. */
 .msg.popup-open .bubble:not(.has-media) { filter: brightness(.95); }
 .msg.popup-open .bubble.has-media { filter: brightness(.9); }
 @media (hover: none) {
-  .react-btn { display: none; }
   /* A long press opens the menu (with Copy), so the bubble doesn't start a text selection. */
   .bubble { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 }
@@ -293,7 +281,6 @@ code { background: var(--subtle); padding: 1px 5px; border-radius: 5px; }
   animation: msgpop .12s ease-out;
 }
 @keyframes msgpop { from { opacity: 0; transform: scale(.96); } }
-.msg-pop.quick { border-radius: 999px; padding: 4px; }
 .msg-pop.full { padding: 6px; min-width: 216px; display: flex; flex-direction: column; }
 .msg-pop.full .emoji-row { justify-content: space-between; }
 .msg-pop.full .menu-sep { margin: 4px 2px; }
@@ -302,8 +289,6 @@ code { background: var(--subtle); padding: 1px 5px; border-radius: 5px; }
 .emoji:hover:not(:disabled), .emoji:focus-visible { background: var(--hover); transform: scale(1.12); outline: none; }
 .emoji.on { background: var(--accent-bg); box-shadow: inset 0 0 0 1px var(--accent-border); }
 .emoji:disabled { opacity: .45; cursor: progress; }
-.emoji.more { color: var(--muted); font-size: 0; }
-.emoji.more:hover { transform: none; color: var(--fg); }
 .reaction { display: inline-flex; align-items: center; gap: 4px; height: 24px; border: 1px solid transparent; border-radius: 999px; background: var(--hover); font: inherit; font-size: 12px; padding: 0 8px; cursor: pointer; color: var(--fg); }
 .reaction span { color: var(--muted); font-weight: 600; }
 .reaction:hover:not(:disabled) { background: var(--press); }

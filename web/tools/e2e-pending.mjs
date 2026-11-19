@@ -38,8 +38,7 @@ async function writes(p, mode) {
 }
 const msg = (p, text) => p.page.locator('.msg', { hasText: text }).first();
 async function quickReact(p, text, emoji) {
-  await msg(p, text).hover();
-  await msg(p, text).getByRole('button', { name: 'Add reaction' }).click();
+  await msg(p, text).locator('.bubble').click({ button: 'right' });
   await p.page.getByRole('menuitemcheckbox', { name: `React ${emoji}` }).click();
 }
 async function send(p, text) {

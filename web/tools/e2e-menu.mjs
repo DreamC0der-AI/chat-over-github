@@ -54,31 +54,20 @@ const onScreen = async (p, l) => {
 };
 const popup = (p) => p.page.locator('.msg-pop');
 
-/** Hover a message: the smiley sits just outside the bubble's top corner, on the side facing the middle. */
-async function checkSmiley(p, m, mine, what) {
+/** Hovering adds no buttons; right-click opens the menu at the pointer, on screen, emoji row on top. */
+async function checkMenu(p, m, what, shot, at = [0.5, 0.5]) {
   await m.locator('.bubble').hover();
-  const btn = m.getByRole('button', { name: 'Add reaction' });
-  await btn.waitFor();
-  await p.page.waitForTimeout(200);
+  await p.page.waitForTimeout(150);
+  check((await m.locator('.bubble-line > button').count()) === 0, `${what}: hover adds no buttons`);
   const b = await box(m.locator('.bubble'));
-  const s = await box(btn);
-  const outside = mine ? s.x + s.width <= b.x + 0.5 && b.x - (s.x + s.width) < 10 : s.x >= b.x + b.width - 0.5 && s.x - (b.x + b.width) < 10;
-  check(outside && Math.abs(s.y - b.y) < 6 && (await onScreen(p, btn)) && (await btn.evaluate((e) => getComputedStyle(e).opacity)) === '1', `${what}: smiley shows at the bubble's top ${mine ? 'left' : 'right'} corner`);
-  return btn;
-}
-/** Click the smiley: the emoji row opens just above the bubble, lined up with its outer edge. */
-async function checkQuick(p, m, mine, what, shot) {
-  const btn = await checkSmiley(p, m, mine, what);
-  await btn.click();
+  const x = b.x + b.width * at[0], y = b.y + b.height * at[1];
+  await p.page.mouse.click(x, y, { button: 'right' });
   const pop = popup(p);
   await pop.waitFor();
   await p.page.waitForTimeout(200);
-  const b = await box(m.locator('.bubble'));
   const q = await box(pop);
-  const above = q.y + q.height <= b.y + 0.5;
-  const aligned = mine ? Math.abs(q.x + q.width - (b.x + b.width)) < 2 : Math.abs(q.x - b.x) < 2;
-  check((above || q.y >= b.y + b.height - 0.5) && (await onScreen(p, pop)), `${what}: emoji row opens beside the bubble, on screen`);
-  check(above ? aligned || q.x <= 9 || q.x + q.width >= p.page.viewportSize().width - 9 : true, `${what}: emoji row lines up with the bubble edge`);
+  const nearPointer = (Math.abs(q.x - x) < 2 || Math.abs(q.x + q.width - x) < 2 || q.x <= 9 || q.x + q.width >= p.page.viewportSize().width - 9) && (Math.abs(q.y - y) < 2 || Math.abs(q.y + q.height - y) < 2 || q.y <= 9);
+  check(nearPointer && (await onScreen(p, pop)) && (await pop.getByRole('menuitemcheckbox').count()) === 5, `${what}: right-click opens the menu at the pointer, on screen, with the emoji row`);
   if (shot) await p.page.screenshot({ path: `${SHOTS}/${shot}.png` });
   await p.page.keyboard.press('Escape');
   await pop.waitFor({ state: 'detached' });
@@ -113,33 +102,31 @@ try {
   await alice.page.waitForTimeout(800);
 
   // Desktop, their messages (left) and mine (right), text, a long text, a picture, a file.
-  await checkQuick(alice, msg(alice, 'party'), false, 'their short text', 'menu-quick-theirs');
-  await checkQuick(alice, msg(alice, 'longer message'), false, 'their long text');
-  await checkQuick(alice, imgMsg(alice), false, 'their picture', 'menu-quick-picture');
-  await checkQuick(alice, fileMsg(alice), true, 'my file');
-  await checkQuick(alice, msg(alice, 'Sounds good'), true, 'my text', 'menu-quick-mine');
-
-  // Nothing big appears on a plain hover: one small button only.
-  await msg(alice, 'party').locator('.bubble').hover();
-  const sb = await box(msg(alice, 'party').getByRole('button', { name: 'Add reaction' }));
-  check(sb.width <= 30 && sb.height <= 30 && !(await popup(alice).count()), 'hover shows only the small smiley');
-  await alice.page.mouse.move(600, 20);
-  await alice.page.screenshot({ path: `${SHOTS}/menu-hover.png` });
+  await checkMenu(alice, msg(alice, 'party'), 'their short text');
+  await checkMenu(alice, msg(alice, 'longer message'), 'their long text', null, [0.95, 0.5]);
+  await checkMenu(alice, imgMsg(alice), 'their picture', 'menu-picture');
+  await checkMenu(alice, fileMsg(alice), 'my file', 'menu-file-mine');
+  await checkMenu(alice, msg(alice, 'Sounds good'), 'my text');
   await msg(alice, 'party').locator('.bubble').hover();
   await alice.page.screenshot({ path: `${SHOTS}/menu-hover-on.png` });
 
-  // Picking an emoji reacts (pending first) and closes the row.
-  await msg(alice, 'party').locator('.bubble').hover();
-  await msg(alice, 'party').getByRole('button', { name: 'Add reaction' }).click();
+  // Picking an emoji reacts (pending first) and closes the menu.
+  await msg(alice, 'party').locator('.bubble').click({ button: 'right' });
   await alice.page.getByRole('menuitemcheckbox', { name: 'React 🎉' }).click();
-  check(!(await popup(alice).count()), 'picking an emoji closes the row');
+  check(!(await popup(alice).count()), 'picking an emoji closes the menu');
   await msg(alice, 'party').locator('.reaction.me', { hasText: '🎉' }).waitFor({ timeout: 2000 });
   check(true, 'reaction shows at once');
   await msg(alice, 'party').locator('.reaction.me:not(.pending)').waitFor({ timeout: 15000 });
-  await msg(alice, 'party').locator('.bubble').hover();
-  await msg(alice, 'party').getByRole('button', { name: 'Add reaction' }).click();
-  check((await alice.page.getByRole('menuitemcheckbox', { name: 'React 🎉' }).getAttribute('aria-checked')) === 'true', 'the row marks emoji you already used');
+  await msg(alice, 'party').locator('.bubble').click({ button: 'right' });
+  check((await alice.page.getByRole('menuitemcheckbox', { name: 'React 🎉' }).getAttribute('aria-checked')) === 'true', 'the menu marks emoji you already used');
   await alice.page.keyboard.press('Escape');
+  // Tapping an existing reaction chip still toggles it.
+  await msg(alice, 'party').locator('.reaction.me').click();
+  await msg(alice, 'party').locator('.reaction').waitFor({ state: 'detached', timeout: 15000 });
+  check(true, 'clicking your reaction chip takes it back');
+  await msg(alice, 'party').locator('.bubble').click({ button: 'right' });
+  await alice.page.getByRole('menuitemcheckbox', { name: 'React 🎉' }).click();
+  await msg(alice, 'party').locator('.reaction.me:not(.pending)').waitFor({ timeout: 15000 });
 
   // Right-click: full menu at the pointer, emoji row on top, actions below.
   const pb = await box(msg(alice, 'party').locator('.bubble'));
@@ -174,13 +161,6 @@ try {
   check((await popup(alice).getByRole('menuitem').allInnerTexts()).join('|') === 'Download|Delete for everyone', 'right-click on my file: Download + Delete');
   await alice.page.keyboard.press('Escape');
 
-  // "More actions" in the quick row opens the full menu.
-  await msg(alice, 'Sounds good').locator('.bubble').hover();
-  await msg(alice, 'Sounds good').getByRole('button', { name: 'Add reaction' }).click();
-  await alice.page.getByRole('menuitem', { name: 'More actions' }).click();
-  check((await popup(alice).getByRole('menuitem').allInnerTexts()).includes('Delete for everyone') && (await onScreen(alice, popup(alice))), 'More actions opens the full menu beside the bubble');
-  await alice.page.keyboard.press('Escape');
-
   // Links keep the browser's own right-click menu; a plain click on a bubble opens nothing; pictures still open.
   await msg(alice, 'party').locator('.bubble').click();
   check(!(await popup(alice).count()), 'clicking a bubble opens nothing');
@@ -199,10 +179,10 @@ try {
   // Narrow desktop window.
   await alice.page.setViewportSize({ width: 560, height: 700 });
   await alice.page.waitForTimeout(300);
-  await checkQuick(alice, msg(alice, 'longer message'), false, 'narrow window, their long text', 'menu-quick-narrow');
-  await checkQuick(alice, fileMsg(alice), true, 'narrow window, my file');
+  await checkMenu(alice, msg(alice, 'longer message'), 'narrow window, their long text', 'menu-narrow', [0.95, 0.5]);
+  await checkMenu(alice, fileMsg(alice), 'narrow window, my file', null, [0.9, 0.9]);
 
-  // Phone: no hover button; long press opens the full menu beside the bubble.
+  // Phone: long press opens the full menu beside the bubble.
   const cdp = await bob.ctx.newCDPSession(bob.page);
   const longPress = async (l, dx = 0.5, dy = 0.5) => {
     const b = await box(l);
@@ -211,7 +191,6 @@ try {
     await bob.page.waitForTimeout(700);
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   };
-  check(!(await bob.page.getByRole('button', { name: 'Add reaction' }).first().isVisible()), 'phone: no hover smiley');
   for (const [l, what, shot] of [
     [msg(bob, 'party'), 'phone, my text', 'menu-phone-mine'],
     [bob.page.locator('.msg', { has: bob.page.locator('.bubble.deleted') }).last(), 'phone, their deleted text', null],
