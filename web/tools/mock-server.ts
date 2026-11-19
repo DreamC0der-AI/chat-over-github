@@ -1,21 +1,16 @@
 /**
- * Local test backend: the in-memory GitHub + Worker mock from keyhold's tests, served over
- * HTTP with CORS, plus the few endpoints the web app adds (/user, /users/:login, commits ETag,
- * repo delete, own installation). Also serves the mock build (dist-mock) at /.
+ * Local test backend over HTTP for the browser checks: the in-memory backend from
+ * mock-backend.ts with CORS, plus the mock build (dist-mock) at /.
  *   node tools/mock-server.mjs [port]
  */
 import { createServer } from 'node:http';
-import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
-import { MockGitHub } from '../../provider/tests/github-mock.ts';
+import { mockBackend } from './mock-backend.ts';
 
 const port = Number(process.argv[2] ?? 8787);
 const root = join(process.cwd(), 'dist-mock');
-const gh = new MockGitHub();
-const installed = new Set<string>();
-/** Worker closure notices: member login -> notices. */
-const closures = new Map<string, { id: string; from: string; from_id: number; tag: string; at: string }[]>();
+const backend = mockBackend();
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -24,94 +19,22 @@ const cors = {
   'Access-Control-Expose-Headers': 'ETag, X-RateLimit-Remaining',
 };
 
-function userOf(auth: string | undefined) {
-  const tok = auth?.replace(/^Bearer /, '');
-  if (!tok?.startsWith('tok-')) return undefined;
-  const login = tok.slice(4);
-  if (!gh.users.has(login)) gh.addUser(login);
-  return login;
-}
-
 const TYPES: Record<string, string> = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.svg': 'image/svg+xml' };
 
 createServer(async (req, res) => {
   const url = new URL(req.url!, `http://localhost:${port}`);
   const send = (status: number, body: string | Buffer = '', headers: Record<string, string> = {}) => {
-    res.writeHead(status, { ...cors, 'X-RateLimit-Remaining': '4999', ...headers });
+    res.writeHead(status, { ...cors, ...headers });
     res.end(body);
   };
   if (req.method === 'OPTIONS') return send(204);
   const chunks: Buffer[] = [];
   for await (const c of req) chunks.push(c as Buffer);
   const body = Buffer.concat(chunks).toString() || undefined;
-  const auth = req.headers.authorization;
-  const user = userOf(auth);
-  const json = (status: number, data: unknown, h: Record<string, string> = {}) => send(status, JSON.stringify(data), { 'Content-Type': 'application/json', ...h });
-
-  if (url.pathname.startsWith('/gh/') || url.pathname.startsWith('/worker/')) {
-    const isGh = url.pathname.startsWith('/gh/');
-    const rest = url.pathname.slice(isGh ? 3 : 7) + url.search;
-    const path = decodeURIComponent(url.pathname.slice(isGh ? 3 : 7));
-    if (isGh) {
-      if (path === '/user') return user ? json(200, { login: user, id: gh.users.get(user)!.id }) : json(401, {});
-      let m = path.match(/^\/users\/([^/]+)$/);
-      if (m) {
-        const l = m[1]!.toLowerCase();
-        return gh.users.has(l) ? json(200, { login: m[1], id: gh.users.get(l)!.id, type: 'User' }) : json(404, { message: 'Not Found' });
-      }
-      m = path.match(/^\/repos\/([^/]+)\/([^/]+)\/commits$/);
-      if (m && req.method === 'GET') {
-        const r = gh.repos.get(`${m[1]}/${m[2]}`.toLowerCase());
-        if (!r || !gh.canRead(r, user)) return json(404, { message: 'Not Found' });
-        const h = createHash('sha1');
-        for (const [p, f] of [...r.files].sort()) h.update(`${p}:${f.sha};`);
-        const etag = `"${h.digest('hex')}"`;
-        if (req.headers['if-none-match'] === etag) return send(304, '', { ETag: etag });
-        return json(200, [{ sha: etag }], { ETag: etag });
-      }
-      m = path.match(/^\/repos\/([^/]+)\/([^/]+)$/);
-      if (m && req.method === 'DELETE') {
-        const k = `${m[1]}/${m[2]}`.toLowerCase();
-        const r = gh.repos.get(k);
-        if (!r) return send(404);
-        if (r.owner !== user) return json(403, {});
-        gh.repos.delete(k);
-        return send(204);
-      }
-      // Test hook: users named new* have no install until POST /gh/mock/install.
-      if (path === '/mock/install' && user && req.method === 'POST') {
-        installed.add(user);
-        return send(204);
-      }
-      if (path === '/user/installations' && user) {
-        const r = await gh.fetch(gh.api + rest, { method: 'GET', headers: { Authorization: auth! } });
-        const data = (await r.json()) as { installations: { id: number; account: { login: string } }[] };
-        if (user.startsWith('new') && !installed.has(user)) data.installations = data.installations.filter((i) => i.account.login !== user);
-        else if (!data.installations.some((i) => i.account.login === user)) data.installations.push({ id: gh.users.get(user)!.id, account: { login: user } });
-        return json(200, data);
-      }
-    }
-    if (!isGh && path === '/closures' && user) {
-      if (req.method === 'GET') return json(200, { closures: closures.get(user) ?? [] });
-      if (req.method === 'POST') {
-        const b = JSON.parse(body ?? '{}') as { to: string; tag: string };
-        const to = String(b.to).toLowerCase();
-        if (!gh.users.has(to)) return json(404, { error: 'no such user' });
-        const me = gh.users.get(user)!;
-        const entry = { id: `${me.id}:${b.tag}`, from: user, from_id: me.id, tag: b.tag, at: new Date().toISOString() };
-        closures.set(to, [...(closures.get(to) ?? []).filter((c) => c.id !== entry.id), entry]);
-        return json(201, { ok: true });
-      }
-    }
-    const cm = path.match(/^\/closures\/(.+)$/);
-    if (!isGh && cm && req.method === 'DELETE' && user) {
-      closures.set(user, (closures.get(user) ?? []).filter((c) => c.id !== cm[1]));
-      return json(200, { ok: true });
-    }
-    const r = await gh.fetch((isGh ? gh.api : gh.worker) + rest, { method: req.method, headers: auth ? { Authorization: auth } : {}, body });
-    const text = await r.text();
-    return send(r.status, text, text ? { 'Content-Type': 'application/json' } : {});
-  }
+  const headers: Record<string, string | undefined> = {};
+  for (const [k, v] of Object.entries(req.headers)) headers[k] = Array.isArray(v) ? v.join(', ') : v;
+  const r = await backend.handle({ method: req.method ?? 'GET', url, headers, body });
+  if (r) return send(r.status, r.body, r.headers);
 
   // static files
   let p = normalize(url.pathname).replace(/^(\.\.[/\\])+/, '');

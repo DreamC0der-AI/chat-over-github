@@ -287,7 +287,11 @@ export class Session {
   private inbox?: InboxSocket;
   private peers = new Map<string, Promise<PeerInfo>>();
 
-  constructor(readonly auth: AuthState) {
+  constructor(
+    readonly auth: AuthState,
+    /** What a browser provides. The app uses the defaults; the no-browser tests pass their own per simulated browser. */
+    private readonly env: { token?: (force: boolean) => Promise<string>; indexedDB?: IDBFactory } = {},
+  ) {
     this.login = auth.login.toLowerCase();
     this.address = toAddress(this.login);
   }
@@ -309,7 +313,7 @@ export class Session {
   /** fetch with the current (refreshed) token, no HTTP cache, and rate-limit tracking. */
   ghFetch = async (url: string, init: { method?: string; headers?: Record<string, string>; body?: string } = {}) => {
     const go = async (force: boolean) => {
-      const token = await currentToken(force);
+      const token = await (this.env.token ?? currentToken)(force);
       return fetch(url, { ...init, headers: { ...(init.headers ?? {}), Authorization: `Bearer ${token}` }, cache: 'no-store' });
     };
     let r = await go(false);
@@ -329,7 +333,7 @@ export class Session {
 
   async start() {
     try {
-      this.db = await Db.open(`keyhold-chat:${this.auth.id}`);
+      this.db = await Db.open(`keyhold-chat:${this.auth.id}`, this.env.indexedDB);
       this.device = idbDevice(this.db);
       await this.decidePhase();
     } catch (e) {
@@ -543,13 +547,13 @@ export class Session {
       if (![204, 404].includes(r.status)) throw new Error(`Could not delete ${name} (${r.status})`);
     }
     this.db.close();
-    await Db.delete(this.db.name);
+    await Db.delete(this.db.name, this.env.indexedDB);
   }
 
   async forgetBrowser() {
     this.stop();
     this.db.close();
-    await Db.delete(this.db.name);
+    await Db.delete(this.db.name, this.env.indexedDB);
   }
 
   // ---- chats ----
@@ -1610,6 +1614,8 @@ export class Session {
     this.lastFlush = 0;
     this.lastCheck.clear();
     this.lastFullSync.clear();
+    this.lastSpaceScan = 0;
+    for (const inv of this.invites.values()) inv.nextTry = 0;
     return new Promise<void>((resolve) => {
       this.afterTick.push(resolve);
       this.kick?.();
@@ -1627,6 +1633,8 @@ export class Session {
         this.bump();
       }
       for (const done of waiting) done();
+      // Someone asked for another step while this one ran: run it now, don't wait for the timer.
+      if (this.afterTick.length) continue;
       await new Promise<void>((resolve) => {
         const t = setTimeout(resolve, LOOP_MS);
         this.kick = () => {

@@ -11,9 +11,10 @@ type StoreName = (typeof STORES)[number];
 export class Db {
   private constructor(readonly db: IDBDatabase, readonly name: string) {}
 
-  static open(name: string): Promise<Db> {
+  /** `factory` is the browser's indexedDB; tests pass their own, one per simulated browser. */
+  static open(name: string, factory: IDBFactory = indexedDB): Promise<Db> {
     return new Promise((resolve, reject) => {
-      const req = indexedDB.open(name, 1);
+      const req = factory.open(name, 1);
       req.onupgradeneeded = () => {
         const db = req.result;
         for (const s of STORES) {
@@ -29,9 +30,9 @@ export class Db {
     });
   }
 
-  static delete(name: string): Promise<void> {
+  static delete(name: string, factory: IDBFactory = indexedDB): Promise<void> {
     return new Promise((resolve, reject) => {
-      const req = indexedDB.deleteDatabase(name);
+      const req = factory.deleteDatabase(name);
       req.onsuccess = () => resolve();
       req.onerror = () => reject(req.error);
       req.onblocked = () => resolve();

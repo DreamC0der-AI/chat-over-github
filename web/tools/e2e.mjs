@@ -1,4 +1,7 @@
 // End-to-end check against the local mock backend: two people, a DM, a group, a second device.
+// This proves the screens are wired to the app: buttons, dialogs, menus, what shows where. The
+// chat rules themselves (who joins when, what syncs, what ends a chat) are tested much faster
+// without a browser in web/tests/*.test.ts.
 //   node tools/mock-server.mjs 8787 &   then   node tools/e2e.mjs
 import { createRequire } from 'node:module';
 const { chromium } = createRequire(import.meta.url)('playwright');
@@ -219,40 +222,6 @@ try {
   check((await alice2.page.locator('.box-row', { hasText: 'Added' }).count()) === 2, 'two devices listed');
   await alice2.page.screenshot({ path: `${SHOTS}/settings.png` });
 
-  // invited before having an identity: joins after the inviter's app confirms it
-  const dave = await person('dave');
-  await dave.page.getByRole('button', { name: 'Create identity' }).waitFor();
-  await alice.page.getByRole('button', { name: 'New chat' }).first().click();
-  await alice.page.getByLabel('GitHub username').fill('dave');
-  await alice.page.getByRole('button', { name: 'Start chat' }).click();
-  await alice.page.locator('.sys', { hasText: 'Invitation sent to @dave' }).waitFor({ timeout: 30000 });
-  const t0 = Date.now();
-  await setup(dave);
-  await accept(dave, 'alice', 60000);
-  await dave.page.screenshot({ path: `${SHOTS}/invite-pending.png` });
-  await dave.page.locator('.chat-item', { hasText: 'alice' }).waitFor({ timeout: 90000 });
-  check(true, `dave (no identity when invited) joined after ${Math.round((Date.now() - t0) / 1000)}s`);
-  await dave.page.locator('.chat-item', { hasText: 'alice' }).click();
-  await sendMsg(dave, 'dave here');
-  await alice.page.locator('.chat-item', { hasText: 'dave' }).click();
-  await bubble(alice, 'dave here').waitFor({ timeout: 30000 });
-  check(true, 'dave and alice can talk');
-
-  // decline: dave turns down a DM from carol, and it stays gone
-  await carol.page.getByRole('button', { name: 'New chat' }).first().click();
-  await carol.page.getByLabel('GitHub username').fill('dave');
-  await carol.page.getByRole('button', { name: 'Start chat' }).click();
-  await carol.page.locator('.sys', { hasText: 'Invitation sent to @dave' }).waitFor({ timeout: 30000 });
-  const decl = dave.page.locator('div.row', { hasText: 'carol invited you' }).filter({ has: dave.page.getByRole('button', { name: 'Decline' }) }).first();
-  await decl.waitFor({ timeout: 45000 });
-  await decl.getByRole('button', { name: 'Decline' }).click();
-  await dave.page.getByText('carol invited you').waitFor({ state: 'detached', timeout: 15000 });
-  const invs = await dave.page.evaluate(() => fetch('/gh/user/repository_invitations', { headers: { Authorization: 'Bearer tok-dave' } }).then((r) => r.json()).catch(() => []));
-  await dave.page.evaluate(() => { location.hash = '#/'; }); await dave.page.reload();
-  await dave.page.getByRole('heading', { name: /Pick a chat/ }).waitFor({ timeout: 20000 });
-  await syncRounds(dave, 3);
-  check(!(await dave.page.getByText('carol invited you').count()) && !(await dave.page.locator('.chat-item', { hasText: 'carol' }).count()), `dave declined carol's invitation and it stayed gone (open GitHub invitations: ${Array.isArray(invs) ? invs.length : '?'})`);
-
   const openChat = async (p, name) => {
     await p.page.evaluate(() => { if (location.hash.startsWith('#/settings')) location.hash = '#/'; });
     await p.page.locator('.chat-item', { hasText: name }).first().click();
@@ -289,81 +258,13 @@ try {
   check(await alice.page.locator('.sys.divider', { hasText: 'new chat started' }).count() > 0 && (await bubble(alice, 'after the clear').count()) > 0, 'old history above a divider, then the new room');
   await alice.page.screenshot({ path: `${SHOTS}/recreated-alice.png` });
 
-  // Delete chat syncs to alice's other browser
-  // (her second browser joins the new room by itself, from the synced chat list; it can only
-  // read what is sent after it joined)
-  // A background page counts as hidden: the app then polls every 90 s and Chrome slows its timers,
-  // so put this browser in front, as a person looking at it would.
-  console.log(new Date().toISOString().slice(11, 19), "alice2 visibility before:", await alice2.page.evaluate(() => document.visibilityState));
-  await alice2.page.bringToFront();
-  await openChat(alice2, 'bob');
-  // The new room is found by the repo scan, which runs once a minute, then joined: allow two minutes.
-  await alice2.page.locator('#composer:enabled').waitFor({ timeout: 120000 });
-  await syncRounds(alice2, 1);
-  await sendMsg(bob, 'for both browsers');
-  await bubble(alice2, 'for both browsers').waitFor({ timeout: 60000 });
-  await bubble(alice, 'for both browsers').waitFor({ timeout: 60000 });
-  await menu(alice, 'Delete chat');
-  await bubble(alice, 'for both browsers').waitFor({ state: 'detached', timeout: 10000 });
-  await bubble(alice2, 'for both browsers').waitFor({ state: 'detached', timeout: 60000 });
-  check((await count(alice2, 'bob')) === 1 && !(await bubble(alice2, 'after the clear').count()), "alice's delete reached her second browser; the chat stays");
-  await sendMsg(bob, 'still here after alice cleared');
-  await bubble(alice2, 'still here after alice cleared').waitFor({ timeout: 45000 });
-  check(true, 'new messages still arrive on both of her browsers');
-
-  // Quit: dave (not the owner) quits; alice sees he left, can't send, and closes
-  await openChat(dave, 'alice');
-  await menu(dave, 'Quit chat');
-  await dave.page.locator('.sys.divider', { hasText: 'You left this chat' }).waitFor({ timeout: 30000 });
-  await openChat(alice, 'dave');
-  await alice.page.getByText('dave left this chat.').waitFor({ timeout: 60000 });
-  check(await alice.page.locator('#composer').isDisabled(), 'alice sees "dave left", sending is off');
-  await alice.page.locator('.banner').getByRole('button', { name: 'Close chat' }).click();
-  await alice.page.locator('.sys.divider', { hasText: 'You closed this chat' }).waitFor({ timeout: 30000 });
-  check(true, 'alice closed the chat dave quit');
-  // Deleting an ended chat removes it from her other browser's list too
-  await menu(alice, 'Delete chat');
-  check(await until(alice, async () => (await count(alice, 'dave')) === 0, 5000), 'ended chat deleted from the list');
-  const gone = await until(alice2, async () => (await count(alice2, 'dave')) === 0, 60000);
-  check(gone, "and from alice's second browser");
-
-  // Block: dave blocks alice; her next invitation is turned down without asking
-  await menu(dave, 'Block alice');
-  await dave.page.locator('.convo-head').getByRole('button', { name: 'Chat options' }).click();
-  await dave.page.getByRole('menuitem', { name: 'Unblock alice' }).waitFor();
-  await dave.page.keyboard.press('Escape');
-  await alice.page.getByRole('button', { name: 'New chat' }).first().click();
-  await alice.page.getByLabel('GitHub username').fill('dave');
-  await alice.page.getByRole('button', { name: 'Start chat' }).click();
-  await alice.page.locator('.sys', { hasText: 'Invitation sent to @dave' }).waitFor({ timeout: 30000 });
-  await syncRounds(dave, 3);
-  check(!(await dave.page.getByText('alice invited you').count()), 'blocked person\'s invitation never shows');
-
-  // Both start a DM with each other at once: the apps settle on one room (rule 2)
-  for (const p of [bob, carol]) await p.page.getByRole('button', { name: 'New chat' }).first().click();
-  await bob.page.getByLabel('GitHub username').fill('carol');
-  await carol.page.getByLabel('GitHub username').fill('bob');
-  await Promise.all([bob.page.getByRole('button', { name: 'Start chat' }).click(), carol.page.getByRole('button', { name: 'Start chat' }).click()]);
-  const settled = async () => {
-    for (let i = 0; i < 400; i++) {
-      const ok = (await count(bob, 'carol')) === 1 && (await count(carol, 'bob')) === 1
-        && !(await bob.page.getByText('carol invited you').count()) && !(await carol.page.getByText('bob invited you').count());
-      const live = await Promise.all([bob, carol].map((p) => p.page.locator('#composer').isEnabled().catch(() => false)));
-      if (ok && live.every(Boolean)) return true;
-      await bob.page.waitForTimeout(300);
-    }
-    for (const p of [bob, carol]) {
-      log(`state ${p.login}`, await count(p, p === bob ? 'carol' : 'bob'), JSON.stringify(await p.page.locator('.chat-list').innerText()));
-      await p.page.screenshot({ path: `${SHOTS}/race-${p.login}.png` });
-    }
-    return false;
-  };
-  check(await settled(), 'simultaneous DMs settle on one chat');
-  await openChat(bob, 'carol');
-  await openChat(carol, 'bob');
-  await sendMsg(carol, 'one room for us');
-  await bubble(bob, 'one room for us').waitFor({ timeout: 45000 });
-  check(true, 'messages flow in the surviving room');
+  // Block from the chat menu: the menu then offers Unblock.
+  await openChat(bob, 'alice');
+  await menu(bob, 'Block alice');
+  await bob.page.locator('.convo-head').getByRole('button', { name: 'Chat options' }).click();
+  await bob.page.getByRole('menuitem', { name: 'Unblock alice' }).waitFor();
+  await bob.page.keyboard.press('Escape');
+  check(true, 'Block from the chat menu, then Unblock is offered');
 
   // first run: no install yet -> guided steps -> continues by itself
   const newbie = await person('newbie');

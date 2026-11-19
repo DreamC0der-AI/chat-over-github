@@ -8,7 +8,7 @@
   ],
   "scripts": {
     "typecheck": "npm run typecheck -w provider && npm run typecheck -w web",
-    "test": "npm test -w provider && npm test --prefix worker",
+    "test": "npm test -w provider && npm test -w web && npm test --prefix worker",
     "build": "npm run build -w web",
     "e2e": "npm run e2e -w web",
     "test:changed": "node scripts/test.mjs",

@@ -14,10 +14,14 @@
     "isolatedModules": true,
     "noEmit": true,
     "types": [
-      "vite/client"
-    ]
+      "vite/client",
+      "node"
+    ],
+    "allowImportingTsExtensions": true
   },
   "include": [
-    "src"
+    "src",
+    "tests",
+    "tools/mock-backend.ts"
   ]
 }
