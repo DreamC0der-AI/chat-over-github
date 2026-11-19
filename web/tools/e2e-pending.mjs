@@ -37,6 +37,11 @@ async function writes(p, mode) {
   });
 }
 const msg = (p, text) => p.page.locator('.msg', { hasText: text }).first();
+async function quickReact(p, text, emoji) {
+  await msg(p, text).hover();
+  await msg(p, text).getByRole('button', { name: 'Add reaction' }).click();
+  await p.page.getByRole('menuitemcheckbox', { name: `React ${emoji}` }).click();
+}
 async function send(p, text) {
   await p.page.locator('#composer').fill(text);
   await p.page.locator('#composer').press('Enter');
@@ -68,8 +73,7 @@ try {
   const tab2 = await alice.ctx.newPage();
   await tab2.goto(alice.page.url());
   await tab2.getByRole('heading', { name: 'Open in another tab' }).waitFor({ timeout: 10000 }).then(() => check(true, 'second tab says the chat is open in another tab'), () => check(false, 'second tab says the chat is open in another tab'));
-  await msg(bob, 'Good morning').hover();
-  await msg(bob, 'Good morning').getByRole('button', { name: 'React ❤️' }).click();
+  await quickReact(bob, 'Good morning', '❤️');
   await msg(alice, 'Good morning').locator('.reaction').waitFor({ timeout: 30000 });
   await alice.page.waitForTimeout(6000);
   check((await msg(alice, 'Good morning').locator('.reaction').count()) === 1, "the other person's reaction stays with a second tab open");
@@ -87,8 +91,7 @@ try {
   check((await alice.page.locator('.bubble', { hasText: 'On my way' }).count()) === 1, 'no duplicate bubble after sending');
 
   // Reacting: the chip shows at once, pulsing, then settles.
-  await msg(alice, 'party').hover();
-  await msg(alice, 'party').getByRole('button', { name: 'React 👍' }).click();
+  await quickReact(alice, 'party', '👍');
   await msg(alice, 'party').locator('.reaction.pending').waitFor({ timeout: 500 });
   check(true, 'reaction shows at once as pending');
   await alice.page.screenshot({ path: `${SHOTS}/pending-react.png` });
@@ -106,8 +109,8 @@ try {
   check(true, 'removed reaction goes away');
 
   // Deleting a message.
-  await msg(alice, 'On my way').hover();
-  await msg(alice, 'On my way').getByRole('button', { name: 'Delete message' }).click();
+  await msg(alice, 'On my way').locator('.bubble').click({ button: 'right' });
+  await alice.page.getByRole('menuitem', { name: 'Delete for everyone' }).click();
   await alice.page.locator('.msg-meta', { hasText: 'Deleting…' }).waitFor({ timeout: 1000 });
   check(true, 'delete shows "Deleting…" at once');
   await alice.page.screenshot({ path: `${SHOTS}/pending-delete.png` });
@@ -121,8 +124,7 @@ try {
   check(await alice.page.getByRole('button', { name: 'Retry' }).isVisible(), 'failed text shows "Not sent" with Retry');
   check((await alice.page.locator('#composer').inputValue()) === '', 'composer is cleared, the text lives in the failed bubble');
   await alice.page.screenshot({ path: `${SHOTS}/pending-failed.png` });
-  await msg(alice, 'Good morning').hover();
-  await msg(alice, 'Good morning').getByRole('button', { name: 'React 🎉' }).click();
+  await quickReact(alice, 'Good morning', '🎉');
   await alice.page.locator('.toast', { hasText: 'Reaction not sent' }).waitFor({ timeout: 20000 }).then(() => check(true, 'failed reaction says so'), () => check(false, 'failed reaction says so'));
   check(!(await msg(alice, 'Good morning').locator('.reaction', { hasText: '🎉' }).count()), 'failed reaction goes back');
   await writes(alice, 'normal');

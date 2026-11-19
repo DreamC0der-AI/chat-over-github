@@ -267,17 +267,43 @@ code { background: var(--subtle); padding: 1px 5px; border-radius: 5px; }
 .msg.mine .bubble.deleted { background: none; color: var(--faint); }
 .bubble.pending { opacity: .55; }
 
-.msg-actions {
-  position: absolute; top: 50%; left: calc(100% + 6px); transform: translateY(-50%); z-index: 2;
-  display: none; align-items: center; padding: 3px; white-space: nowrap;
-  background: var(--canvas); border-radius: 999px; box-shadow: var(--shadow-md);
+/* Hover: one small smiley beside the bubble's top corner (the side facing the middle).
+   Click it for the quick emoji row; right-click or long-press the bubble for the full menu. */
+.react-btn {
+  position: absolute; top: 2px; left: calc(100% + 4px); z-index: 2;
+  width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: none; color: var(--faint); cursor: pointer;
+  opacity: 0; transition: opacity .12s, background-color .12s, color .12s;
 }
-.msg.mine .msg-actions { left: auto; right: calc(100% + 6px); }
-.msg:hover .msg-actions, .msg:focus-within .msg-actions { display: inline-flex; }
-.msg-actions button { border: 0; background: none; cursor: pointer; height: 28px; min-width: 28px; padding: 0 4px; border-radius: 999px; font: inherit; font-size: 15px; color: var(--muted); display: inline-flex; align-items: center; justify-content: center; transition: transform .1s; }
-.msg-actions button:hover { background: var(--hover); transform: scale(1.15); }
-.msg-actions button.del { color: var(--danger); }
-.msg-actions button.del:hover { background: var(--danger-bg); transform: none; }
+.msg.mine .react-btn { left: auto; right: calc(100% + 4px); }
+.msg:hover .react-btn, .react-btn:focus-visible, .msg.popup-open .react-btn { opacity: 1; }
+.react-btn:hover, .react-btn[aria-expanded='true'] { background: var(--hover); color: var(--fg); }
+.msg.popup-open .bubble:not(.has-media) { filter: brightness(.95); }
+.msg.popup-open .bubble.has-media { filter: brightness(.9); }
+@media (hover: none) {
+  .react-btn { display: none; }
+  /* A long press opens the menu (with Copy), so the bubble doesn't start a text selection. */
+  .bubble { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+}
+
+.msg-pop {
+  position: fixed; z-index: 30; visibility: hidden; left: 0; top: 0;
+  background: var(--canvas); border-radius: var(--r-lg); box-shadow: var(--shadow-lg);
+  animation: msgpop .12s ease-out;
+}
+@keyframes msgpop { from { opacity: 0; transform: scale(.96); } }
+.msg-pop.quick { border-radius: 999px; padding: 4px; }
+.msg-pop.full { padding: 6px; min-width: 216px; display: flex; flex-direction: column; }
+.msg-pop.full .emoji-row { justify-content: space-between; }
+.msg-pop.full .menu-sep { margin: 4px 2px; }
+.emoji-row { display: flex; align-items: center; gap: 2px; }
+.emoji { width: 36px; height: 36px; padding: 0; border: 0; border-radius: 50%; background: none; font: inherit; font-size: 20px; line-height: 1; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; transition: transform .1s, background-color .1s; }
+.emoji:hover:not(:disabled), .emoji:focus-visible { background: var(--hover); transform: scale(1.12); outline: none; }
+.emoji.on { background: var(--accent-bg); box-shadow: inset 0 0 0 1px var(--accent-border); }
+.emoji:disabled { opacity: .45; cursor: progress; }
+.emoji.more { color: var(--muted); font-size: 0; }
+.emoji.more:hover { transform: none; color: var(--fg); }
 .reaction { display: inline-flex; align-items: center; gap: 4px; height: 24px; border: 1px solid transparent; border-radius: 999px; background: var(--hover); font: inherit; font-size: 12px; padding: 0 8px; cursor: pointer; color: var(--fg); }
 .reaction span { color: var(--muted); font-weight: 600; }
 .reaction:hover:not(:disabled) { background: var(--press); }
@@ -417,8 +443,6 @@ code { background: var(--subtle); padding: 1px 5px; border-radius: 5px; }
   .convo-head { padding: 0 8px; gap: 8px; }
   .flash.banner, .content > .flash.error { margin: 8px 12px 0; }
   .bubble-line { max-width: 86%; }
-  .msg-actions { top: auto; bottom: calc(100% + 4px); left: 0; transform: none; }
-  .msg.mine .msg-actions { right: 0; left: auto; }
   .hide-sm { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }

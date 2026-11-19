@@ -2,13 +2,13 @@ import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Group } from 'keyhold/chat';
 import { describeError, loginFrom, type Convo, type MsgRecord, type PeerInfo, type Session } from '../lib/session';
 import { endedText } from './Home';
-import { ask, Avatar, ErrorFlash, go, Hint, Icon, timeLabel, toast, useAction } from '../ui';
+import { ask, Avatar, ErrorFlash, go, Hint, Icon, MenuItem, timeLabel, toast, useAction } from '../ui';
 import { ChatMenu, CLOSE_ASK, deleteAsk, VerifyModal } from './ChatMenu';
-import { AttachmentView, DraftTray, isImage, Lightbox, PendingAttachment, toDrafts, type Draft, type Viewing } from './Attachments';
+import { AttachmentView, DraftTray, isImage, Lightbox, PendingAttachment, saveBlob, toDrafts, type Draft, type Viewing } from './Attachments';
+import { EmojiRow, MsgPopup, useLongPress, type Anchor } from './MessageMenu';
 
 const clock = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 const msgTime = (ts: number) => (timeLabel(ts) === clock(ts) ? clock(ts) : `${timeLabel(ts)} ${clock(ts)}`);
-const EMOJI = ['👍', '❤️', '😂', '🎉', '👀'];
 const RUN_GAP = 5 * 60_000;
 const dayKey = (ts: number) => new Date(ts).toDateString();
 function dayLabel(ts: number) {
@@ -237,7 +237,12 @@ function TrustBadge({ peer, onClick }: { peer: PeerInfo; onClick: () => void }) 
   return null;
 }
 
+type Popup = { kind: 'quick' | 'menu'; anchor: Anchor };
+
 function Message({ m, session, group, showAuthor, first = true, last = true, onOpen }: { m: MsgRecord; session: Session; group?: Group; showAuthor: boolean; first?: boolean; last?: boolean; onOpen: (v: Viewing) => void }) {
+  const [popup, setPopup] = useState<Popup>();
+  const bubbleRef = useRef<HTMLDivElement>(null);
+  const long = useLongPress((el) => openMenu({ rect: el.getBoundingClientRect(), mine: !!m.mine, prefer: 'below' }));
   if (m.kind === 'system') return <div className="sys" title={m.body}>{(m.body ?? '').replace(/\. .*$/, '').replace(/\.$/, '')}</div>;
   const who = loginFrom(m.from);
   const reactions = session.shownReactions(m);
@@ -249,23 +254,94 @@ function Message({ m, session, group, showAuthor, first = true, last = true, onO
     const mineNow = !!reactions.find((r) => r.emoji === emoji)?.who.includes(session.address);
     act(() => session.react(group, m.id, emoji, !mineNow));
   };
+  const mineOf = (emoji: string) => {
+    const r = reactions.find((x) => x.emoji === emoji);
+    if (!r?.who.includes(session.address)) return 'no' as const;
+    return r.pending ? ('pending' as const) : ('yes' as const);
+  };
   const attach = !m.deleted && m.kind === 'attachment' && !!m.file;
+  const text = m.deleted ? undefined : attach ? m.caption : m.body;
+  const canDownload = attach && !!group;
+  const hasMenu = canAct || !!text || canDownload;
+  const close = () => setPopup(undefined);
+  function openMenu(anchor: Anchor) {
+    if (hasMenu) setPopup({ kind: 'menu', anchor });
+  }
+  const besideBubble = (prefer: 'above' | 'below'): Anchor | undefined => {
+    const r = bubbleRef.current?.getBoundingClientRect();
+    return r && { rect: r, mine: !!m.mine, prefer };
+  };
+  const pick = (e: string) => {
+    close();
+    react(e);
+  };
+  const del = () => {
+    close();
+    act(async () => { if (await ask({ title: 'Delete this message for everyone?', confirm: 'Delete', danger: true })) await session.deleteMessage(group!, m.id); });
+  };
+  const copy = () => {
+    close();
+    navigator.clipboard.writeText(text ?? '').then(() => toast('Copied'), () => toast("Couldn't copy"));
+  };
+  const download = () => {
+    close();
+    const f = m.file!;
+    act(async () => {
+      const url = URL.createObjectURL(await session.fetchFile(group!, f));
+      saveBlob(url, f.name ?? 'file');
+      setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    });
+  };
   return (
-    <div className={`msg${m.mine ? ' mine' : ''}${first ? '' : ' cont'}`}>
+    <div className={`msg${m.mine ? ' mine' : ''}${first ? '' : ' cont'}${popup ? ' popup-open' : ''}`}>
       {showAuthor && !m.mine && first && <span className="msg-author">{who}</span>}
       <div className="bubble-line">
-        <div className={`bubble${m.deleted ? ' deleted' : ''}${deleting ? ' pending' : ''}${attach ? ` attachment${group && isImage(m.file!.mime) ? ' has-media' : ''}${m.caption ? ' has-caption' : ''}` : ''}`} title={new Date(m.ts).toLocaleString()}>
+        <div
+          ref={bubbleRef}
+          className={`bubble${m.deleted ? ' deleted' : ''}${deleting ? ' pending' : ''}${attach ? ` attachment${group && isImage(m.file!.mime) ? ' has-media' : ''}${m.caption ? ' has-caption' : ''}` : ''}`}
+          title={new Date(m.ts).toLocaleString()}
+          {...(hasMenu ? long.handlers : {})}
+          onContextMenu={(e) => {
+            if (!hasMenu || e.shiftKey) return;
+            // Keep the browser's own menu for links and for text you've selected.
+            const sel = getSelection();
+            const selected = !!sel && !sel.isCollapsed && bubbleRef.current?.contains(sel.anchorNode);
+            if (!long.fired.current && (selected || (e.target as HTMLElement).closest('a'))) return;
+            e.preventDefault();
+            if (popup?.kind === 'menu') return;
+            openMenu(long.fired.current ? besideBubble('below')! : { x: e.clientX, y: e.clientY });
+          }}
+        >
           {m.deleted ? 'Message deleted' : attach ? (group ? <AttachmentView session={session} group={group} file={m.file!} caption={m.caption} onOpen={onOpen} /> : <span className="muted">📎 {m.file!.name ?? 'file'} (no longer available)</span>) : m.body}
         </div>
         {canAct && (
-          <span className="msg-actions" role="toolbar" aria-label="Message actions">
-            {EMOJI.map((e) => (
-              <button key={e} onClick={() => react(e)} aria-label={`React ${e}`}>{e}</button>
-            ))}
-            {m.mine && <button className="del" aria-label="Delete message" title="Delete for everyone" onClick={() => act(async () => { if (await ask({ title: 'Delete this message for everyone?', confirm: 'Delete', danger: true })) await session.deleteMessage(group!, m.id); })}>{Icon.trash()}</button>}
-          </span>
+          <button
+            type="button"
+            className="react-btn"
+            aria-label="Add reaction"
+            title="Add reaction"
+            aria-haspopup="menu"
+            aria-expanded={popup?.kind === 'quick'}
+            onClick={() => (popup ? close() : setPopup({ kind: 'quick', anchor: besideBubble('above')! }))}
+          >
+            {Icon.smile()}
+          </button>
         )}
       </div>
+      {popup?.kind === 'quick' && (
+        <MsgPopup anchor={popup.anchor} label="Add reaction" onClose={close} className="quick">
+          <EmojiRow mineOf={mineOf} onPick={pick} more={() => setPopup({ kind: 'menu', anchor: besideBubble('above')! })} />
+        </MsgPopup>
+      )}
+      {popup?.kind === 'menu' && (
+        <MsgPopup anchor={popup.anchor} label="Message actions" onClose={close} className="full">
+          {canAct && <EmojiRow mineOf={mineOf} onPick={pick} />}
+          {canAct && (text || canDownload || m.mine) && <div className="menu-sep" />}
+          {text && <MenuItem icon={Icon.copy()} onClick={copy}>{attach ? 'Copy caption' : 'Copy text'}</MenuItem>}
+          {canDownload && <MenuItem icon={Icon.download()} onClick={download}>{isImage(m.file!.mime) ? 'Save picture' : 'Download'}</MenuItem>}
+          {canAct && m.mine && <MenuItem icon={Icon.trash()} danger onClick={del}>Delete for everyone</MenuItem>}
+        </MsgPopup>
+      )}
       {reactions.length > 0 && (
         <div className="reactions">
           {reactions.map(({ emoji, who, pending }) => (
