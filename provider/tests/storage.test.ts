@@ -228,3 +228,16 @@ describe('claim-once store (4)', () => {
     await expect(s.inviteInbox.send('mem:v', { pointer: 'p' })).rejects.toMatchObject({ code: 'too_many_attempts' });
   });
 });
+
+describe('github: binary files GitHub mistakes for text', () => {
+  it('reads the stored bytes even when the Contents API converts them from UTF-16', async () => {
+    const w = githubWorld();
+    const a = w.session('alice');
+    // A sealed vault starts with version byte 1, so GitHub can take it for UTF-16BE text.
+    const sealed = new Uint8Array(90).map((_, i) => (i === 0 ? 1 : (i * 37 + 11) & 255));
+    expect(await a.vault.put('root', sealed, null)).toBe('ok');
+    w.gh.transcoded.add('vault/root');
+    expect((await a.vault.get('root'))!.data).toEqual(sealed);
+    expect(w.gh.log.some((l) => l.includes('/git/blobs/'))).toBe(true);
+  });
+});
