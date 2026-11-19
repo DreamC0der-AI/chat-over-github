@@ -48,6 +48,35 @@ describe('two browsers of one account', () => {
     for (const b of [alice, alice2]) expect((await b.notes(b.chat('bob'))).filter((n) => n.includes('could not be decrypted'))).toEqual([]);
   });
 
+  it('a burst typed quickly goes out in two writes and arrives as four messages, in order, everywhere', async () => {
+    w = await world();
+    const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
+    const [codeA, codeB] = [await alice.setup(), await bob.setup()];
+    await w.dm(alice, bob);
+    const [alice2, bob2] = [await w.browser('alice'), await w.browser('bob')];
+    await alice2.restore(codeA);
+    await bob2.restore(codeB);
+    await w.until(() => !!alice2.chat('bob')?.live && !!bob2.chat('alice')?.live, 'second browsers joined');
+    await w.rounds(2);
+
+    // 1, 2, 3, 4 typed fast: 1 goes out at once, the rest arrive while it is in flight.
+    const g = bob.chat('alice')!.live!;
+    const from = w.requests.length;
+    const first = bob.s.send(g, '1');
+    await Promise.resolve();
+    await Promise.all([first, bob.s.send(g, '2'), bob.s.send(g, '3'), bob.s.send(g, '4')]);
+    const writes = w.requests.slice(from).filter((r) => (r.method === 'PUT' && r.url.includes('/contents/mail/')) || (r.method === 'PATCH' && r.url.includes('/git/refs/')));
+    expect(writes.map((r) => r.method)).toEqual(['PUT', 'PATCH']);
+
+    const burst = async (b: typeof alice, peer: string) => (await b.texts(b.chat(peer))).filter((t) => ['1', '2', '3', '4'].includes(t));
+    await w.until(async () => (await burst(alice, 'bob')).length === 4 && (await burst(alice2, 'bob')).length === 4 && (await burst(bob2, 'alice')).length === 4, 'all four everywhere');
+    for (const [b, peer] of [[alice, 'bob'], [alice2, 'bob'], [bob, 'alice'], [bob2, 'alice']] as const) {
+      expect(await burst(b, peer)).toEqual(['1', '2', '3', '4']);
+      expect((await b.notes(b.chat(peer))).filter((n) => n.includes('could not be decrypted'))).toEqual([]);
+    }
+    expect(bob.s.sending.get(g.id)?.filter((p) => p.failed) ?? []).toEqual([]);
+  });
+
   it('Delete chat, close, and deleting an ended chat reach the other browser', async () => {
     w = await world();
     const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
