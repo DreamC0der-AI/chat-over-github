@@ -145,7 +145,7 @@ function ChatRow({ session, c, active }: { session: Session; c: Convo; active: b
   const waiting = c.dm && pending.length > 0;
   const preview = c.lastText
     ?? (!c.live ? (last.ended ? endedText(session, last.ended, c.dm) : 'No longer available')
-      : waiting ? 'Invitation sent' : 'No messages yet');
+      : waiting ? 'Invitation sent' : c.rooms.some((r) => r.joinedAt && !((r.clearedAt ?? 0) >= r.joinedAt)) ? EARLIER_ELSEWHERE : 'No messages yet');
   return (
     <li className={`chat-row${active ? ' active' : ''}`}>
       <button className={`chat-item${active ? ' active' : ''}${c.unread ? ' unread' : ''}`} onClick={() => go(`/c/${encodeURIComponent(c.key)}`)}>
@@ -168,6 +168,9 @@ function ChatRow({ session, c, active }: { session: Session; c: Convo; active: b
   );
 }
 
+/** A chat this browser joined after the account was already in it: history stays in each browser. */
+export const EARLIER_ELSEWHERE = 'Earlier messages aren\u2019t on this browser';
+
 /** One line on how a room ended, for the chat list and the divider in the timeline. */
 export function endedText(session: Session, e: NonNullable<import('../lib/session').ChatRecord['ended']>, dm: boolean) {
   const me = e.by === session.address;
@@ -186,8 +189,43 @@ function Invites({ session }: { session: Session }) {
   if (!list.length) return null;
   return (
     <li className="invites">
-      {list.map((inv) => <InviteRow key={inv.key} session={session} inv={inv} />)}
+      {list.map((inv) => (inv.mine && inv.status !== 'invited'
+        ? <CatchUpRow key={inv.key} session={session} inv={inv} />
+        : <InviteRow key={inv.key} session={session} inv={inv} />))}
     </li>
+  );
+}
+
+/** A chat the account is already in, being added to this browser. Nobody invited anyone. */
+function CatchUpRow({ session, inv }: { session: Session; inv: PendingInvite }) {
+  const r = inv.space ? session.chatBySpace(inv.space) : undefined;
+  const dm = r?.kind !== 'group';
+  const peer = dm && r?.peer ? loginFrom(r.peer) : undefined;
+  const title = peer ?? r?.lastName ?? (r?.kind === 'group' ? 'Untitled group' : 'Chat from another browser');
+  const text =
+    inv.status === 'joining' ? 'Adding to this browser…'
+    : inv.status === 'waiting' ? 'Waiting for another member'
+    : 'Could not add it yet';
+  return (
+    <div className="row invite-row catch-up" aria-busy={inv.status === 'joining' || inv.status === 'waiting'}>
+      <Avatar name={title} login={peer} square={!dm} size="lg" />
+      <div className="invite-text">
+        <div className="invite-title">
+          <span><strong>{title}</strong></span>
+          {inv.status === 'waiting' && <Hint text="Another member's app has to let this browser in. That happens as soon as one of them has Chat over GitHub open." />}
+        </div>
+        <div className="small muted" title={inv.error}>
+          {inv.status !== 'error' && <span className="spinner" style={{ width: 10, height: 10, marginRight: 4 }} />}
+          {text}{inv.error ? `. ${inv.error}` : ''}
+        </div>
+        {(inv.status === 'waiting' || inv.status === 'error') && (
+          <div className="row invite-actions">
+            <button className="btn" onClick={() => session.retryInvite(inv.key)}>Try again</button>
+            <button className="btn link small" onClick={() => session.dismissInvite(inv.key)}>Dismiss</button>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 

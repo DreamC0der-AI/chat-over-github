@@ -182,9 +182,18 @@ try {
   const alice2 = await person('alice');
   await alice2.page.getByLabel('Recovery code').fill(aliceCode);
   await alice2.page.getByRole('button', { name: 'Add this browser' }).click();
+  // Catching up on her own chats: never shown as an invitation from herself.
+  let selfInvite = false;
+  const watchSelf = setInterval(() => {
+    alice2.page.locator('.invite-title', { hasText: 'alice invited you' }).count().then((n) => { if (n) selfInvite = true; }, () => {});
+  }, 100);
   await alice2.page.locator('.chat-item', { hasText: 'bob' }).waitFor({ timeout: 60000 });
+  clearInterval(watchSelf);
+  check(!selfInvite, 'second device never shows itself as the inviter');
   check(true, 'second device joined the DM');
   await alice2.page.locator('.chat-item', { hasText: 'bob' }).click();
+  await alice2.page.locator('.sys.divider', { hasText: 'Earlier messages aren’t on this browser' }).waitFor({ timeout: 10000 });
+  check(true, 'second device says earlier messages are elsewhere');
   await bob.page.locator('.chat-item', { hasText: 'alice' }).click();
   await sendMsg(bob, 'message for both alice devices');
   await bubble(alice2, 'message for both alice devices').waitFor({ timeout: 45000 });
