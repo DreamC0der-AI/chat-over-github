@@ -231,10 +231,11 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
   );
 }
 
-/** Quiet by default: nothing for a normal chat, a green check once verified, a warning only when the key changed. */
+/** A muted shield until verified (click to compare safety numbers), a green check once verified, a warning when the key changed. Marks are per browser. */
 function TrustBadge({ peer, onClick }: { peer: PeerInfo; onClick: () => void }) {
   if (peer.status === 'key-changed') return <button className="btn icon ghost trust warn" aria-label="Key changed" title="Key changed. Review the new safety number." onClick={onClick}>{Icon.shield(false, 16)}</button>;
   if (peer.status !== 'none' && peer.status !== 'error' && peer.verified) return <button className="btn icon ghost trust ok" aria-label="Verified" title="Verified" onClick={onClick}>{Icon.shield(true, 16)}</button>;
+  if (peer.status === 'ok') return <button className="btn icon ghost trust" aria-label="Not verified" title="Not verified on this browser. Click to compare safety numbers." onClick={onClick}>{Icon.shield(null, 16)}</button>;
   return null;
 }
 
