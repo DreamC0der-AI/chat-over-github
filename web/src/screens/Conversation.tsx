@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Group } from 'keyhold/chat';
 import { describeError, loginFrom, type Convo, type MsgRecord, type PeerInfo, type Session } from '../lib/session';
-import { endedText } from './Home';
+import { EARLIER_ELSEWHERE, endedText } from './Home';
 import { ask, Avatar, ErrorFlash, go, Hint, Icon, MenuItem, timeLabel, toast, useAction } from '../ui';
 import { ChatMenu, CLOSE_ASK, deleteAsk, VerifyModal } from './ChatMenu';
 import { AttachmentView, DraftTray, isImage, Lightbox, PendingAttachment, saveBlob, toDrafts, type Draft, type Viewing } from './Attachments';
@@ -73,6 +73,7 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
       const out: Item[] = [];
       convo.rooms.forEach((r, i) => {
         const g = session.group(r.groupId);
+        if (r.joinedAt && !((r.clearedAt ?? 0) >= r.joinedAt)) out.push({ kind: 'divider', id: `joined-${r.groupId}`, text: EARLIER_ELSEWHERE });
         for (const m of lists[i]!) out.push({ kind: 'msg', m, group: g });
         const later = i < convo.rooms.length - 1;
         if (r.ended) {
