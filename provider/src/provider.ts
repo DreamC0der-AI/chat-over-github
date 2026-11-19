@@ -165,6 +165,9 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
     throw new KeyholdError('forbidden', `delete ${path}: ${r.status}`);
   }
 
+  /** Default branch of each chat repo we posted a batch to. */
+  const branches = new Map<string, string>();
+
   /** Create one of the user's own repos if it doesn't exist yet. */
   const ensured = new Set<string>();
   async function ensureOwnRepo(name: string, priv: boolean, desc: string) {
@@ -334,6 +337,48 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
         const id = `${now().toString(36)}-${rid()}`;
         for (let attempt = 0; attempt < 5; attempt++) {
           if ((await putFile(ow, re, `mail/${day(now())}/${id}`, data, null)) === 'ok') return id;
+        }
+        throw new KeyholdError('conflict', 'could not post');
+      },
+      /**
+       * Several items as ONE commit (Git Data API), so a burst costs one write however long it
+       * is. Readers still see one ordinary file per item; ids sort in the order given.
+       */
+      async postMany(space, data) {
+        const [ow, re] = splitSpace(space);
+        const repo = `/repos/${enc(ow)}/${enc(re)}`;
+        const t = now();
+        const stamp = t.toString(36);
+        const ids = data.map((_, i) => `${stamp}-${i.toString(16).padStart(2, '0')}${toHex(randomBytes(9))}`);
+        const fail = (what: string, status: number): never => {
+          throw new KeyholdError(status === 403 || status === 404 ? 'forbidden' : 'config', `${what}: ${status}`);
+        };
+        // The blobs go up side by side; they belong to no commit until the ref moves.
+        const blobs = await Promise.all(
+          data.map(async (d) => {
+            const r = await gh.call('POST', `${repo}/git/blobs`, { content: toB64(d), encoding: 'base64' });
+            if (r.status !== 201) fail('write blob', r.status);
+            return r.data.sha as string;
+          }),
+        );
+        const tree = ids.map((id, i) => ({ path: `mail/${day(t)}/${id}`, mode: '100644', type: 'blob', sha: blobs[i] }));
+        let branch = branches.get(repo);
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const [head, info] = await Promise.all([gh.call('GET', `${repo}/commits/HEAD`), branch ? undefined : gh.call('GET', repo)]);
+          if (head.status !== 200) fail('read head', head.status);
+          if (info) {
+            if (info.status !== 200) fail('read repo', info.status);
+            branch = String(info.data.default_branch ?? 'main');
+            branches.set(repo, branch);
+          }
+          const nt = await gh.call('POST', `${repo}/git/trees`, { base_tree: head.data.commit.tree.sha, tree });
+          if (nt.status !== 201) fail('write tree', nt.status);
+          const c = await gh.call('POST', `${repo}/git/commits`, { message: 'update', tree: nt.data.sha, parents: [head.data.sha] });
+          if (c.status !== 201) fail('write commit', c.status);
+          // Fast-forward only: another write landed first -> build on top of it and try again.
+          const r = await gh.call('PATCH', `${repo}/git/refs/heads/${enc(branch!)}`, { sha: c.data.sha, force: false });
+          if (r.status === 200) return ids;
+          if (r.status !== 409 && r.status !== 422) fail('move branch', r.status);
         }
         throw new KeyholdError('conflict', 'could not post');
       },

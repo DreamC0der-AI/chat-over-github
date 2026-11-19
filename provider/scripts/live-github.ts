@@ -149,6 +149,22 @@ async function main() {
         await dmB.send({ t: 'text', body: 'hello A' });
         return until('message', async () => texts(await dm.sync()).includes('hello A'), 30_000);
       });
+      await step('DM: a burst of four goes out as one write after the first', async () => {
+        const c = (a.provider as unknown as { client: { requests: number } }).client;
+        const first = dm.send({ t: 'text', body: 'b1' });
+        await Promise.resolve();
+        const t0 = Date.now();
+        const r0 = c.requests;
+        await Promise.all([first, dm.send({ t: 'text', body: 'b2' }), dm.send({ t: 'text', body: 'b3' }), dm.send({ t: 'text', body: 'b4' })]);
+        const ms = Date.now() - t0;
+        const seen: string[] = [];
+        await until('burst', async () => {
+          seen.push(...(texts(await dmB.sync()) as string[]).filter((t) => /^b\d$/.test(t)));
+          return seen.length >= 4;
+        }, 30_000);
+        check(seen.join(',') === 'b1,b2,b3,b4', `order: ${seen.join(',')}`);
+        return { requests: c.requests - r0, ms };
+      });
       await step('attachment 1.5 MB (git blob API path)', async () => {
         const data = new Uint8Array(1_500_000).map((_, i) => (i * 31) & 255);
         await dm.sendAttachment(data, { name: 'big.bin' });

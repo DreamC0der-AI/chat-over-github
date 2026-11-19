@@ -4,6 +4,7 @@
  *  - private repos: only owner and accepted collaborators read and write; public: anyone reads
  *  - Contents API compare-and-swap: create of an existing path -> 422, wrong sha -> 409
  *  - files over 1 MB come back without content (use the git blob endpoint)
+ *  - Git Data API commits of several files: blobs, a tree on the head, a commit, a fast-forward ref update
  *  - only the owner manages collaborators and invitations; invitations are accepted by the invitee
  *  - a GitHub App installed on "select repositories" with every repo the owner creates auto-added
  *  - the Worker inbox: keyed by invitee, checks the invitation is on the caller's repo
@@ -24,6 +25,15 @@ interface Repo {
   files: Map<string, File>;
   topics: string[];
   description: string;
+  /** Head commit id; every write moves it, so a stale Git Data API commit can't fast-forward. */
+  head: number;
+}
+
+/** Git Data API objects not yet on a branch (blobs, trees, commits), shared by all repos. */
+interface GitObjects {
+  blobs: Map<string, Buffer>;
+  trees: Map<string, { base: string; entries: { path: string; sha: string }[] }>;
+  commits: Map<string, { tree: string; parent: string }>;
 }
 
 type Init = { method?: string; headers?: Record<string, string>; body?: string };
@@ -44,6 +54,9 @@ export class MockGitHub {
   /** Remaining requests before a 403 rate-limit response (per token). */
   readonly budget = new Map<string, number>();
   private nextId = 1000;
+  private git: GitObjects = { blobs: new Map(), trees: new Map(), commits: new Map() };
+  /** Test hook: moves the head right before the next ref update, as another writer would. */
+  raceNextRefUpdate = 0;
   readonly api = 'https://api.github.test';
   readonly worker = 'https://worker.test';
 
@@ -73,6 +86,7 @@ export class MockGitHub {
     const r = this.repos.get(fullName)!;
     const b = Buffer.from(content);
     r.files.set(path, { sha: sha(b), content: b });
+    r.head++;
   }
 
   fetch = async (url: string, init: Init = {}) => {
@@ -98,14 +112,14 @@ export class MockGitHub {
       if (!user) return resp(401, {});
       const full = `${user}/${body.name}`.toLowerCase();
       if (this.repos.has(full)) return resp(422, { message: 'name already exists on this account' });
-      this.repos.set(full, { owner: user, name: body.name.toLowerCase(), private: !!body.private, collaborators: new Set(), invitations: new Map(), files: new Map(), topics: [], description: body.description ?? '' });
+      this.repos.set(full, { owner: user, name: body.name.toLowerCase(), private: !!body.private, collaborators: new Set(), invitations: new Map(), files: new Map(), topics: [], description: body.description ?? '', head: 1 });
       if (body.auto_init) this.repos.get(full)!.files.set('README.md', { sha: sha(Buffer.from('')), content: Buffer.from('') });
       return resp(201, { full_name: full, name: body.name, private: !!body.private });
     }
     if ((m = path.match(/^\/repos\/([^/]+)\/([^/]+)$/)) && method === 'GET') {
       const r = this.repos.get(`${m[1]}/${m[2]}`.toLowerCase());
       if (!r || !this.canRead(r, user)) return resp(404, { message: 'Not Found' });
-      return resp(200, { full_name: `${r.owner}/${r.name}`, private: r.private });
+      return resp(200, { full_name: `${r.owner}/${r.name}`, private: r.private, default_branch: 'main' });
     }
     if ((m = path.match(/^\/repos\/([^/]+)\/([^/]+)\/(.*)$/))) {
       const r = this.repos.get(`${m[1]}/${m[2]}`.toLowerCase());
@@ -179,6 +193,7 @@ export class MockGitHub {
         if (!cur && body.sha) return resp(422, { message: 'sha given for a new file' });
         const content = Buffer.from(body.content, 'base64');
         r.files.set(path, { sha: sha(content), content });
+        r.head++;
         return resp(cur ? 200 : 201, { content: { sha: sha(content) } });
       }
       if (method === 'DELETE') {
@@ -186,12 +201,53 @@ export class MockGitHub {
         if (!cur) return resp(404, {});
         if (body.sha !== cur.sha) return resp(409, { message: 'sha mismatch' });
         r.files.delete(path);
+        r.head++;
         return resp(200, {});
       }
     }
     if ((m = rest.match(/^git\/blobs\/([0-9a-f]+)$/)) && method === 'GET') {
       for (const f of r.files.values()) if (f.sha === m[1]) return resp(200, { sha: f.sha, encoding: 'base64', content: f.content.toString('base64') });
       return resp(404, {});
+    }
+    if (rest === 'commits/HEAD' && method === 'GET') {
+      return resp(200, { sha: `c-${r.owner}/${r.name}@${r.head}`, commit: { tree: { sha: `t-${r.owner}/${r.name}@${r.head}` } } });
+    }
+    if (rest.startsWith('git/') && method !== 'GET' && !this.canWrite(r, user)) return resp(r.private ? 404 : 403, { message: 'no write access' });
+    if (rest === 'git/blobs' && method === 'POST') {
+      if (body.encoding !== 'base64') return resp(422, { message: 'mock: base64 only' });
+      const content = Buffer.from(body.content, 'base64');
+      this.git.blobs.set(sha(content), content);
+      return resp(201, { sha: sha(content) });
+    }
+    if (rest === 'git/trees' && method === 'POST') {
+      const id = `t-${this.nextId++}`;
+      for (const e of body.tree) if (!this.git.blobs.has(e.sha) && ![...r.files.values()].some((f) => f.sha === e.sha)) return resp(422, { message: 'mock: unknown blob' });
+      this.git.trees.set(id, { base: body.base_tree, entries: body.tree.map((e: { path: string; sha: string }) => ({ path: e.path, sha: e.sha })) });
+      return resp(201, { sha: id });
+    }
+    if (rest === 'git/commits' && method === 'POST') {
+      const id = `c-${this.nextId++}`;
+      if (!this.git.trees.has(body.tree)) return resp(422, { message: 'mock: unknown tree' });
+      this.git.commits.set(id, { tree: body.tree, parent: body.parents[0] });
+      return resp(201, { sha: id });
+    }
+    if ((m = rest.match(/^git\/refs\/heads\/(.+)$/)) && method === 'PATCH') {
+      if (m[1] !== 'main') return resp(422, { message: 'Reference does not exist' });
+      if (this.raceNextRefUpdate > 0) {
+        this.raceNextRefUpdate--;
+        r.head++;
+      }
+      const c = this.git.commits.get(body.sha);
+      if (!c) return resp(422, { message: 'Object does not exist' });
+      const t = this.git.trees.get(c.tree)!;
+      const headId = `c-${r.owner}/${r.name}@${r.head}`;
+      if (c.parent !== headId || t.base !== `t-${r.owner}/${r.name}@${r.head}`) return resp(422, { message: 'Update is not a fast forward' });
+      for (const e of t.entries) {
+        const content = this.git.blobs.get(e.sha) ?? [...r.files.values()].find((f) => f.sha === e.sha)!.content;
+        r.files.set(e.path, { sha: e.sha, content });
+      }
+      r.head++;
+      return resp(200, { object: { sha: body.sha } });
     }
     if (rest === 'topics' && method === 'PUT') {
       if (!isOwner) return resp(403, {});

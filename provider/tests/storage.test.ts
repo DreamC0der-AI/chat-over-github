@@ -241,3 +241,27 @@ describe('github: binary files GitHub mistakes for text', () => {
     expect(w.gh.log.some((l) => l.includes('/git/blobs/'))).toBe(true);
   });
 });
+
+describe('github: a burst of mail', () => {
+  it('mailbox: a burst posts as one commit, in order, and survives a racing write', async () => {
+    const w = githubWorld();
+    const a = w.session('alice');
+    const s = await a.channel.createSpace('chat');
+    const l0 = await a.mailbox.list(s);
+    const puts = () => w.gh.log.filter((l) => l.startsWith('PUT ') || l.startsWith('PATCH ')).length;
+    const before = puts();
+    const ids = await a.mailbox.postMany!(s, [bytes('1'), bytes('2'), bytes('3')]);
+    expect(puts() - before).toBe(1); // one ref update, no per-file commits
+    expect(new Set(ids).size).toBe(3);
+    expect([...ids].sort()).toEqual(ids);
+    const l1 = await a.mailbox.list(s, l0.cursor);
+    expect(l1.items.map((i) => [i.id, str(i.data)])).toEqual([[ids[0], '1'], [ids[1], '2'], [ids[2], '3']]);
+    // Another write lands between our read of the head and our ref update: rebuild and retry.
+    w.gh.raceNextRefUpdate = 1;
+    const more = await a.mailbox.postMany!(s, [bytes('4'), bytes('5')]);
+    expect((await a.mailbox.list(s, l1.cursor)).items.map((i) => [i.id, str(i.data)])).toEqual([[more[0], '4'], [more[1], '5']]);
+    // Someone without access can't post a batch either.
+    const b = w.session('bob');
+    await expect(b.mailbox.postMany!(s, [bytes('x'), bytes('y')])).rejects.toMatchObject({ code: 'forbidden' });
+  });
+});

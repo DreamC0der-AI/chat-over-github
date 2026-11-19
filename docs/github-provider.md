@@ -9,7 +9,7 @@
 | 3 | public repo `{login}/keyhold-id`, `dir/{index}` (create-only files) |
 | 9, 12 | private repo `{login}/keyhold-home`, `vault/{name}` and `items/{opaque id}` |
 | 5 | chat repo `log/{shard}/{index}`, create-only, 1,000 per shard |
-| 6 | chat repo `mail/{day}/{id}` |
+| 6 | chat repo `mail/{day}/{id}`; a burst of sends (`postMany`) is one commit via the Git Data API, one file per message |
 | 7 | chat repo `blob/{id}` (over 1 MB read through the git blob API) |
 | 8 | chat repo `drop/{recipient tag}/{id}` |
 | 11 | the Worker in `worker/` (`POST/GET/DELETE /invites`) |
