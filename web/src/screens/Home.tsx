@@ -158,7 +158,7 @@ function ChatRow({ session, c, active }: { session: Session; c: Convo; active: b
         <span className="meta">
           <span className="name">
             <span>{c.title}</span>
-            {!c.dm && g && <span className="count">{g.members().length}</span>}
+            {!c.dm && g && <span className="count">{session.joinedMembers(g).length}</span>}
             {!c.live && <span className="label">Ended</span>}
           </span>
           <span className="preview">{busyLabel ?? preview}</span>

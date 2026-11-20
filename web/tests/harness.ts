@@ -122,7 +122,7 @@ export async function world(): Promise<World> {
       await a.s.startDm(b.login);
       await w.until(() => !!b.inviteFrom(a.login), `${b.login} sees ${a.login}'s invitation`);
       await b.s.acceptInvite(b.inviteFrom(a.login)!.key);
-      await w.until(() => !!b.chat(a.login)?.live && (a.chat(b.login)?.live?.members().length ?? 0) > 1, `${b.login} joined the DM`);
+      await w.until(() => !!b.chat(a.login)?.live && (a.chat(b.login)?.live?.members().filter((m) => !m.pending).length ?? 0) > 1, `${b.login} joined the DM`);
     },
     async until(cond, what, rounds = 15) {
       for (let i = 0; i < rounds; i++) {

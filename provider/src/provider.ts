@@ -2,6 +2,7 @@
  * GitHub storage provider: implements the remote storage kinds with GitHub repos.
  *
  *   {login}/keyhold-id    public  box 3  directory: dir/{index}          (create-only files)
+ *                                 box 3b pre-keys: prekeys/{deviceId}    (one per device, replaced)
  *   {login}/keyhold-home  private box 9  vault/{name}, box 12 items/{id} (sealed with K)
  *   {owner}/ghchat-xxxx   private per chat (the "space"):
  *                                 box 5  log/{index}       create-only = compare-and-swap
@@ -331,7 +332,7 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
     },
   };
 
-  const caps = new Set<Capability>(['owner-managed-spaces']);
+  const caps = new Set<Capability>(['owner-managed-spaces', 'pre-keys']);
 
   return {
     name: 'github',
@@ -348,6 +349,21 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
         const have = await listDir(login, dirRepo, 'dir', false);
         if (have.length !== index) return 'conflict';
         return putFile(login, dirRepo, `dir/${pad(index)}`, entry, null);
+      },
+    },
+    preKeys: {
+      async publish(deviceId, data) {
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(deviceId)) throw new KeyholdError('bad_format', 'bad device id');
+        await ensureOwnRepo(dirRepo, false, 'Public keys for an end-to-end encrypted chat app.');
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const cur = await getFile(login, dirRepo, `prekeys/${deviceId}`);
+          if ((await putFile(login, dirRepo, `prekeys/${deviceId}`, data, cur?.version ?? null)) === 'ok') return;
+        }
+        throw new KeyholdError('conflict', 'could not publish the pre-key');
+      },
+      async read(owner) {
+        const ow = loginOf(owner);
+        return readAll(ow, dirRepo, (await listDir(ow, dirRepo, 'prekeys', false)).filter((e) => e.type === 'file'));
       },
     },
     inviteInbox,

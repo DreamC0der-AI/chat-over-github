@@ -137,7 +137,7 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
           </span>
           {busyLabel ? (
             <span className="convo-sub busy" role="status"><span className="spinner" />{busyLabel}</span>
-          ) : !dm && group && <span className="convo-sub">{group.members().length} {group.members().length === 1 ? 'member' : 'members'}</span>}
+          ) : !dm && group && <span className="convo-sub">{session.joinedMembers(group).length} {session.joinedMembers(group).length === 1 ? 'member' : 'members'}</span>}
         </div>
         <div className="convo-actions">
           {dm && peer && <TrustBadge peer={peer} onClick={() => setVerify(peer.address)} />}
@@ -215,13 +215,13 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
               )}
             </div>
           ))}
-          {live && !joined && !peerLeft && pending.length > 0 && (
+          {live && !peerLeft && pending.length > 0 && (!joined || live.members().some((m) => m.pending)) && (
             <div className="sys">Waiting for {pending.map((a) => '@' + loginFrom(a)).join(', ')} to accept</div>
           )}
         </div>
       </div>
       {live ? (
-        <Composer session={session} group={live} disabledReason={busyLabel ?? (peerLeft ? `${title} left this chat` : !joined ? 'Waiting for the other person to join…' : undefined)} error={err} />
+        <Composer session={session} group={live} disabledReason={busyLabel ?? (peerLeft ? `${title} left this chat` : !joined ? (dm ? 'Waiting for the other person to join…' : 'Waiting for someone to join…') : undefined)} error={err} />
       ) : (
         <div className="composer ended">This chat has ended</div>
       )}

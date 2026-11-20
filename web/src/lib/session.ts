@@ -231,6 +231,8 @@ const SPACE_SCAN_MS = at(60_000);
 const SPACE_SCAN_PENDING_MS = at(15_000);
 const INVITE_RETRY_MS = at(10_000);
 const INVITE_RETRY_MAX_MS = at(3 * 60_000);
+// Rotation itself is weekly (keyhold DEFAULT_PREKEYS); this is only how often to look.
+const PREKEY_CHECK_MS = at(10 * 60_000);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export const loginFrom = (address: string) => {
@@ -309,6 +311,8 @@ export class Session {
   private lastFullPull = 0;
   private lastFlush = 0;
   private lastClosures = 0;
+  private lastPreKey = 0;
+  private rounds = 0;
   /** Start-up read of the synced store, running after the chat is on screen. */
   private syncStarting?: Promise<unknown>;
   private hasSyncKey = false;
@@ -612,7 +616,7 @@ export class Session {
       device: this.device,
       identity: this.identity!,
       registry: this.registry,
-      features: resolveFeatures(this.provider, { historyBackup: false }),
+      features: resolveFeatures(this.provider, { historyBackup: false, preKeys: true }),
       onMessage: (g, m) => this.onMessage(g, m),
     });
     for (const k of await this.db.keys('kv', 'chat:')) {
@@ -650,7 +654,13 @@ export class Session {
     if (CONFIG.mock) {
       (window as { __chat?: object }).__chat = {
         syncNow: () => this.syncNow(),
-        debug: () => ({ invites: this.pendingInvites(), groups: Object.fromEntries(this.groupErrors), pollError: this.lastPollError, syncError: this.syncError }),
+        debug: () => ({
+          invites: this.pendingInvites(),
+          groups: Object.fromEntries(this.groupErrors),
+          members: Object.fromEntries([...(this.chat?.groups.values() ?? [])].map((g) => [g.id, g.members().map((m) => `${m.address}${m.pending ? ' (added)' : ''}`)])),
+          pollError: this.lastPollError,
+          syncError: this.syncError,
+        }),
       };
     }
     void this.loop();
@@ -921,7 +931,7 @@ export class Session {
    * waiting for the other to join; then the lowest owner user id; then the oldest room.
    */
   private winner(rooms: Group[]): Group {
-    const both = rooms.filter((g) => g.members().length > 1);
+    const both = rooms.filter((g) => g.members().filter((m) => !m.pending).length > 1);
     if (both.length) rooms = both;
     const id = (g: Group) => this.knownUserId(g.space.split('/')[0]!);
     return [...rooms].sort((a, b) => {
@@ -1001,10 +1011,17 @@ export class Session {
     return g.name || 'Untitled group';
   }
 
-  /** People invited but not yet in the group. */
+  /** People invited who haven't joined yet (added with pre-keys, or only invited). */
   pending(g: Group): string[] {
-    const inGroup = new Set(g.members().map((m) => m.address));
-    return (this.records.get(g.id)?.invited ?? []).filter((a) => !inGroup.has(a));
+    const members = g.members();
+    const joined = new Set(members.filter((m) => !m.pending).map((m) => m.address));
+    const added = members.filter((m) => m.pending).map((m) => m.address);
+    return [...new Set([...added, ...(this.records.get(g.id)?.invited ?? [])])].filter((a) => !joined.has(a));
+  }
+
+  /** People in the chat who have joined (not just added while offline). */
+  joinedMembers(g: Group) {
+    return g.members().filter((m) => !m.pending);
   }
 
   async userExists(login: string): Promise<{ login: string } | undefined> {
@@ -1445,6 +1462,8 @@ export class Session {
       if (e.type === 'joined') {
         await this.systemNote(g.id, e.address === this.address ? 'You joined. Messages are end-to-end encrypted.' : `${who} joined`);
         this.peers.delete(e.address);
+      } else if (e.type === 'left' && e.pending) {
+        await this.systemNote(g.id, `${who} didn’t join`);
       } else if (e.type === 'left') {
         await this.systemNote(g.id, `${who} left`);
         if (this.isDm(g) && e.address !== this.address && !g.members().some((m) => m.address !== this.address)) {
@@ -1603,7 +1622,7 @@ export class Session {
 
   /** I invited them to a DM and they haven't joined yet. */
   private ownPendingDm(address: string) {
-    return this.conversations().some((c) => c.dm && c.peer === address && c.live && this.isOwner(c.live) && !c.live.members().some((m) => m.address === address));
+    return this.conversations().some((c) => c.dm && c.peer === address && c.live && this.isOwner(c.live) && !c.live.members().some((m) => m.address === address && !m.pending));
   }
 
   /** The user accepted: accept the GitHub invitation, then join the chat. */
@@ -1794,6 +1813,13 @@ export class Session {
       } catch (e) {
         this.groupErrors.set(g.id, describeError(e));
       }
+    }
+    // Keep this browser's pre-key published and fresh (accounts from before pre-keys get one
+    // here). Only after a first full round, so invitations accepted elsewhere were joined first:
+    // a retired key is pruned for good.
+    if (this.syncReady && this.rounds++ > 0 && now - this.lastPreKey > PREKEY_CHECK_MS) {
+      this.lastPreKey = now;
+      await this.chat.refreshPreKey().catch((e) => (this.lastPollError = describeError(e)));
     }
   }
 
