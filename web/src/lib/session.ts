@@ -654,7 +654,13 @@ export class Session {
     if (CONFIG.mock) {
       (window as { __chat?: object }).__chat = {
         syncNow: () => this.syncNow(),
-        debug: () => ({ invites: this.pendingInvites(), groups: Object.fromEntries(this.groupErrors), pollError: this.lastPollError, syncError: this.syncError }),
+        debug: () => ({
+          invites: this.pendingInvites(),
+          groups: Object.fromEntries(this.groupErrors),
+          members: Object.fromEntries([...(this.chat?.groups.values() ?? [])].map((g) => [g.id, g.members().map((m) => `${m.address}${m.pending ? ' (added)' : ''}`)])),
+          pollError: this.lastPollError,
+          syncError: this.syncError,
+        }),
       };
     }
     void this.loop();

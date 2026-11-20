@@ -8,6 +8,7 @@ const SHOTS = process.env.SHOTS ?? '/tmp/e2e';
 const browser = await chromium.launch();
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 let failures = 0;
+const people = [];
 const check = (c, m) => { if (!c) { failures++; log('FAIL', m); } else log('ok  ', m); };
 
 async function person(login) {
@@ -23,7 +24,9 @@ async function person(login) {
   await page.getByLabel(/Type the last block/).fill(code.split('-').pop());
   await page.getByRole('button', { name: 'Continue to chats' }).click();
   await page.getByRole('heading', { name: /Pick a chat/ }).waitFor();
-  return { ctx, page, login };
+  const p = { ctx, page, login };
+  people.push(p);
+  return p;
 }
 /** Slow down (or fail) this person's writes to GitHub. */
 async function writes(p, mode) {
@@ -160,6 +163,12 @@ try {
 } catch (e) {
   failures++;
   log('FAIL (exception)', e.message);
+  // What each app knew when it failed: invitations, members (who is only added), errors, and the
+  // open chat's system lines.
+  for (const p of people) {
+    log(`    state ${p.login}`, JSON.stringify(await p.page.evaluate(() => window.__chat?.debug()).catch(() => null)));
+    log(`    lines ${p.login}`, JSON.stringify(await p.page.locator('.sys').allInnerTexts().catch(() => [])));
+  }
 }
 await browser.close();
 log(failures ? `${failures} FAILED` : 'ALL PASSED');
