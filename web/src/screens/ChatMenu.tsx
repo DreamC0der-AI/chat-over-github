@@ -62,7 +62,7 @@ function ChatInfo({ session, convo, onClose, onVerify }: { session: Session; con
   const dm = convo.dm;
   const live = convo.live;
   const group = live ?? convo.current;
-  const members = group?.members() ?? [];
+  const members = (group?.members() ?? []).filter((m) => !m.pending);
   const iAmAdmin = !!group && group.policy.admins.includes(session.identity!.fingerprint);
   const pending = live ? session.pending(live) : [];
   const [invite, setInvite] = useState('');

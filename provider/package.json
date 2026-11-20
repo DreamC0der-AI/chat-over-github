@@ -4,14 +4,16 @@
   "version": "0.1.0",
   "description": "GitHub storage provider for keyhold chat: each storage kind as GitHub repos, collaborator access as the channel fence.",
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "build:live": "esbuild scripts/live-github.ts --bundle --platform=node --format=esm --outfile=scripts/live-github.mjs"
   },
   "dependencies": {
-    "keyhold": "github:DreamC0der-AI/keyhold#1d11c259346f88638d03db653c0d9b3caf2aaffc"
+    "keyhold": "github:DreamC0der-AI/keyhold#2a051d84e24d8b62fab5db1d679ea5b15cb0c39a"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
