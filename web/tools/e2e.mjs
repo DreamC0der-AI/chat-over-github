@@ -68,6 +68,14 @@ async function menu(p, item) {
   await p.page.getByRole('menuitem', { name: item, exact: true }).click();
 }
 const closeDialog = (p) => p.page.getByRole('button', { name: 'Close', exact: true }).click();
+// Open a chat and wait until it is the one shown, so the composer belongs to it (typing right
+// after the click could otherwise land in the chat that was open before).
+async function openChat(p, title) {
+  await p.page.evaluate(() => { if (location.hash.startsWith('#/settings')) location.hash = '#/'; });
+  await p.page.locator('.chat-item', { hasText: title }).first().click();
+  await p.page.locator('.convo-title', { hasText: new RegExp(`^${title}$`) }).waitFor();
+}
+
 const bubble = (p, text) => p.page.locator('.bubble', { hasText: text }).first();
 
 try {
@@ -91,10 +99,10 @@ try {
   await accept(bob, 'alice');
   await bob.page.locator('.chat-item', { hasText: 'alice' }).waitFor({ timeout: 45000 });
   check(true, 'bob accepted and joined the DM');
-  await bob.page.locator('.chat-item', { hasText: 'alice' }).click();
+  await openChat(bob, 'alice');
   await sendMsg(bob, 'hi alice, it works');
   await bubble(alice, 'hi alice, it works').waitFor({ timeout: 5000 }).catch(() => {});
-  await alice.page.locator('.chat-item', { hasText: 'bob' }).click();
+  await openChat(alice, 'bob');
   await bubble(alice, 'hi alice, it works').waitFor({ timeout: 30000 });
   check(true, 'alice received bob\'s message');
   await sendMsg(alice, 'hello bob 👋\nsecond line');
@@ -131,7 +139,7 @@ try {
   await closeDialog(bob);
   await alice.page.locator('.convo-head').getByRole('button', { name: 'Verified', exact: true }).waitFor();
   check(true, 'marked verified');
-  await bob.page.locator('.chat-item', { hasText: 'alice' }).click();
+  await openChat(bob, 'alice');
   await alice.page.getByRole('link', { name: 'Contacts' }).click();
   await alice.page.locator('.contact-item', { hasText: 'bob' }).locator('.trust.ok').waitFor();
   check(true, 'Contacts shows bob as verified');
@@ -140,7 +148,7 @@ try {
   await alice.page.locator('.verified-note').waitFor();
   await alice.page.screenshot({ path: `${SHOTS}/contact.png` });
   await closeDialog(alice);
-  await alice.page.locator('.chat-item', { hasText: 'bob' }).click();
+  await openChat(alice, 'bob');
 
   // attachments: a file card, then a picture shown inline with an upload state
   await alice.page.locator('input[type=file]').setInputFiles({ name: 'note.txt', mimeType: 'text/plain', buffer: Buffer.from('secret file contents') });
@@ -227,16 +235,16 @@ try {
   clearInterval(watchSelf);
   check(!selfInvite, 'second device never shows itself as the inviter');
   check(true, 'second device joined the DM');
-  await alice2.page.locator('.chat-item', { hasText: 'bob' }).click();
+  await openChat(alice2, 'bob');
   await alice2.page.locator('.sys.divider', { hasText: 'Earlier messages aren’t on this browser' }).waitFor({ timeout: 10000 });
   check(true, 'second device says earlier messages are elsewhere');
   // The verified mark from alice's first browser came with sync: no new first contact here.
   await alice2.page.locator('.convo-head').getByRole('button', { name: 'Verified', exact: true }).waitFor({ timeout: 30000 });
   check(true, 'second device shows the verified mark from the first');
-  await bob.page.locator('.chat-item', { hasText: 'alice' }).click();
+  await openChat(bob, 'alice');
   await sendMsg(bob, 'message for both alice devices');
   await bubble(alice2, 'message for both alice devices').waitFor({ timeout: 45000 });
-  await alice.page.locator('.chat-item', { hasText: 'bob' }).click();
+  await openChat(alice, 'bob');
   await bubble(alice, 'message for both alice devices').waitFor({ timeout: 45000 });
   check(true, 'both alice devices read the new message');
   await alice2.page.goto(BASE + '#/settings/devices');
@@ -244,11 +252,6 @@ try {
   check((await alice2.page.locator('.box-row', { hasText: 'Added' }).count()) === 2, 'two devices listed');
   await alice2.page.screenshot({ path: `${SHOTS}/settings.png` });
 
-  const openChat = async (p, name) => {
-    await p.page.evaluate(() => { if (location.hash.startsWith('#/settings')) location.hash = '#/'; });
-    await p.page.locator('.chat-item', { hasText: name }).first().click();
-    await p.page.waitForTimeout(300);
-  };
   const count = (p, name) => p.page.locator('.chat-item .name').getByText(name, { exact: true }).count();
 
   // Delete chat: bob clears his copy of the DM with alice; the chat stays live
