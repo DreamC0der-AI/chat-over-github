@@ -36,7 +36,7 @@ export function initials(name: string) {
 /** Logins whose avatar failed to load, so a remounted avatar goes straight to initials. */
 const failedAvatars = new Set<string>();
 
-export function Avatar({ name, login, square, size }: { name: string; login?: string; square?: boolean; size?: 'sm' | 'lg' | 'xl' }) {
+export function Avatar({ name, login, square, size }: { name: string; login?: string; square?: boolean; size?: 'xs' | 'sm' | 'lg' | 'xl' }) {
   const [bg, fg] = tint(name);
   const [failedNow, setFailed] = useState(false);
   const failed = failedNow || (!!login && failedAvatars.has(login));

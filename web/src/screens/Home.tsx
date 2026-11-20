@@ -5,6 +5,7 @@ import { Avatar, ErrorFlash, go, Hint, Icon, Modal, timeLabel, useAction, useSes
 import { ChatMenu } from './ChatMenu';
 import { Contacts } from './Contacts';
 import { Conversation } from './Conversation';
+import { PeoplePicker } from './PeoplePicker';
 
 export function Home({ session, route }: { session: Session; route: string }) {
   useSession(session);
@@ -335,7 +336,8 @@ function NewDm({ session, onClose, onGroup }: { session: Session; onClose: () =>
 
 function NewGroup({ session, onClose }: { session: Session; onClose: () => void }) {
   const [name, setName] = useState('');
-  const [people, setPeople] = useState('');
+  const [people, setPeople] = useState<string[]>([]);
+  const [query, setQuery] = useState('');
   const { busy, error, run, setError } = useAction();
   return (
     <Modal title="New group" onClose={onClose}>
@@ -344,7 +346,7 @@ function NewGroup({ session, onClose }: { session: Session; onClose: () => void 
         onSubmit={(e) => {
           e.preventDefault();
           void run(async () => {
-            const { group, failed } = await session.createGroup(name, people.split(/[\s,]+/));
+            const { group, failed } = await session.createGroup(name, [...people, ...query.split(/[\s,]+/)]);
             if (failed.length) setError(`Group created, but some invites failed: ${failed.join('; ')}`);
             else onClose();
             go(`/c/${encodeURIComponent(group.id)}`);
@@ -356,8 +358,8 @@ function NewGroup({ session, onClose }: { session: Session; onClose: () => void 
           <input id="g-name" className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Weekend hikers" autoFocus />
         </div>
         <div className="field">
-          <span className="field-label"><label htmlFor="g-people">Invite people</label><Hint text="GitHub usernames, separated by commas. You can add more later." /></span>
-          <input id="g-people" className="input" value={people} onChange={(e) => setPeople(e.target.value)} placeholder="alice, bob" autoComplete="off" />
+          <span className="field-label"><label htmlFor="g-people">Invite people</label><Hint text="Pick from your contacts, or type anyone's GitHub username and press Enter. You can add more later." /></span>
+          <PeoplePicker session={session} id="g-people" label="Invite people" value={people} onChange={setPeople} query={query} onQuery={setQuery} />
         </div>
         <ErrorFlash error={error} />
         <div className="modal-actions end">

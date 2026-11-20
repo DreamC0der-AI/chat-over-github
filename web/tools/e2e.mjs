@@ -185,7 +185,12 @@ try {
   await alice.page.getByRole('link', { name: 'Contacts' }).click();
   await alice.page.getByRole('button', { name: 'New group' }).click();
   await alice.page.getByLabel('Group name').fill('Weekend hikers');
-  await alice.page.getByLabel('Invite people').fill('bob, carol');
+  // bob is a contact: pick him from the list; carol isn't yet: type her username and press Enter
+  await alice.page.getByRole('option', { name: 'bob' }).click();
+  await alice.page.getByLabel('Invite people').fill('carol');
+  await alice.page.getByLabel('Invite people').press('Enter');
+  await alice.page.locator('.chip', { hasText: 'carol' }).waitFor();
+  await alice.page.screenshot({ path: `${SHOTS}/new-group-picker.png` });
   await alice.page.getByRole('button', { name: 'Create group' }).click();
   await alice.page.locator('.sys', { hasText: 'Invitation sent to @carol' }).waitFor({ timeout: 30000 });
   for (const p of [bob, carol]) await accept(p, 'alice', 70000);
