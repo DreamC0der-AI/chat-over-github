@@ -43,8 +43,11 @@ export interface Activity {
   background: boolean;
   /** Where to go when it's done (shown as Open in the tray). */
   link?: string;
-  /** A screen shows it in place, so the tray leaves it out. */
-  inline: number;
+  /**
+   * Shown in the progress popup, which blocks the app until it ends. Off for work the app starts
+   * by itself, and for an activity started inside another one (blocking closing a chat).
+   */
+  modal: boolean;
 }
 
 export interface Tracker {
@@ -62,8 +65,8 @@ export interface Tracker {
   wait(text: string): void;
 }
 
-const KEEP_DONE_MS = 3500;
-const KEEP_FAILED_MS = 60_000;
+/** A finished popup shows its tick this long; a failed or waiting one stays until closed. */
+const KEEP_DONE_MS = 1200;
 
 export class Activities {
   private seq = 0;
@@ -107,7 +110,7 @@ export class Activities {
     title: string,
     plan: PlanStep[],
     fn: (t: Tracker) => Promise<T>,
-    opts: { key?: string; anyCall?: boolean; background?: boolean; space?: string; onStart?: (a: Activity) => void } = {},
+    opts: { key?: string; anyCall?: boolean; background?: boolean; space?: string; modal?: boolean; onStart?: (a: Activity) => void } = {},
   ): Promise<T> {
     const a: Activity = {
       id: ++this.seq,
@@ -118,7 +121,8 @@ export class Activities {
       spaces: new Set(opts.space ? [opts.space] : []),
       anyCall: opts.anyCall ?? true,
       background: opts.background ?? false,
-      inline: 0,
+      // The popup blocks the app, so a modal activity starting while another runs is part of it.
+      modal: (opts.modal ?? true) && !this.list.some((x) => x.modal && !x.ended),
     };
     this.list = [...this.list.filter((x) => !(opts.key && x.key === opts.key && x.ended)), a];
     const t = this.tracker(a);
@@ -200,9 +204,13 @@ export class Activities {
     a.steps = a.steps.filter((s) => s.state !== 'todo' || !!error);
     a.error = error;
     this.changed();
-    setTimeout(() => {
-      if (this.list.includes(a)) this.dismiss(a.id);
-    }, error || a.waiting ? KEEP_FAILED_MS : KEEP_DONE_MS);
+    // Failed or waiting popups stay until closed; anything else goes once its tick has shown.
+    const someFailed = a.steps.some((s) => s.state === 'failed');
+    if (!a.modal || (!error && !a.waiting && !someFailed)) {
+      setTimeout(() => {
+        if (this.list.includes(a)) this.dismiss(a.id);
+      }, a.modal ? KEEP_DONE_MS : 0);
+    }
   }
 
   /** A storage call is about to go out: show it on the activities it belongs to. */

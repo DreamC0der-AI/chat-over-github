@@ -71,6 +71,20 @@ describe('progress and invitation details', () => {
     await w.until(() => !!bob.inviteFrom('alice')?.details, 'bob reads the note');
     expect(bob.inviteFrom('alice')!.details).toEqual({ kind: 'dm' });
 
+    // The popup shows one action at a time: closing the chat inside Block is part of Block.
+    const modal = new Set<string>();
+    const all = new Set<string>();
+    const before = new Set(alice.s.activities.all().map((a) => a.id));
+    alice.s.subscribe(() => {
+      for (const a of alice.s.activities.all().filter((a) => !before.has(a.id))) {
+        all.add(a.title);
+        if (a.modal) modal.add(a.title);
+      }
+    });
+    await alice.s.block('github:bob');
+    expect([...all]).toEqual(expect.arrayContaining(['Blocking @bob', 'Closing the chat']));
+    expect([...modal]).toEqual(['Blocking @bob']);
+
     let act: Activity | undefined;
     await expect(alice.s.createGroup('Nope', ['no-such-user-x'], (a) => (act = a))).rejects.toThrow('No GitHub user named no-such-user-x');
     expect(act!.error).toContain('No GitHub user');

@@ -6,8 +6,7 @@ import { ChatMenu } from './ChatMenu';
 import { Contacts } from './Contacts';
 import { Conversation } from './Conversation';
 import { PeoplePicker } from './PeoplePicker';
-import { InlineProgress, Steps, stepLine, useInline } from './Progress';
-import type { Activity } from '../lib/activity';
+import { stepLine } from './Progress';
 
 export function Home({ session, route }: { session: Session; route: string }) {
   useSession(session);
@@ -248,7 +247,6 @@ function InviteRow({ session, inv }: { session: Session; inv: PendingInvite }) {
   const d = inv.details;
   const act = session.activities.forKey(inv.key);
   const joining = act && !act.ended ? act : undefined;
-  useInline(session, joining);
   const text =
     joining ? undefined
     : inv.status === 'invited' ? undefined
@@ -276,7 +274,6 @@ function InviteRow({ session, inv }: { session: Session; inv: PendingInvite }) {
             : d?.kind === 'dm' ? <span className="kind-badge">{Icon.person()} Direct chat</span>
             : <span className="kind-badge">Chat invitation</span>}
         </div>
-        {joining && <Steps a={joining} />}
         {text && (
           <div className="small muted" title={inv.error}>
             {inv.status === 'joining' || inv.status === 'waiting' ? <span className="spinner" style={{ width: 10, height: 10, marginRight: 4 }} /> : null}
@@ -321,19 +318,15 @@ function Me({ session }: { session: Session }) {
 function NewDm({ session, onClose, onGroup }: { session: Session; onClose: () => void; onGroup: () => void }) {
   const [login, setLogin] = useState('');
   const { busy, error, run } = useAction();
-  const [act, setAct] = useState<Activity>();
-  const hidden = useRef(false);
-  const close = useHide(session, busy, act, hidden, onClose);
   const theirs = login.trim() ? session.inviteFrom(login) : undefined;
   return (
-    <Modal title="New chat" onClose={close}>
+    <Modal title="New chat" onClose={onClose}>
       <form
         className="stack"
         onSubmit={(e) => {
           e.preventDefault();
           void run(async () => {
-            const key = await session.startDm(login, setAct);
-            if (hidden.current) return;
+            const key = await session.startDm(login);
             onClose();
             go(`/c/${encodeURIComponent(key)}`);
           });
@@ -349,10 +342,9 @@ function NewDm({ session, onClose, onGroup }: { session: Session; onClose: () =>
             <button type="button" className="btn primary" disabled={busy} onClick={() => run(async () => { await session.acceptInvite(theirs.key); onClose(); })}>Accept their invitation</button>
           </div>
         )}
-        {busy && <InlineProgress session={session} a={act} />}
         <ErrorFlash error={error} />
         <div className="modal-actions">
-          {busy ? <HideButton onClick={close} /> : <button type="button" className="btn link" onClick={onGroup}>New group instead</button>}
+          <button type="button" className="btn link" onClick={onGroup}>New group instead</button>
           <button className="btn primary" disabled={busy || !login.trim()}>{busy ? <><span className="spinner" /> Creating…</> : 'Start chat'}</button>
         </div>
       </form>
@@ -365,18 +357,14 @@ function NewGroup({ session, onClose }: { session: Session; onClose: () => void 
   const [people, setPeople] = useState<string[]>([]);
   const [query, setQuery] = useState('');
   const { busy, error, run, setError } = useAction();
-  const [act, setAct] = useState<Activity>();
-  const hidden = useRef(false);
-  const close = useHide(session, busy, act, hidden, onClose);
   return (
-    <Modal title="New group" onClose={close}>
+    <Modal title="New group" onClose={onClose}>
       <form
         className="stack"
         onSubmit={(e) => {
           e.preventDefault();
           void run(async () => {
-            const { group, failed } = await session.createGroup(name, [...people, ...query.split(/[\s,]+/)], setAct);
-            if (hidden.current) return;
+            const { group, failed } = await session.createGroup(name, [...people, ...query.split(/[\s,]+/)]);
             if (failed.length) setError(`Group created, but some invites failed: ${failed.join('; ')}`);
             else onClose();
             go(`/c/${encodeURIComponent(group.id)}`);
@@ -391,10 +379,9 @@ function NewGroup({ session, onClose }: { session: Session; onClose: () => void 
           <span className="field-label"><label htmlFor="g-people">Invite people</label><Hint text="Pick from your contacts, or type anyone's GitHub username and press Enter. You can add more later." /></span>
           <PeoplePicker session={session} id="g-people" label="Invite people" value={people} onChange={setPeople} query={query} onQuery={setQuery} />
         </div>
-        {busy && <InlineProgress session={session} a={act} />}
         <ErrorFlash error={error} />
         <div className="modal-actions end">
-          {busy ? <HideButton onClick={close} /> : <button type="button" className="btn" onClick={onClose}>Cancel</button>}
+          <button type="button" className="btn" onClick={onClose}>Cancel</button>
           <button className="btn primary" disabled={busy || !name.trim()}>{busy ? <><span className="spinner" /> Creating…</> : 'Create group'}</button>
         </div>
       </form>
@@ -402,23 +389,3 @@ function NewGroup({ session, onClose }: { session: Session; onClose: () => void 
   );
 }
 
-/**
- * Closing a dialog while it works doesn't stop the work: it carries on in the corner (the
- * progress tray), and the dialog's own follow-up (opening the chat) is skipped.
- */
-function useHide(session: Session, busy: boolean, act: Activity | undefined, hidden: { current: boolean }, onClose: () => void) {
-  return () => {
-    if (busy) hidden.current = true;
-    else if (act?.ended) session.activities.dismiss(act.id);
-    onClose();
-  };
-}
-
-function HideButton({ onClick }: { onClick: () => void }) {
-  return (
-    <span className="row hide-btn">
-      <button type="button" className="btn" onClick={onClick}>Hide</button>
-      <Hint text="It keeps going in the corner of the screen. You can keep chatting meanwhile." />
-    </span>
-  );
-}
