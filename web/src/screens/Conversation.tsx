@@ -218,7 +218,8 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
               )}
             </div>
           ))}
-          {live && !peerLeft && pending.length > 0 && (!joined || live.members().some((m) => m.pending)) && (
+          {/* Only in a DM: in a group, who hasn't accepted yet is shown in the chat's info, not in the conversation. */}
+          {live && dm && !peerLeft && pending.length > 0 && (
             <div className="sys">Waiting for {pending.map((a) => '@' + loginFrom(a)).join(', ')} to accept</div>
           )}
         </div>

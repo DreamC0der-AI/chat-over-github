@@ -161,6 +161,19 @@ try {
   await ph.page.getByRole('link', { name: 'Privacy' }).waitFor();
   check(true, 'phone: back returns to the list');
   await ph.page.screenshot({ path: `${SHOTS}/phone-settings-dimmed.png` });
+
+  // ---- a newer build on the server: the tab offers a reload
+  const nv = ph.page.locator('.new-version');
+  check(!(await nv.isVisible()), 'no "New version" while the build is current');
+  await ph.page.route(BASE, (r) => r.request().resourceType() === 'fetch' ? r.fulfill({ contentType: 'text/html', body: '<script type="module" src="/assets/index-Newer123.js"></script>' }) : r.continue());
+  await ph.page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await nv.waitFor({ timeout: 5000 });
+  check(true, '"New version" shows once the server has another build');
+  await ph.page.screenshot({ path: `${SHOTS}/phone-new-version.png` });
+  await ph.page.unroute(BASE);
+  await nv.getByRole('button', { name: 'Reload' }).click();
+  await ph.page.getByRole('link', { name: 'Privacy' }).waitFor();
+  check(!(await nv.isVisible()), 'Reload loads the current build');
 } catch (e) {
   failures++;
   log('ERROR', e.message);
