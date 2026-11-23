@@ -313,18 +313,21 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
       // The Worker checks the invitation exists on the caller's own repo and files it under the invitee.
       const [space, id] = notice.pointer.split('#');
       const [, repo] = splitSpace(space!);
-      const r = await workerCall('POST', '/invites', { invite_id: Number(id), repo });
+      // An optional note (sealed to the invitee's devices by Keyhold) rides along; the Worker only stores it.
+      const note = notice.payload ? toB64(notice.payload) : undefined;
+      const r = await workerCall('POST', '/invites', { invite_id: Number(id), repo, ...(note ? { note } : {}) });
       if (r.status === 429) throw new KeyholdError('too_many_attempts', 'invite rate limit reached');
       if (r.status !== 201) throw new KeyholdError('config', `invite inbox: ${r.status}`);
     },
     async list() {
       const r = await workerCall('GET', '/invites');
       if (r.status !== 200) throw new KeyholdError('forbidden', `invite inbox: ${r.status}`);
-      return (r.data.invites as { id: number; from: string; expires_at: string }[]).map((i) => ({
+      return (r.data.invites as { id: number; from: string; expires_at: string; note?: string }[]).map((i) => ({
         id: String(i.id),
         from: toAddress(i.from),
         pointer: String(i.id),
         expiresAt: Date.parse(i.expires_at),
+        ...(i.note ? { payload: fromB64(i.note) } : {}),
       }));
     },
     async delete(id) {
@@ -332,7 +335,7 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
     },
   };
 
-  const caps = new Set<Capability>(['owner-managed-spaces', 'pre-keys']);
+  const caps = new Set<Capability>(['owner-managed-spaces', 'pre-keys', 'inbox-payload']);
 
   return {
     name: 'github',

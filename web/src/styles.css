@@ -645,4 +645,47 @@ body.resizing iframe, body.resizing img { pointer-events: none; }
   .settings-main { padding-top: 0; }
   .settings-main > .back-link { margin-bottom: -4px; }
 }
+/* Progress of slow actions: one step list everywhere (dialogs, invitation cards, the corner tray). */
+.steps { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.step { display: flex; align-items: flex-start; gap: 8px; padding: 3px 0; line-height: 18px; }
+.step-icon { flex: none; width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; }
+.step-icon.todo { box-sizing: border-box; width: 14px; height: 14px; margin: 2px; border: 1.5px solid var(--border); }
+.step-icon.done { background: var(--green-bg); color: var(--green-fg); }
+.step-icon.failed { background: var(--danger-bg); color: var(--danger); }
+.step-icon.failed svg { width: 11px; height: 11px; }
+.step-icon.waiting { box-sizing: border-box; width: 14px; height: 14px; margin: 2px; border: 1.5px dashed var(--attention); }
+.step-icon .spinner { width: 14px; height: 14px; border-width: 2px; }
+.step-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.step.todo .step-label { color: var(--faint); }
+.step.done .step-label { color: var(--muted); }
+.step.active .step-label { font-weight: 600; }
+.step.failed .step-label { color: var(--danger); }
+.step-detail { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; animation: fade .2s ease-out; }
+.step-detail.error { color: var(--danger); white-space: normal; }
+.step-time { flex: none; font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.step.active .step-time { color: var(--muted); }
+.step-bar { height: 3px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.step-bar span { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width .4s ease-out; }
+.step-bar.failed span { background: var(--danger); }
+.inline-progress { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-radius: var(--r-lg); background: var(--subtle); animation: fade .15s ease-out; }
+.hide-btn { gap: 6px; margin-right: auto; }
+.invite-kind { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.kind-badge { display: inline-flex; align-items: center; gap: 4px; padding: 0 8px 0 6px; border-radius: 999px; background: var(--subtle); border: 1px solid var(--line); color: var(--muted); font-size: 12px; line-height: 20px; font-weight: 500; }
+.kind-badge svg { width: 12px; height: 12px; }
+.invite-text .steps { margin-top: 6px; }
+
+.jobs { position: fixed; right: 16px; bottom: 16px; z-index: 60; width: 340px; max-width: calc(100vw - 32px); display: flex; flex-direction: column; gap: 8px; }
+.job-item { display: flex; flex-direction: column; gap: 8px; padding: 10px 10px 10px 12px; border-radius: var(--r-lg); background: var(--pop); box-shadow: var(--shadow-md); animation: rise .16s ease-out; }
+.job-item .steps { padding: 2px 2px 0; }
+.job-head { display: flex; align-items: center; gap: 10px; }
+.job-icon { flex: none; width: 20px; display: inline-flex; justify-content: center; }
+.job-item.done .job-icon { color: var(--green-fg); }
+.job-item.failed .job-icon { color: var(--danger); }
+.job-main { flex: 1; min-width: 0; display: flex; flex-direction: column; padding: 0; border: 0; background: none; color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
+.job-title { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-sub { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-item.failed .job-sub { color: var(--danger); white-space: normal; }
+.job-time { flex: none; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.job-x { width: 26px; min-height: 26px; }
+@media (max-width: 760px) { .jobs { left: 16px; right: 16px; width: auto; bottom: 12px; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }

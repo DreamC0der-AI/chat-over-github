@@ -6,6 +6,7 @@ import { ask, Avatar, ErrorFlash, go, Hint, Icon, MenuItem, timeLabel, toast, us
 import { ChatMenu, CLOSE_ASK, deleteAsk, VerifyModal } from './ChatMenu';
 import { AttachmentView, DraftTray, isImage, Lightbox, PendingAttachment, saveBlob, toDrafts, type Draft, type Viewing } from './Attachments';
 import { EmojiRow, MsgPopup, useLongPress, type Anchor } from './MessageMenu';
+import { stepLine } from './Progress';
 
 const clock = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 const msgTime = (ts: number) => (timeLabel(ts) === clock(ts) ? clock(ts) : `${timeLabel(ts)} ${clock(ts)}`);
@@ -118,6 +119,8 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
   const shownIds = new Set(items.map((it) => (it.kind === 'msg' ? it.m.id : '')));
   const sending = (live ? session.sending.get(live.id) ?? [] : []).filter((p) => !p.sentId || !shownIds.has(p.sentId));
   const busyLabel = session.chatBusy.get(convo.key);
+  const act = session.activities.forKey(convo.key);
+  const step = act && !act.ended ? stepLine(act) : undefined;
   const err = group ? session.groupErrors.get(group.id) : undefined;
   const joined = !!live && live.members().length > 1;
   const peerLeft = !!live && dm && !!liveRec?.peerLeft && !joined;
@@ -135,8 +138,8 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
             <strong className="convo-title">{title}</strong>
             <Hint className="hint lock" label="End-to-end encrypted" text={<>End-to-end encrypted. Messages are encrypted in this browser before they're saved to GitHub{space ? <>, in <span className="mono">{space.split('/')[1]}</span></> : ''}.</>}>{Icon.lock(12)}</Hint>
           </span>
-          {busyLabel ? (
-            <span className="convo-sub busy" role="status"><span className="spinner" />{busyLabel}</span>
+          {busyLabel || step ? (
+            <span className="convo-sub busy" role="status"><span className="spinner" />{step ?? busyLabel}</span>
           ) : !dm && group && <span className="convo-sub">{session.joinedMembers(group).length} {session.joinedMembers(group).length === 1 ? 'member' : 'members'}</span>}
         </div>
         <div className="convo-actions">

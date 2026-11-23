@@ -8,7 +8,7 @@
  * "bearer.<token>" next to the real one, "inbox.v1".
  */
 
-export type InboxInvite = { id: number; from: string; from_id: number; created_at: string; expires_at: string };
+export type InboxInvite = { id: number; from: string; from_id: number; created_at: string; expires_at: string; /** Sealed for our devices by the inviter's app (base64). */ note?: string };
 export type InboxClosure = { id: string; from: string; from_id: number; tag: string; at: string };
 
 type Msg =

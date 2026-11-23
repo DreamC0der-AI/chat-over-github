@@ -6,6 +6,8 @@ import { ChatMenu } from './ChatMenu';
 import { Contacts } from './Contacts';
 import { Conversation } from './Conversation';
 import { PeoplePicker } from './PeoplePicker';
+import { InlineProgress, Steps, stepLine, useInline } from './Progress';
+import type { Activity } from '../lib/activity';
 
 export function Home({ session, route }: { session: Session; route: string }) {
   useSession(session);
@@ -144,7 +146,8 @@ function SideResizer({ width, onChange }: { width: number; onChange: (w: number)
 
 function ChatRow({ session, c, active }: { session: Session; c: Convo; active: boolean }) {
   const g = c.live ?? c.current;
-  const busyLabel = session.chatBusy.get(c.key);
+  const act = session.activities.forKey(c.key);
+  const busyLabel = (act && !act.ended ? stepLine(act) : undefined) ?? session.chatBusy.get(c.key);
   const last = c.rooms[c.rooms.length - 1]!;
   const pending = c.live ? session.pending(c.live) : [];
   const waiting = c.dm && pending.length > 0;
@@ -242,8 +245,13 @@ function InviteRow({ session, inv }: { session: Session; inv: PendingInvite }) {
     void run(() => (what === 'accept' ? session.acceptInvite(inv.key) : session.declineInvite(inv.key))).finally(() => setDoing(undefined));
   };
   const from = loginFrom(inv.from);
+  const d = inv.details;
+  const act = session.activities.forKey(inv.key);
+  const joining = act && !act.ended ? act : undefined;
+  useInline(session, joining);
   const text =
-    inv.status === 'invited' ? undefined
+    joining ? undefined
+    : inv.status === 'invited' ? undefined
     : inv.status === 'joining' ? 'Joining…'
     : inv.status === 'waiting' ? `Waiting for ${from}`
     : 'Could not join yet';
@@ -255,7 +263,20 @@ function InviteRow({ session, inv }: { session: Session; inv: PendingInvite }) {
     <div className="row invite-row">
       <Avatar name={from} login={from} size="lg" />
       <div className="invite-text">
-        <div className="invite-title"><span><strong>{from}</strong> invited you</span>{why && <Hint text={why} />}</div>
+        <div className="invite-title">
+          <span>
+            {d?.kind === 'group' ? <><strong>{from}</strong> invited you to <strong>{d.name ?? 'a group'}</strong></>
+              : d?.kind === 'dm' ? <><strong>{from}</strong> invited you to chat</>
+              : <><strong>{from}</strong> invited you</>}
+          </span>
+          {why && <Hint text={why} />}
+        </div>
+        <div className="invite-kind small muted">
+          {d?.kind === 'group' ? <><span className="kind-badge">{Icon.people()} Group</span>{d.people && d.people > 1 ? <span>{d.people} people</span> : null}</>
+            : d?.kind === 'dm' ? <span className="kind-badge">{Icon.person()} Direct chat</span>
+            : <span className="kind-badge">Chat invitation</span>}
+        </div>
+        {joining && <Steps a={joining} />}
         {text && (
           <div className="small muted" title={inv.error}>
             {inv.status === 'joining' || inv.status === 'waiting' ? <span className="spinner" style={{ width: 10, height: 10, marginRight: 4 }} /> : null}
@@ -300,15 +321,19 @@ function Me({ session }: { session: Session }) {
 function NewDm({ session, onClose, onGroup }: { session: Session; onClose: () => void; onGroup: () => void }) {
   const [login, setLogin] = useState('');
   const { busy, error, run } = useAction();
+  const [act, setAct] = useState<Activity>();
+  const hidden = useRef(false);
+  const close = useHide(session, busy, act, hidden, onClose);
   const theirs = login.trim() ? session.inviteFrom(login) : undefined;
   return (
-    <Modal title="New chat" onClose={onClose}>
+    <Modal title="New chat" onClose={close}>
       <form
         className="stack"
         onSubmit={(e) => {
           e.preventDefault();
           void run(async () => {
-            const key = await session.startDm(login);
+            const key = await session.startDm(login, setAct);
+            if (hidden.current) return;
             onClose();
             go(`/c/${encodeURIComponent(key)}`);
           });
@@ -324,9 +349,10 @@ function NewDm({ session, onClose, onGroup }: { session: Session; onClose: () =>
             <button type="button" className="btn primary" disabled={busy} onClick={() => run(async () => { await session.acceptInvite(theirs.key); onClose(); })}>Accept their invitation</button>
           </div>
         )}
+        {busy && <InlineProgress session={session} a={act} />}
         <ErrorFlash error={error} />
         <div className="modal-actions">
-          <button type="button" className="btn link" onClick={onGroup}>New group instead</button>
+          {busy ? <HideButton onClick={close} /> : <button type="button" className="btn link" onClick={onGroup}>New group instead</button>}
           <button className="btn primary" disabled={busy || !login.trim()}>{busy ? <><span className="spinner" /> Creating…</> : 'Start chat'}</button>
         </div>
       </form>
@@ -339,14 +365,18 @@ function NewGroup({ session, onClose }: { session: Session; onClose: () => void 
   const [people, setPeople] = useState<string[]>([]);
   const [query, setQuery] = useState('');
   const { busy, error, run, setError } = useAction();
+  const [act, setAct] = useState<Activity>();
+  const hidden = useRef(false);
+  const close = useHide(session, busy, act, hidden, onClose);
   return (
-    <Modal title="New group" onClose={onClose}>
+    <Modal title="New group" onClose={close}>
       <form
         className="stack"
         onSubmit={(e) => {
           e.preventDefault();
           void run(async () => {
-            const { group, failed } = await session.createGroup(name, [...people, ...query.split(/[\s,]+/)]);
+            const { group, failed } = await session.createGroup(name, [...people, ...query.split(/[\s,]+/)], setAct);
+            if (hidden.current) return;
             if (failed.length) setError(`Group created, but some invites failed: ${failed.join('; ')}`);
             else onClose();
             go(`/c/${encodeURIComponent(group.id)}`);
@@ -361,12 +391,34 @@ function NewGroup({ session, onClose }: { session: Session; onClose: () => void 
           <span className="field-label"><label htmlFor="g-people">Invite people</label><Hint text="Pick from your contacts, or type anyone's GitHub username and press Enter. You can add more later." /></span>
           <PeoplePicker session={session} id="g-people" label="Invite people" value={people} onChange={setPeople} query={query} onQuery={setQuery} />
         </div>
+        {busy && <InlineProgress session={session} a={act} />}
         <ErrorFlash error={error} />
         <div className="modal-actions end">
-          <button type="button" className="btn" onClick={onClose}>Cancel</button>
+          {busy ? <HideButton onClick={close} /> : <button type="button" className="btn" onClick={onClose}>Cancel</button>}
           <button className="btn primary" disabled={busy || !name.trim()}>{busy ? <><span className="spinner" /> Creating…</> : 'Create group'}</button>
         </div>
       </form>
     </Modal>
+  );
+}
+
+/**
+ * Closing a dialog while it works doesn't stop the work: it carries on in the corner (the
+ * progress tray), and the dialog's own follow-up (opening the chat) is skipped.
+ */
+function useHide(session: Session, busy: boolean, act: Activity | undefined, hidden: { current: boolean }, onClose: () => void) {
+  return () => {
+    if (busy) hidden.current = true;
+    else if (act?.ended) session.activities.dismiss(act.id);
+    onClose();
+  };
+}
+
+function HideButton({ onClick }: { onClick: () => void }) {
+  return (
+    <span className="row hide-btn">
+      <button type="button" className="btn" onClick={onClick}>Hide</button>
+      <Hint text="It keeps going in the corner of the screen. You can keep chatting meanwhile." />
+    </span>
   );
 }

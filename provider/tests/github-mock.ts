@@ -47,7 +47,7 @@ const asUtf16ToUtf8 = (b: Buffer) => Buffer.from(b.subarray(0, b.length & ~1).sw
 export class MockGitHub {
   readonly users = new Map<string, { id: number; token: string }>();
   readonly repos = new Map<string, Repo>();
-  readonly inbox = new Map<number, { id: number; from: string; from_id: number; created_at: string; expires_at: string }[]>();
+  readonly inbox = new Map<number, { id: number; from: string; from_id: number; created_at: string; expires_at: string; note?: string }[]>();
   readonly log: string[] = [];
   /** Test hook: paths whose Contents API content GitHub "converts" from UTF-16 (the blob stays intact). */
   readonly transcoded = new Set<string>();
@@ -300,7 +300,7 @@ export class MockGitHub {
       const inv = this.users.get(invitee)!;
       const list = this.inbox.get(inv.id) ?? [];
       const now = Date.now();
-      list.push({ id: Number(body.invite_id), from: user, from_id: me.id, created_at: new Date(now).toISOString(), expires_at: new Date(now + 7 * 86_400_000).toISOString() });
+      list.push({ id: Number(body.invite_id), from: user, from_id: me.id, created_at: new Date(now).toISOString(), expires_at: new Date(now + 7 * 86_400_000).toISOString(), ...(typeof body.note === 'string' ? { note: body.note } : {}) });
       this.inbox.set(inv.id, list);
       return resp(201, { ok: true, invitee_id: inv.id });
     }
