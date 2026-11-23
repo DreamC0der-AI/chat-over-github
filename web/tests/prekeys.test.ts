@@ -42,6 +42,29 @@ describe('pre-keys', () => {
     expect(bob.chat('Hikers')).toBeDefined(); // the group name reached him
   });
 
+  it('accepting while the regular check runs joins once: no rejected changes, everyone reads everyone', async () => {
+    w = await world();
+    const [alice, bob, carol] = [await w.browser('alice'), await w.browser('bob'), await w.browser('carol')];
+    for (const b of [alice, bob, carol]) await b.setup();
+    await w.until(() => preKeys('bob') === 1 && preKeys('carol') === 1, 'pre-keys published');
+    await alice.s.createGroup('Hikers', ['bob', 'carol']);
+    await alice.s.send(alice.chat('Hikers')!.live!, 'hi');
+    await w.until(() => !!bob.inviteFrom('alice') && !!carol.inviteFrom('alice'), 'both see the invitation');
+    // Accept lands while the app's own sync step (which also looks for invitations) is running.
+    await Promise.all([bob.s.acceptInvite(bob.inviteFrom('alice')!.key), bob.sync(), carol.s.acceptInvite(carol.inviteFrom('alice')!.key), carol.sync()]);
+    await w.until(async () => (await alice.notes(alice.chat('Hikers'))).filter((n) => n.endsWith('joined')).length === 2, 'alice sees both join');
+    await bob.s.send(bob.chat('Hikers')!.live!, 'from bob');
+    await carol.s.send(carol.chat('Hikers')!.live!, 'from carol');
+    for (const b of [alice, bob, carol]) {
+      await w.until(async () => (await b.texts(b.chat('Hikers'))).length === 3, `${b.login} has all three messages`);
+      expect((await b.texts(b.chat('Hikers'))).sort()).toEqual(['from bob', 'from carol', 'hi']);
+      const notes = await b.notes(b.chat('Hikers'));
+      expect(notes.filter((n) => /rejected|could not be decrypted/.test(n))).toEqual([]);
+      const joins = notes.filter((n) => n.endsWith('joined'));
+      expect(new Set(joins).size).toBe(joins.length); // no join shown twice
+    }
+  });
+
   it('a DM: the message box is open before they accept, and they get what was sent', async () => {
     w = await world();
     const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
