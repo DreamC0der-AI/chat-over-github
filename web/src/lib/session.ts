@@ -1479,7 +1479,8 @@ export class Session {
         }
       }
       else if (e.type === 'undecryptable') await this.systemNote(g.id, 'A message could not be decrypted.');
-      else if (e.type === 'rejected') await this.systemNote(g.id, `A change to the group was rejected (${e.reason}).`);
+      // A commit everyone ignores: nothing the people in the chat can act on.
+      else if (e.type === 'rejected') console.warn(`chat ${g.id}: ignored group change ${e.index} (${e.reason})`);
     }
     if (shareName && g.active && !this.isDm(g) && g.name && g.policy.admins.includes(this.identity!.fingerprint)) {
       await g.send({ t: 'meta', name: g.name }).catch(() => undefined);
@@ -1507,7 +1508,15 @@ export class Session {
    * people we can already open. Both wait for the user to accept. Our own repos (another of our
    * devices made the chat) are joined right away. Then join the accepted ones.
    */
-  async checkInvites(force = false) {
+  checkInvites(force = false): Promise<void> {
+    // One at a time: Accept and the regular check overlapping would join the same chat twice.
+    const run = this.invitesQueue.then(() => this.checkInvitesNow(force));
+    this.invitesQueue = run.catch(() => undefined);
+    return run;
+  }
+  private invitesQueue: Promise<void> = Promise.resolve();
+
+  private async checkInvitesNow(force: boolean) {
     const p = this.provider;
     const chat = this.chat!;
     const now = Date.now();
@@ -1641,7 +1650,8 @@ export class Session {
     if (inv.noticeId) await p.inviteInbox.delete(inv.noticeId).catch(() => {});
     Object.assign(inv, { status: 'joining', pointer: undefined, noticeId: undefined, nextTry: 0, attempts: 0, since: Date.now(), gone });
     this.bump();
-    await this.checkInvites(true);
+    // auto: called from inside the invite check, which already holds its queue.
+    await (auto ? this.checkInvitesNow(true) : this.checkInvites(true));
     // Already accepted elsewhere shows up as a repo in that scan; if nothing did, it's gone.
     const still = this.invites.get(key);
     // Taken by the app itself (both started a DM at once) and already retired: nothing to say.
