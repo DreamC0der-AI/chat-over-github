@@ -90,6 +90,13 @@ export function previewText(m: MsgRecord): string {
 
 /** How long a finished action keeps its local state, so the screen never shows a gap before the stored copy appears. */
 const SETTLE_MS = 2_000;
+/** "Inviting @bob", "Inviting @bob and @carol", "Inviting @bob and 2 others". */
+function inviteLabel(logins: string[]) {
+  const [a, b] = logins;
+  if (logins.length === 1) return `Inviting @${a}`;
+  if (logins.length === 2) return `Inviting @${a} and @${b}`;
+  return `Inviting @${a} and ${logins.length - 1} others`;
+}
 const JOIN_UNLOCK = 'Unlocking the encryption';
 const JOIN_LOAD = 'Loading messages';
 /** The steps of making a chat's repo, started by Keyhold's own storage calls. */
@@ -1141,23 +1148,22 @@ export class Session {
     const title = name.trim() || 'new group';
     return this.activities.run(
       `Creating ${title}`,
-      [...(logins.length ? ['Checking usernames'] : []), ...NEW_ROOM, ...logins.map((l) => `Inviting @${l}`)],
+      [...(logins.length ? ['Checking usernames'] : []), ...NEW_ROOM, ...(logins.length ? [inviteLabel(logins)] : [])],
       async (t) => {
-        for (const l of logins) if (!(await this.userExists(l))) throw new Error(`No GitHub user named ${l}`);
+        // Side by side: each lookup is a GitHub round trip.
+        const exists = await Promise.all(logins.map((l) => this.userExists(l)));
+        const missing = logins.find((_, i) => !exists[i]);
+        if (missing) throw new Error(`No GitHub user named ${missing}`);
         const g = await this.chat!.createGroup('group', name.trim() || undefined);
         t.space(g.space);
         t.link(`/c/${encodeURIComponent(g.id)}`);
         this.fill(g);
         this.bump();
-        const failed: string[] = [];
-        for (const l of logins) {
-          t.step(`Inviting @${l}`);
-          try {
-            await this.inviteNow(g, l);
-          } catch (e) {
-            failed.push(`${l}: ${describeError(e)}`);
-            t.stepFailed(describeError(e));
-          }
+        let failed: string[] = [];
+        if (logins.length) {
+          t.step(inviteLabel(logins));
+          failed = await this.inviteNow(g, logins);
+          if (failed.length) t.stepFailed(failed.join('; '));
         }
         return { group: g, failed };
       },
@@ -1171,7 +1177,8 @@ export class Session {
     await this.activities.run(`Inviting @${login}`, [`Finding @${login} on GitHub`, `Inviting @${login}`], async (t) => {
       if (!(await this.userExists(login))) throw new Error(`No GitHub user named ${login}`);
       t.step(`Inviting @${login}`);
-      await this.inviteNow(g, login);
+      const [failed] = await this.inviteNow(g, [login]);
+      if (failed) throw new Error(failed.replace(/^[^:]+: /, ''));
     }, { key: this.convoKey(this.record(g.id)), space: g.space, onStart });
   }
 
@@ -1202,13 +1209,23 @@ export class Session {
     }
   }
 
-  private async inviteNow(g: Group, login: string) {
-    await g.invite(toAddress(login), { note: this.inviteNote(g) });
+  /** Invite these people together (one commit for all of them). Returns "login: why" for each that failed. */
+  private async inviteNow(g: Group, logins: string[]): Promise<string[]> {
+    const results = await g.inviteMany(logins.map(toAddress), { note: this.inviteNote(g) });
     const r = this.record(g.id);
-    if (!r.invited.includes(toAddress(login))) r.invited.push(toAddress(login));
+    const failed: string[] = [];
+    for (const [i, res] of results.entries()) {
+      const login = logins[i]!;
+      if (res.error) {
+        failed.push(`${login}: ${describeError(res.error)}`);
+        continue;
+      }
+      if (!r.invited.includes(res.address)) r.invited.push(res.address);
+      await this.systemNote(g.id, `Invitation sent to @${login}.`);
+    }
     await this.saveRecord(r);
-    await this.systemNote(g.id, `Invitation sent to @${login}.`);
     this.bump();
+    return failed;
   }
 
   async removeMember(g: Group, fp: string) {

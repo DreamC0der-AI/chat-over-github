@@ -34,9 +34,9 @@ describe('progress and invitation details', () => {
     const seen = watch(() => act, (fn) => alice.s.subscribe(fn));
     const done = alice.s.createGroup('Weekend hikers', ['bob', 'carol'], (a) => (act = a));
     expect(act?.title).toBe('Creating Weekend hikers');
-    expect(act?.steps.map((s) => s.label)).toEqual(['Checking usernames', 'Creating a private repo', 'Setting up encryption', 'Inviting @bob', 'Inviting @carol']);
+    expect(act?.steps.map((s) => s.label)).toEqual(['Checking usernames', 'Creating a private repo', 'Setting up encryption', 'Inviting @bob and @carol']);
     await done;
-    expect(seen.steps).toEqual(['Checking usernames', 'Creating a private repo', 'Setting up encryption', 'Inviting @bob', 'Inviting @carol']);
+    expect(seen.steps).toEqual(['Checking usernames', 'Creating a private repo', 'Setting up encryption', 'Inviting @bob and @carol']);
     expect(seen.details).toEqual(expect.arrayContaining(['Creating a private repo on GitHub', 'Saving an encryption change', 'Sending the GitHub invitation to @bob', "Letting @carol's app know"]));
     expect(act!.ended).toBeDefined();
     expect(act!.steps.every((s) => s.state === 'done')).toBe(true);
