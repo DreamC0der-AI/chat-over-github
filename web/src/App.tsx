@@ -8,6 +8,7 @@ import { Home } from './screens/Home';
 import { Settings } from './screens/Settings';
 import { ErrorFlash, useHash, useSession } from './ui';
 import { ActivityTray } from './screens/Progress';
+import { useNewVersion } from './lib/update-check';
 
 export function App() {
   const [auth, setAuth] = useState<AuthState | undefined>();
@@ -83,9 +84,21 @@ function Signed({ auth, onSignOut }: { auth: AuthState; onSignOut: () => void })
         <>
           {route === '/settings' || route.startsWith('/settings/') ? <Settings session={session} route={route} /> : <Home session={session} route={route} />}
           <ActivityTray session={session} />
+          <NewVersion />
         </>
       );
   }
+}
+
+function NewVersion() {
+  const newer = useNewVersion();
+  if (!newer) return null;
+  return (
+    <div className="new-version" role="status">
+      <span>New version</span>
+      <button className="btn primary small" onClick={() => location.reload()}>Reload</button>
+    </div>
+  );
 }
 
 function OpenElsewhere() {

@@ -689,3 +689,6 @@ body.resizing iframe, body.resizing img { pointer-events: none; }
 .job-x { width: 26px; min-height: 26px; }
 @media (max-width: 760px) { .jobs { left: 16px; right: 16px; width: auto; bottom: 12px; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+/* a newer build is live: ask this tab to reload */
+.new-version { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 65; display: flex; align-items: center; gap: 12px; padding: 6px 6px 6px 14px; border-radius: 999px; background: var(--tip-bg); color: var(--tip-fg); font-size: 13px; box-shadow: var(--shadow-md); white-space: nowrap; }
