@@ -271,3 +271,21 @@ describe('github: a burst of mail', () => {
     await expect(b.mailbox.postMany!(s, [bytes('x'), bytes('y')])).rejects.toMatchObject({ code: 'forbidden' });
   });
 });
+
+describe('github: invites in one write', () => {
+  it('dropBox.putMany writes every recipient\'s items as one commit; each reads only theirs', async () => {
+    const w = githubWorld();
+    const a = w.session('alice');
+    const s = await a.channel.createSpace('chat');
+    const puts = () => w.gh.log.filter((l) => l.startsWith('PUT ') || l.startsWith('PATCH ')).length;
+    const before = puts();
+    const ids = await a.dropBox.putMany!(s, [{ tag: 't1', data: bytes('welcome') }, { tag: 't1', data: bytes('ticket1') }, { tag: 't2', data: bytes('ticket2') }]);
+    expect(puts() - before).toBe(1);
+    expect(new Set(ids).size).toBe(3);
+    expect((await a.dropBox.list(s, 't1')).map((i) => str(i.data)).sort()).toEqual(['ticket1', 'welcome']);
+    expect((await a.dropBox.list(s, 't2')).map((i) => str(i.data))).toEqual(['ticket2']);
+    w.gh.gitDataDown = true;
+    await a.dropBox.putMany!(s, [{ tag: 't3', data: bytes('a') }, { tag: 't3', data: bytes('b') }]);
+    expect((await a.dropBox.list(s, 't3')).map((i) => str(i.data)).sort()).toEqual(['a', 'b']);
+  });
+});

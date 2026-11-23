@@ -174,10 +174,17 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
 
   /** Several mail items as ONE commit (Git Data API). */
   async function postBatch(space: SpaceRef, data: Bytes[]): Promise<string[]> {
-    const [ow, re] = splitSpace(space);
-    const repo = `/repos/${enc(ow)}/${enc(re)}`;
     const t = now();
     const ids = batchIds(t, data.length);
+    await writeBatch(space, data.map((d, i) => ({ path: `mail/${day(t)}/${ids[i]}`, data: d })));
+    return ids;
+  }
+
+  /** New files as ONE commit (Git Data API): blobs side by side, then tree, commit and ref. */
+  async function writeBatch(space: SpaceRef, files: { path: string; data: Bytes }[]): Promise<void> {
+    const [ow, re] = splitSpace(space);
+    const repo = `/repos/${enc(ow)}/${enc(re)}`;
+    const data = files.map((f) => f.data);
     const fail = (what: string, status: number): never => {
       throw new KeyholdError(status === 403 || status === 404 ? 'forbidden' : 'config', `${what}: ${status}`);
     };
@@ -189,7 +196,7 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
         return r.data.sha as string;
       }),
     );
-    const tree = ids.map((id, i) => ({ path: `mail/${day(t)}/${id}`, mode: '100644', type: 'blob', sha: blobs[i] }));
+    const tree = files.map((f, i) => ({ path: f.path, mode: '100644', type: 'blob', sha: blobs[i] }));
     let branch = branches.get(repo);
     for (let attempt = 0; attempt < 5; attempt++) {
       const [head, info] = await Promise.all([gh.call('GET', `${repo}/commits/HEAD`), branch ? undefined : gh.call('GET', repo)]);
@@ -205,7 +212,7 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
       if (c.status !== 201) fail('write commit', c.status);
       // Fast-forward only: another write landed first -> build on top of it and try again.
       const r = await gh.call('PATCH', `${repo}/git/refs/heads/${enc(branch!)}`, { sha: c.data.sha, force: false });
-      if (r.status === 200) return ids;
+      if (r.status === 200) return;
       if (r.status !== 409 && r.status !== 422) fail('move branch', r.status);
     }
     throw new KeyholdError('conflict', 'could not post');
@@ -464,6 +471,18 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
         const id = rid();
         await putFile(ow, re, `drop/${tag}/${id}`, data, null);
         return id;
+      },
+      /** Tickets and Welcomes for several invitees as one commit. */
+      async putMany(space, items) {
+        const ids = items.map(() => rid());
+        try {
+          await writeBatch(space, items.map((it, i) => ({ path: `drop/${it.tag}/${ids[i]}`, data: it.data })));
+        } catch (e) {
+          if ((e as KeyholdError).code === 'forbidden') throw e;
+          const [ow, re] = splitSpace(space);
+          for (let i = 0; i < items.length; i++) await putFile(ow, re, `drop/${items[i]!.tag}/${ids[i]}`, items[i]!.data, null);
+        }
+        return ids;
       },
       async list(space, tag) {
         const [ow, re] = splitSpace(space);
