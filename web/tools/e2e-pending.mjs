@@ -152,7 +152,7 @@ try {
   await writes(alice, 'slow');
   await alice.page.locator('.convo-head').getByRole('button', { name: 'Chat options' }).click();
   await alice.page.getByRole('menuitem', { name: 'Close chat', exact: true }).click();
-  await alice.page.locator('.convo-sub.busy', { hasText: 'Closing chat…' }).waitFor({ timeout: 3000 });
+  await alice.page.locator('.convo-sub.busy', { hasText: /Step \d of \d/ }).waitFor({ timeout: 3000 });
   check(true, 'closing shows in the chat header');
   check(await alice.page.locator('.chat-item .spinner').isVisible(), 'closing shows in the chat list');
   check(await alice.page.locator('#composer').isDisabled(), 'composer waits while closing');

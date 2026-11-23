@@ -138,6 +138,17 @@ test("bob registers a real invite, alice sees it, deletes it", async () => {
   assert.equal((await (await call("GET", "/invites", "tok-alice")).json()).invites.length, 0);
 });
 
+test("an invite can carry an opaque note for the invitee; bad notes are refused", async () => {
+  let r = await call("POST", "/invites", "tok-bob", { invite_id: 100, repo: "dm-1", note: "c2VhbGVk" });
+  assert.equal(r.status, 201);
+  const { invites } = await (await call("GET", "/invites", "tok-alice")).json();
+  assert.equal(invites[0].note, "c2VhbGVk");
+  assert.equal((await call("POST", "/invites", "tok-bob", { invite_id: 100, repo: "dm-1", note: "not base64!" })).status, 400);
+  assert.equal((await call("POST", "/invites", "tok-bob", { invite_id: 100, repo: "dm-1", note: "A".repeat(8193) })).status, 400);
+  assert.equal((await call("POST", "/invites", "tok-bob", { invite_id: 100, repo: "dm-1", note: 5 })).status, 400);
+  await call("DELETE", "/invites/100", "tok-alice");
+});
+
 test("inviter can withdraw, others cannot", async () => {
   await call("POST", "/invites", "tok-bob", { invite_id: 100, repo: "dm-1" });
   assert.equal((await call("DELETE", "/invites/100?invitee_id=2", "tok-eve")).status, 404);

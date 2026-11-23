@@ -18,7 +18,8 @@
 //
 // Each user's inbox is one Durable Object (named by their GitHub user id) with its own SQLite
 // tables:
-//   invites:  {id, from, from_id, created_at, expires_at}   expires with GitHub's 7-day invitation
+//   invites:  {id, from, from_id, created_at, expires_at, note?}   expires with GitHub's 7-day invitation;
+//             note is an opaque blob the inviter's app sealed for the invitee's devices
 //   closures: {id, from, from_id, tag, at}                    lives 7 days
 // No repo names, no messages. The tag of a closure is an opaque hash the members' apps derive
 // from the chat; the Worker can't link it to a repo. The sender is whoever's token made the
@@ -155,6 +156,9 @@ async function createInvite(request, env) {
   const repo = typeof body.repo === "string" ? body.repo : "";
   if (!Number.isSafeInteger(inviteId) || inviteId <= 0) throw new HttpError(400, "invite_id required");
   if (!/^[A-Za-z0-9._-]{1,100}$/.test(repo)) throw new HttpError(400, "repo required");
+  // Optional note sealed to the invitee's devices by the inviter's app. Opaque here: only its size is checked.
+  const note = body.note === undefined ? undefined : body.note;
+  if (note !== undefined && (typeof note !== "string" || !/^[A-Za-z0-9+/=]{1,8192}$/.test(note))) throw new HttpError(400, "note must be base64, at most 8192 characters");
 
   const me = await ghUser(token);
   // The repo must belong to the caller, and the invitation must exist on it.
@@ -177,6 +181,7 @@ async function createInvite(request, env) {
     from_id: me.id,
     created_at: new Date(created).toISOString(),
     expires_at: new Date(expiresAt).toISOString(),
+    ...(note ? { note } : {}),
   };
   await inbox(env, inv.invitee.id).addInvite(inv.invitee.id, entry);
   return json({ ok: true, invitee_id: inv.invitee.id, expires_at: entry.expires_at }, 201);
