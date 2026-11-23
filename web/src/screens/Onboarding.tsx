@@ -2,8 +2,6 @@ import { useEffect, useState } from 'react';
 import { CONFIG, installUrl, newHomeRepoUrl } from '../config';
 import type { Session } from '../lib/session';
 import { ErrorFlash, Hint, Icon, useAction } from '../ui';
-import { InlineProgress } from './Progress';
-import type { Activity } from '../lib/activity';
 
 function Frame({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -94,7 +92,6 @@ export function Install({ session }: { session: Session }) {
 
 export function NewIdentity({ session }: { session: Session }) {
   const { busy, error, run } = useAction();
-  const [act, setAct] = useState<Activity>();
   const [code, setCode] = useState<string>();
   const [typed, setTyped] = useState('');
   const last = code?.split('-').pop() ?? '';
@@ -109,10 +106,9 @@ export function NewIdentity({ session }: { session: Session }) {
               A key made in this browser that proves who you are. You get a recovery code for it next.{' '}
               <Hint text={<>The public key goes to the public repo <span className="mono">{session.login}/keyhold-id</span> so others can check it. An encrypted backup goes to your private repo <span className="mono">{session.login}/{session.homeRepo}</span>. The private half never reaches GitHub unencrypted.</>} />
             </p>
-            <button className="btn primary block" disabled={busy} onClick={() => run(async () => setCode(await session.createIdentity(setAct)))}>
+            <button className="btn primary block" disabled={busy} onClick={() => run(async () => setCode(await session.createIdentity()))}>
               {busy ? <><span className="spinner" /> Creating keys…</> : 'Create identity'}
             </button>
-            {busy && <InlineProgress session={session} a={act} />}
           </div>
         </div>
       </Frame>
@@ -141,7 +137,6 @@ export function NewIdentity({ session }: { session: Session }) {
 
 export function Restore({ session }: { session: Session }) {
   const { busy, error, run } = useAction();
-  const [act, setAct] = useState<Activity>();
   const [code, setCode] = useState('');
   const [reset, setReset] = useState(false);
   const [confirm, setConfirm] = useState('');
@@ -155,7 +150,7 @@ export function Restore({ session }: { session: Session }) {
             className="stack"
             onSubmit={(e) => {
               e.preventDefault();
-              void run(() => session.restoreIdentity(code, setAct));
+              void run(() => session.restoreIdentity(code));
             }}
           >
             <label className="field">
@@ -165,7 +160,6 @@ export function Restore({ session }: { session: Session }) {
             <button className="btn primary block" disabled={busy || code.trim().length < 20}>
               {busy ? <><span className="spinner" /> Opening backup…</> : 'Add this browser'}
             </button>
-            {busy && <InlineProgress session={session} a={act} />}
           </form>
         </div>
       </div>

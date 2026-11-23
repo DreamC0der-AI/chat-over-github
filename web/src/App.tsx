@@ -7,7 +7,7 @@ import { Install, NewIdentity, Restore } from './screens/Onboarding';
 import { Home } from './screens/Home';
 import { Settings } from './screens/Settings';
 import { ErrorFlash, useHash, useSession } from './ui';
-import { ActivityTray } from './screens/Progress';
+import { ProgressPopup } from './screens/Progress';
 
 export function App() {
   const [auth, setAuth] = useState<AuthState | undefined>();
@@ -61,31 +61,34 @@ function Signed({ auth, onSignOut }: { auth: AuthState; onSignOut: () => void })
   if (tab === 'checking') return <Loading />;
   if (tab === 'elsewhere') return <OpenElsewhere />;
 
-  switch (session.phase) {
-    case 'loading':
-      return <Loading />;
-    case 'error':
-      return (
-        <div className="page"><div className="narrow">
-          <ErrorFlash error={session.error} />
-          <button className="btn" onClick={() => location.reload()}>Try again</button>
-          <button className="btn" onClick={onSignOut}>Sign out</button>
-        </div></div>
-      );
-    case 'install':
-      return <Install session={session} />;
-    case 'new-identity':
-      return <NewIdentity session={session} />;
-    case 'restore':
-      return <Restore session={session} />;
-    case 'ready':
-      return (
-        <>
-          {route === '/settings' || route.startsWith('/settings/') ? <Settings session={session} route={route} /> : <Home session={session} route={route} />}
-          <ActivityTray session={session} />
-        </>
-      );
-  }
+  const screen = (() => {
+    switch (session.phase) {
+      case 'loading':
+        return <Loading />;
+      case 'error':
+        return (
+          <div className="page"><div className="narrow">
+            <ErrorFlash error={session.error} />
+            <button className="btn" onClick={() => location.reload()}>Try again</button>
+            <button className="btn" onClick={onSignOut}>Sign out</button>
+          </div></div>
+        );
+      case 'install':
+        return <Install session={session} />;
+      case 'new-identity':
+        return <NewIdentity session={session} />;
+      case 'restore':
+        return <Restore session={session} />;
+      case 'ready':
+        return route === '/settings' || route.startsWith('/settings/') ? <Settings session={session} route={route} /> : <Home session={session} route={route} />;
+    }
+  })();
+  return (
+    <>
+      {screen}
+      <ProgressPopup session={session} />
+    </>
+  );
 }
 
 function OpenElsewhere() {

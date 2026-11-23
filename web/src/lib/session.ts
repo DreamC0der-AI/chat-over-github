@@ -1799,7 +1799,7 @@ export class Session {
       } else if (still?.status === 'waiting') t.wait(`Waiting for @${from}'s app to let you in`);
       else if (still?.status === 'error') throw new Error(still.error ?? 'Could not join yet');
       this.bump();
-    }, { key });
+    }, { key, modal: !auto });
   }
 
   /** The user declined: turn down the GitHub invitation (or leave the repo) and forget the chat. */
