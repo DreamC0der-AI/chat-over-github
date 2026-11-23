@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Activity, Step } from '../lib/activity';
 import type { Session } from '../lib/session';
-import { go, Icon, useSession } from '../ui';
+import { Icon, useSession } from '../ui';
 
 /** Re-render every second while something is running, for the elapsed times. */
 export function useTick(on: boolean) {
@@ -69,31 +69,6 @@ export function StepBar({ a }: { a: Activity }) {
   );
 }
 
-/** While a screen shows this activity in place, the tray leaves it out. */
-export function useInline(session: Session, a: Activity | undefined) {
-  useEffect(() => {
-    if (!a) return;
-    a.inline++;
-    session.bump();
-    return () => {
-      a.inline--;
-      session.bump();
-    };
-  }, [a?.id]);
-}
-
-/** Progress shown in place (inside a dialog). While it's on screen the tray leaves it out. */
-export function InlineProgress({ session, a }: { session: Session; a?: Activity }) {
-  useInline(session, a);
-  if (!a) return null;
-  return (
-    <div className="inline-progress">
-      <StepBar a={a} />
-      <Steps a={a} />
-    </div>
-  );
-}
-
 /** "Step 2 of 4 · Setting up encryption", for one line. */
 export function stepLine(a: Activity) {
   const i = a.steps.findIndex((s) => s.state === 'active');
@@ -101,43 +76,46 @@ export function stepLine(a: Activity) {
   return a.steps.length > 1 ? `Step ${i + 1} of ${a.steps.length} · ${a.steps[i]!.label}` : a.steps[i]!.label;
 }
 
-/** Bottom corner: every slow action that isn't shown in place, so closing a dialog loses nothing. */
-export function ActivityTray({ session }: { session: Session }) {
+/**
+ * One popup for every action the user starts. Everything goes through GitHub, so actions take
+ * seconds; the popup shows the steps as they happen and blocks the app until the action ends,
+ * so nothing else can start halfway. A finished one ticks and goes; a failed one says where it
+ * stopped and waits for Close.
+ */
+export function ProgressPopup({ session }: { session: Session }) {
   useSession(session);
-  const list = session.activities.all().filter((a) => a.inline === 0);
-  useTick(list.some((a) => !a.ended));
-  if (!list.length) return null;
+  const a = session.activities.all().find((x) => x.modal);
+  useTick(!!a && !a.ended);
+  const closeBtn = useRef<HTMLButtonElement>(null);
+  const someFailed = !!a?.steps.some((s) => s.state === 'failed');
+  const settled = !!a?.ended && (!!a.error || !!a.waiting || someFailed);
+  useEffect(() => {
+    if (settled) closeBtn.current?.focus();
+  }, [settled, a?.id]);
+  if (!a) return null;
+  const state = a.error || (a.ended && someFailed) ? 'failed' : a.waiting ? 'waiting' : a.ended ? 'done' : 'running';
+  const close = () => session.activities.dismiss(a.id);
   return (
-    <div className="jobs" aria-live="polite">
-      {list.map((a) => <TrayItem key={a.id} session={session} a={a} />)}
-    </div>
-  );
-}
-
-function TrayItem({ session, a }: { session: Session; a: Activity }) {
-  const [open, setOpen] = useState(false);
-  const state = a.error ? 'failed' : a.waiting ? 'waiting' : a.ended ? 'done' : 'running';
-  const sub =
-    state === 'failed' ? a.error
-    : state === 'waiting' ? a.waiting
-    : state === 'done' ? `Done in ${took(a.ended! - a.started)}`
-    : stepLine(a) ?? 'Starting…';
-  return (
-    <div className={`job-item ${state}`}>
-      <div className="job-head">
-        <span className="job-icon">
-          {state === 'running' ? <span className="spinner" /> : state === 'done' ? Icon.check(14) : state === 'failed' ? Icon.alert(14) : <span className="step-icon waiting" />}
-        </span>
-        <button type="button" className="job-main" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
-          <span className="job-title">{a.title}</span>
-          <span className="job-sub" title={sub}>{sub}{state === 'running' && a.detail && !open ? <span className="muted"> · {a.detail}</span> : null}</span>
-        </button>
-        {state === 'running' && <span className="job-time">{took(Date.now() - a.started)}</span>}
-        {state === 'done' && a.link && <button type="button" className="btn link small" onClick={() => { go(a.link!); session.activities.dismiss(a.id); }}>Open</button>}
-        {state !== 'running' && <button type="button" className="btn icon ghost job-x" aria-label="Dismiss" onClick={() => session.activities.dismiss(a.id)}>{Icon.close()}</button>}
+    <div className="modal-back progress-back" onKeyDown={(e) => { if (e.key === 'Escape' && settled) close(); }}>
+      <div className={`modal progress-modal ${state}`} role="alertdialog" aria-modal="true" aria-busy={state === 'running'} aria-label={a.title}>
+        <div className="modal-body">
+          <div className="progress-head">
+            <span className="progress-icon">
+              {state === 'running' ? <span className="spinner" /> : state === 'done' ? Icon.check(16) : state === 'failed' ? Icon.alert(16) : <span className="step-icon waiting" />}
+            </span>
+            <h3>{a.title}</h3>
+            <span className="progress-time">{took((a.ended ?? Date.now()) - a.started)}</span>
+          </div>
+          <StepBar a={a} />
+          <Steps a={a} />
+          {state === 'failed' && a.error && <div className="flash error" role="alert">{a.error}</div>}
+          {settled && (
+            <div className="modal-actions end">
+              <button ref={closeBtn} type="button" className="btn" onClick={close}>Close</button>
+            </div>
+          )}
+        </div>
       </div>
-      <StepBar a={a} />
-      {open && <Steps a={a} />}
     </div>
   );
 }
