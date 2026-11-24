@@ -13,10 +13,18 @@ const users = {
   "tok-alice": { id: 2, login: "alice" },
   "tok-eve": { id: 3, login: "eve" },
   "tok-carol": { id: 4, login: "carol" },
+  "tok-mallory": { id: 5, login: "mallory" },
+  "tok-dora": { id: 6, login: "dora" },
+  "tok-rl": { id: 7, login: "rl" },
+  "tok-erin": { id: 8, login: "erin" },
 };
+// Others who can each post into dora's inbox (for its total cap).
+for (let i = 0; i < 10; i++) users[`tok-s${i}`] = { id: 200 + i, login: `s${i}` };
 const invitations = {
   "bob/dm-1": [{ id: 100, invitee: { id: 2, login: "alice" }, expired: false, created_at: new Date().toISOString() }],
   "bob/dm-2": [{ id: 102, invitee: { id: 2, login: "alice" }, expired: false, created_at: new Date().toISOString() }],
+  // mallory's many invitations to dora (for the per-sender cap).
+  "mallory/bulk": Array.from({ length: 52 }, (_, i) => ({ id: 1000 + i, invitee: { id: 6, login: "dora" }, expired: false, created_at: new Date().toISOString() })),
   "bob/dm-old": [{ id: 101, invitee: { id: 2, login: "alice" }, expired: false, created_at: new Date(Date.now() - 8 * 864e5).toISOString() }],
 };
 let lastLogin;
@@ -285,4 +293,137 @@ test("closure notices: bob tells alice, alice lists and removes; eve can't see t
   assert.equal((await call("POST", "/closures", "tok-bob", { to: "nobody", tag })).status, 404);
   assert.equal((await call("POST", "/closures", "tok-bob", { to: "alice", tag: "xyz" })).status, 400);
   assert.equal((await call("POST", "/closures", "tok-bob", { to: "bob", tag })).status, 400);
+});
+
+// ---- abuse limits ----
+
+const hex32 = (n) => n.toString(16).padStart(32, "0");
+/** Runs fns a few at a time and returns their results in order. */
+async function inBatches(fns, size = 25) {
+  const out = [];
+  for (let i = 0; i < fns.length; i += size) out.push(...(await Promise.all(fns.slice(i, i + size).map((f) => f()))));
+  return out;
+}
+
+test("one sender can leave at most 50 closure notices in an inbox; an inbox holds at most 500", async () => {
+  const post = (tok, n) => () => call("POST", "/closures", tok, { to: "dora", tag: hex32(n) }).then(async (r) => ({ status: r.status, error: (await r.json()).error }));
+  let res = await inBatches(Array.from({ length: 50 }, (_, i) => post("tok-mallory", i)));
+  assert.deepEqual(new Set(res.map((r) => r.status)), new Set([201]));
+  const over = await post("tok-mallory", 50)();
+  assert.equal(over.status, 429);
+  assert.match(over.error, /inbox is full/);
+  // Posting a notice that is already there just refreshes it, even at the cap.
+  assert.equal((await post("tok-mallory", 7)()).status, 201);
+  // Others still have room, up to 500 in all.
+  for (let s = 0; s < 9; s++) {
+    res = await inBatches(Array.from({ length: 50 }, (_, i) => post(`tok-s${s}`, 1000 * (s + 1) + i)));
+    assert.deepEqual(new Set(res.map((r) => r.status)), new Set([201]), `s${s}`);
+  }
+  assert.equal((await post("tok-s9", 1)()).status, 429, "the inbox is full");
+  const { closures } = await (await call("GET", "/closures", "tok-dora")).json();
+  assert.equal(closures.length, 500);
+  // Once dora removes one, there is room again.
+  assert.equal((await call("DELETE", `/closures/${closures[0].id}`, "tok-dora")).status, 200);
+  assert.equal((await post("tok-s9", 1)()).status, 201);
+});
+
+test("one sender can leave at most 50 invites in an inbox", async () => {
+  const res = await inBatches(Array.from({ length: 51 }, (_, i) => () => call("POST", "/invites", "tok-mallory", { invite_id: 1000 + i, repo: "bulk" })));
+  assert.equal(res.filter((r) => r.status === 201).length, 50);
+  assert.equal(res.filter((r) => r.status === 429).length, 1);
+  // Re-registering one that is there is fine.
+  assert.equal((await call("POST", "/invites", "tok-mallory", { invite_id: 1003, repo: "bulk" })).status, 201);
+  assert.equal((await (await call("GET", "/invites", "tok-dora")).json()).invites.length, 50);
+});
+
+test("bodies over 16 KB are refused, by Content-Length or while reading", async () => {
+  const big = { invite_id: 100, repo: "dm-1", pad: "x".repeat(17 * 1024) };
+  assert.equal((await call("POST", "/invites", "tok-bob", big)).status, 413);
+  assert.equal((await call("POST", "/oauth/token", null, { refresh_token: "x".repeat(17 * 1024) })).status, 413);
+  // A chunked body (no Content-Length) is counted as it arrives.
+  const status = await new Promise((resolve, reject) => {
+    const u = new URL(base + "/closures");
+    const req = http.request({ host: u.hostname, port: u.port, path: u.pathname, method: "POST", headers: { Authorization: "Bearer tok-bob", "Content-Type": "application/json", "Transfer-Encoding": "chunked" } }, (res) => {
+      res.resume();
+      resolve(res.statusCode);
+    });
+    req.on("error", reject);
+    req.write('{"to":"alice","tag":"' + "0".repeat(32) + '","pad":"');
+    for (let i = 0; i < 20; i++) req.write("y".repeat(1024));
+    req.end('"}');
+  });
+  assert.equal(status, 413);
+  // An ordinary body still works.
+  assert.equal((await call("POST", "/invites", "tok-bob", { invite_id: 100, repo: "dm-1", note: "A".repeat(8192) })).status, 201);
+  await call("DELETE", "/invites/100", "tok-alice");
+});
+
+test("a refresh replayed with the spent refresh token but without the app's retry key gets nothing", async () => {
+  const key = "k".repeat(22);
+  const first = await (await call("POST", "/oauth/token", null, { refresh_token: "r-keyed", retry_key: key })).json();
+  assert.ok(first.access_token);
+  const n = refreshes;
+  // The app that lost the answer asks again with the same retry key: same answer, GitHub not asked.
+  assert.deepEqual(await (await call("POST", "/oauth/token", null, { refresh_token: "r-keyed", retry_key: key })).json(), first);
+  assert.equal(refreshes, n);
+  // Anyone else with the old refresh token: no cached answer, and GitHub says it is spent.
+  assert.equal((await (await call("POST", "/oauth/token", null, { refresh_token: "r-keyed" })).json()).error, "bad_refresh_token");
+  assert.equal((await (await call("POST", "/oauth/token", null, { refresh_token: "r-keyed", retry_key: "z".repeat(22) })).json()).error, "bad_refresh_token");
+  assert.equal(refreshes, n);
+  assert.equal((await call("POST", "/oauth/token", null, { refresh_token: "r-keyed", retry_key: "short" })).status, 400);
+});
+
+test("a refresh from an app without a retry key is kept 60 seconds, a keyed one 10 minutes", async () => {
+  await call("POST", "/oauth/token", null, { refresh_token: "r-ttl-old" });
+  await call("POST", "/oauth/token", null, { refresh_token: "r-ttl-new", retry_key: "q".repeat(22) });
+  const id = async (rt, retryKey) => {
+    const raw = await crypto.subtle.importKey("raw", new TextEncoder().encode(rt), "HKDF", false, ["deriveBits"]);
+    const salt = retryKey ? new TextEncoder().encode(`retry-key:${retryKey}`) : new Uint8Array(0);
+    const bits = await crypto.subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt, info: new TextEncoder().encode("chat-over-github refresh retry id") }, raw, 256);
+    return "rt:" + Buffer.from(bits).toString("hex");
+  };
+  const proxy = await getPlatformProxy({ persist: { path: join(persist, "v3") } });
+  try {
+    const { keys } = await proxy.env.INVITES.list({ prefix: "rt:" });
+    const ttl = async (rt, k) => {
+      const name = await id(rt, k);
+      const e = keys.find((x) => x.name === name);
+      assert.ok(e, `${rt} cached`);
+      return e.expiration - Date.now() / 1000;
+    };
+    const old = await ttl("r-ttl-old");
+    assert.ok(old > 30 && old <= 61, `legacy ttl ${old}`);
+    const keyed = await ttl("r-ttl-new", "q".repeat(22));
+    assert.ok(keyed > 540 && keyed <= 601, `keyed ttl ${keyed}`);
+  } finally {
+    await proxy.dispose();
+  }
+});
+
+test("posting invites and closures is rate limited per user", async () => {
+  const res = await inBatches(
+    Array.from({ length: 115 }, (_, i) => () => call("POST", "/closures", "tok-rl", { to: "erin", tag: hex32(i) }).then(async (r) => (await r.json()).error ?? r.status)),
+    5,
+  );
+  assert.deepEqual(res.slice(0, 50), Array(50).fill(201));
+  assert.ok(res.includes("too many requests; try again in a minute"), "rate limited");
+  // Another user is not affected.
+  assert.equal((await call("POST", "/closures", "tok-bob", { to: "erin", tag: hex32(1) })).status, 201);
+});
+
+test("OAuth calls are rate limited per IP", async () => {
+  const from = (ip) => ({ "CF-Connecting-IP": ip });
+  const res = await inBatches(Array.from({ length: 70 }, () => () => call("POST", "/oauth/token", null, {}, from("198.51.100.7")).then((r) => r.status)), 10);
+  assert.ok(res.includes(429), "rate limited");
+  assert.ok(res.slice(0, 50).every((s) => s === 400));
+  assert.equal((await call("POST", "/oauth/token", null, {}, from("198.51.100.8"))).status, 400, "another IP is not affected");
+});
+
+test("production trusts only the real origin; local dev adds localhost", async () => {
+  const { readFileSync } = await import("node:fs");
+  const toml = readFileSync(new URL("../wrangler.toml", import.meta.url), "utf8");
+  const origins = toml.match(/^ALLOWED_ORIGINS\s*=\s*"([^"]*)"/m)[1].split(",");
+  assert.deepEqual(origins, ["https://chat-over-github.akagishigerutokyo.workers.dev"]);
+  const dev = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).scripts.dev;
+  assert.match(dev, /--var ALLOWED_ORIGINS:https:\/\/chat-over-github\.akagishigerutokyo\.workers\.dev,http:\/\/localhost:5173/);
 });

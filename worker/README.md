@@ -11,7 +11,7 @@ All inbox calls send the user's GitHub user access token as `Authorization: Bear
 
 | Call | Body / query | Result |
 | --- | --- | --- |
-| `POST /oauth/token` | `{code, redirect_uri?, code_verifier?}` or `{refresh_token}` | GitHub's token response |
+| `POST /oauth/token` | `{code, redirect_uri?, code_verifier?}` or `{refresh_token, retry_key?}` | GitHub's token response. A refresh asked again with the same `refresh_token` and `retry_key` (16-128 base64url chars the app keeps until it has saved the new tokens) within 10 minutes gets the same answer; without `retry_key` (old apps) only within 60 seconds. |
 | `POST /oauth/device/code` | none | GitHub's device-code response |
 | `POST /oauth/device/token` | `{device_code}` | GitHub's token response |
 | `GET /inbox` (WebSocket) | subprotocols above; Origin must be in `ALLOWED_ORIGINS` | first `{type:"snapshot", invites, closures}`, then `{type:"invite", invite}`, `{type:"invite-removed", id}`, `{type:"closure", closure}`, `{type:"closure-removed", id}`. Send `ping` to get `pong` (answered without waking the object). |
@@ -45,9 +45,11 @@ The GitHub App's callback URL must be `https://chat-over-github.akagishigerutoky
 npm install
 npx wrangler login
 npx wrangler secret put GITHUB_CLIENT_SECRET # from the GitHub App settings page ("Generate a new client secret")
-# set ALLOWED_ORIGINS in wrangler.toml to your app's web origin(s)
+# set ALLOWED_ORIGINS in wrangler.toml (and in the dev script in package.json) to your app's web origin(s)
 npx wrangler deploy
 ```
+
+Limits: bodies over 16 KB get `413`. An inbox takes at most 50 invites and 50 closure notices from one sender and 500 of each in all (`429` beyond; replacing an entry that is there is always fine). The `[[ratelimits]]` bindings in `wrangler.toml` allow 60 OAuth calls a minute per IP and 100 invite/closure posts a minute per user (`429`); without them the code applies no rate limit. `npm run dev` adds `http://localhost:5173` to `ALLOWED_ORIGINS`; the deployed Worker trusts only its own origin.
 
 Tests: `npm test` runs the Worker and its Durable Objects in wrangler's local runtime against a fake GitHub.
 

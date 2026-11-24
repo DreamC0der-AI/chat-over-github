@@ -31,11 +31,20 @@
 // KV entries once, the first time it is used. Those entries expire within 7 days.
 //
 // The same KV namespace keeps each token refresh's answer for 10 minutes ("rt:" keys), sealed
-// with the refresh token that asked for it. GitHub spends a refresh token on first use, so an
+// with the refresh token that asked for it plus a random retry key the app sends with it and
+// keeps until the new tokens are saved. GitHub spends a refresh token on first use, so an
 // answer lost on the way back (the computer went to sleep mid-request) would sign the person
-// out; asking again with the same refresh token now gets the same answer. The key is a hash of
-// the refresh token and only that token opens the value, so the Worker can't read it at rest.
+// out; asking again with the same refresh token and retry key now gets the same answer. Someone
+// who only has the old (spent) refresh token gets nothing: the lookup key and the seal both need
+// the retry key, which never leaves the app's storage except in that one request. The key is a
+// hash, so the Worker can't read the value at rest. Apps from before the retry key (no
+// retry_key field) still get a cached answer, but only for 60 seconds.
 // Nothing is logged.
+//
+// Abuse limits (all within the free plan): request bodies over 16 KB are refused (413); each
+// inbox holds at most 50 entries per sender and 500 in all of each kind (429 beyond); and the
+// Workers rate limiting bindings (wrangler.toml [[ratelimits]]) cap OAuth calls per IP and
+// invite/closure posts per user (429). Without those bindings (old config) no rate limit applies.
 
 import { DurableObject } from "cloudflare:workers";
 
@@ -44,6 +53,10 @@ const GH_WEB_DEFAULT = "https://github.com";
 const INVITE_LIFETIME_S = 7 * 24 * 3600; // GitHub repository invitations expire after 7 days
 const MIN_TTL_S = 60; // don't file an invitation that is about to expire
 const WS_PROTOCOL = "inbox.v1";
+const MAX_BODY_BYTES = 16 * 1024; // the largest real body is an invite with an 8 KB note
+// Per inbox and kind (invites, closures): entries from one sender, and entries in all.
+const CAP_PER_SENDER = 50;
+const CAP_TOTAL = 500;
 let GH_API = GH_API_DEFAULT;
 let GH_WEB = GH_WEB_DEFAULT;
 
@@ -74,6 +87,7 @@ async function route(request, env) {
   const path = url.pathname.replace(/\/+$/, "") || "/";
   const m = request.method;
 
+  if (m === "POST" && path.startsWith("/oauth/")) await rateLimit(env.OAUTH_LIMIT, `ip:${request.headers.get("CF-Connecting-IP") || "unknown"}`);
   if (m === "POST" && path === "/oauth/token") return oauthToken(request, env);
   if (m === "POST" && path === "/oauth/device/code") return deviceCode(request, env);
   if (m === "POST" && path === "/oauth/device/token") return deviceToken(request, env);
@@ -98,7 +112,9 @@ async function oauthToken(request, env) {
     if (typeof body.redirect_uri === "string") params.redirect_uri = body.redirect_uri;
     if (typeof body.code_verifier === "string") params.code_verifier = body.code_verifier;
   } else if (typeof body.refresh_token === "string") {
-    return refreshToken(body.refresh_token, params, env);
+    const retryKey = body.retry_key;
+    if (retryKey !== undefined && (typeof retryKey !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(retryKey))) throw new HttpError(400, "retry_key must be 16-128 base64url characters");
+    return refreshToken(body.refresh_token, retryKey, params, env);
   } else {
     throw new HttpError(400, "code or refresh_token required");
   }
@@ -106,10 +122,12 @@ async function oauthToken(request, env) {
 }
 
 const REFRESH_RETRY_TTL_S = 600;
+/** Apps that send no retry key (from before it existed): a short window, for the transition only. */
+const REFRESH_RETRY_TTL_LEGACY_S = 60; // KV's shortest expiry
 
-async function refreshToken(rt, params, env) {
+async function refreshToken(rt, retryKey, params, env) {
   const kv = env.INVITES;
-  const { id, key } = await refreshSeal(rt);
+  const { id, key } = await refreshSeal(rt, retryKey);
   if (kv) {
     const sealed = await kv.get(`rt:${id}`, "arrayBuffer").catch(() => null);
     if (sealed) {
@@ -128,15 +146,21 @@ async function refreshToken(rt, params, env) {
     try {
       ok = !!JSON.parse(text).access_token;
     } catch {}
-    if (ok) await kv.put(`rt:${id}`, await seal(key, text), { expirationTtl: REFRESH_RETRY_TTL_S }).catch(() => undefined);
+    const ttl = retryKey ? REFRESH_RETRY_TTL_S : REFRESH_RETRY_TTL_LEGACY_S;
+    if (ok) await kv.put(`rt:${id}`, await seal(key, text), { expirationTtl: ttl }).catch(() => undefined);
   }
   return jsonText(text, res.status);
 }
 
-/** A lookup id and an AES key, both derived from the refresh token (which the Worker never stores). */
-async function refreshSeal(rt) {
+/**
+ * A lookup id and an AES key, both derived from the refresh token and the app's retry key (the
+ * Worker stores neither). Without a retry key (old apps) they come from the refresh token alone,
+ * which can never collide with a keyed id: the salt differs.
+ */
+async function refreshSeal(rt, retryKey) {
   const raw = await crypto.subtle.importKey("raw", new TextEncoder().encode(rt), "HKDF", false, ["deriveBits", "deriveKey"]);
-  const hkdf = (info) => ({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: new TextEncoder().encode(info) });
+  const salt = retryKey ? new TextEncoder().encode(`retry-key:${retryKey}`) : new Uint8Array(0);
+  const hkdf = (info) => ({ name: "HKDF", hash: "SHA-256", salt, info: new TextEncoder().encode(info) });
   const idBits = await crypto.subtle.deriveBits(hkdf("chat-over-github refresh retry id"), raw, 256);
   const key = await crypto.subtle.deriveKey(hkdf("chat-over-github refresh retry key"), raw, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
   return { id: [...new Uint8Array(idBits)].map((b) => b.toString(16).padStart(2, "0")).join(""), key };
@@ -221,6 +245,7 @@ async function createInvite(request, env) {
   if (note !== undefined && (typeof note !== "string" || !/^[A-Za-z0-9+/=]{1,8192}$/.test(note))) throw new HttpError(400, "note must be base64, at most 8192 characters");
 
   const me = await ghUser(token);
+  await rateLimit(env.INBOX_POST_LIMIT, `invite:${me.id}`);
   // The repo must belong to the caller, and the invitation must exist on it.
   const invites = await ghGet(
     token,
@@ -243,7 +268,7 @@ async function createInvite(request, env) {
     expires_at: new Date(expiresAt).toISOString(),
     ...(note ? { note } : {}),
   };
-  await inbox(env, inv.invitee.id).addInvite(inv.invitee.id, entry);
+  if (!(await inbox(env, inv.invitee.id).addInvite(inv.invitee.id, entry))) throw new HttpError(429, "the invitee's inbox is full; try again later");
   return json({ ok: true, invitee_id: inv.invitee.id, expires_at: entry.expires_at }, 201);
 }
 
@@ -276,12 +301,13 @@ async function createClosure(request, env) {
   if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(to)) throw new HttpError(400, "to required");
   if (!/^[0-9a-f]{32}$/.test(tag)) throw new HttpError(400, "tag required");
   const me = await ghUser(token);
+  await rateLimit(env.INBOX_POST_LIMIT, `closure:${me.id}`);
   const target = await ghGetUser(token, to);
   if (target.id === me.id) throw new HttpError(400, "cannot notify yourself");
   const at = new Date().toISOString();
   // One notice per sender and chat: posting again just refreshes it.
   const entry = { id: `${me.id}:${tag}`, from: me.login, from_id: me.id, tag, at };
-  await inbox(env, target.id).addClosure(target.id, entry);
+  if (!(await inbox(env, target.id).addClosure(target.id, entry))) throw new HttpError(429, "the member's inbox is full; try again later");
   return json({ ok: true }, 201);
 }
 
@@ -323,12 +349,15 @@ export class Inbox extends DurableObject {
 
   // ---- RPC from the Worker ----
 
+  /** False (and nothing stored) when the inbox has no room for another entry from this sender. */
   async addInvite(userId, entry) {
     await this.open(userId);
+    if (!this.hasRoom("invites", entry.id, entry.from_id)) return false;
     const expires = Date.parse(entry.expires_at);
     this.sql.exec("INSERT OR REPLACE INTO invites (id, body, expires) VALUES (?, ?, ?)", entry.id, JSON.stringify(entry), expires);
     await this.wakeAt(expires);
     this.push({ type: "invite", invite: entry });
+    return true;
   }
 
   async listInvites(userId) {
@@ -347,12 +376,15 @@ export class Inbox extends DurableObject {
     return true;
   }
 
+  /** False (and nothing stored) when the inbox has no room for another entry from this sender. */
   async addClosure(userId, entry) {
     await this.open(userId);
+    if (!this.hasRoom("closures", entry.id, entry.from_id)) return false;
     const expires = Date.now() + INVITE_LIFETIME_S * 1000;
     this.sql.exec("INSERT OR REPLACE INTO closures (id, body, expires) VALUES (?, ?, ?)", entry.id, JSON.stringify(entry), expires);
     await this.wakeAt(expires);
     this.push({ type: "closure", closure: entry });
+    return true;
   }
 
   async listClosures(userId) {
@@ -411,6 +443,19 @@ export class Inbox extends DurableObject {
   }
 
   // ---- helpers ----
+
+  /**
+   * Whether an entry may be stored: replacing one that is there always may; a new one only while
+   * the sender has fewer than CAP_PER_SENDER live entries here and the table fewer than CAP_TOTAL.
+   * Without this anyone could fill anyone's inbox (and the free plan's daily writes).
+   */
+  hasRoom(table, id, fromId) {
+    if (this.sql.exec(`SELECT 1 FROM ${table} WHERE id = ?`, id).toArray().length) return true;
+    const c = this.sql
+      .exec(`SELECT COUNT(*) AS n, COALESCE(SUM(json_extract(body, '$.from_id') = ?), 0) AS mine FROM ${table} WHERE expires > ?`, fromId, Date.now())
+      .toArray()[0];
+    return c.n < CAP_TOTAL && c.mine < CAP_PER_SENDER;
+  }
 
   /** Unexpired entries of a table, oldest first. */
   rows(table) {
@@ -533,13 +578,44 @@ function bearer(request) {
   return m[1];
 }
 
+/** The JSON body, refusing anything over MAX_BODY_BYTES (by Content-Length, and while reading). */
 async function readJson(request) {
+  const declared = Number(request.headers.get("Content-Length"));
+  if (declared > MAX_BODY_BYTES) throw new HttpError(413, "body too large");
+  const chunks = [];
+  let size = 0;
+  if (request.body) {
+    const reader = request.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_BODY_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new HttpError(413, "body too large");
+      }
+      chunks.push(value);
+    }
+  }
+  const buf = new Uint8Array(size);
+  let at = 0;
+  for (const c of chunks) {
+    buf.set(c, at);
+    at += c.byteLength;
+  }
   try {
-    const v = await request.json();
+    const v = JSON.parse(new TextDecoder().decode(buf));
     return v && typeof v === "object" ? v : {};
   } catch {
     throw new HttpError(400, "invalid JSON body");
   }
+}
+
+/** One hit on a Workers rate limiting binding; 429 when over. No binding (old config): no limit. */
+async function rateLimit(limiter, key) {
+  if (!limiter) return;
+  const { success } = await limiter.limit({ key });
+  if (!success) throw new HttpError(429, "too many requests; try again in a minute");
 }
 
 function json(obj, status = 200, extra = {}) {
