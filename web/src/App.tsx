@@ -27,10 +27,17 @@ export function App() {
 
   if (booting) return <Loading />;
   if (!auth) return <SignIn onSignedIn={setAuth} initialError={error} />;
-  return <Signed key={auth.id} auth={auth} onSignOut={() => { signOut(); setAuth(undefined); }} />;
+  return (
+    <Signed
+      key={auth.id}
+      auth={auth}
+      onSignOut={() => { signOut(); setAuth(undefined); }}
+      onSignedOut={() => { setError('Signed out. Please sign in again.'); setAuth(undefined); }}
+    />
+  );
 }
 
-function Signed({ auth, onSignOut }: { auth: AuthState; onSignOut: () => void }) {
+function Signed({ auth, onSignOut, onSignedOut }: { auth: AuthState; onSignOut: () => void; onSignedOut: () => void }) {
   const [session] = useState(() => new Session(auth));
   // 'here': this tab runs the account. 'elsewhere': another tab of this browser does.
   const [tab, setTab] = useState<'checking' | 'here' | 'elsewhere'>('checking');
@@ -58,6 +65,12 @@ function Signed({ auth, onSignOut }: { auth: AuthState; onSignOut: () => void })
   }, [session]);
   useSession(session);
   const route = useHash();
+  // GitHub turned the sign-in down for good: go to the sign-in screen instead of a stuck warning.
+  useEffect(() => {
+    if (!session.signedOut) return;
+    session.stop();
+    onSignedOut();
+  }, [session.signedOut]);
 
   if (tab === 'checking') return <Loading />;
   if (tab === 'elsewhere') return <OpenElsewhere />;

@@ -153,30 +153,67 @@ export async function mockSignIn(login: string): Promise<AuthState> {
 
 // ---- token upkeep ----
 
+/** Answers from GitHub that mean the refresh token itself is no good: the person must sign in again. */
+const DEAD_REFRESH = new Set(['bad_refresh_token', 'invalid_grant']);
+
+/** A refresh that failed for a reason that may pass (offline, the Worker or GitHub down). */
+export class RefreshFailedError extends Error {
+  constructor(cause?: unknown) {
+    super(cause instanceof TypeError ? 'Offline. Retrying…' : 'Sign-in service unavailable. Retrying…');
+  }
+}
+
 let refreshing: Promise<AuthState> | undefined;
 
-/** A valid access token, refreshed when it is about to expire. */
+/** Runs fn while holding the browser-wide refresh lock, so two tabs never spend the same refresh token. */
+function withRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
+  const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+  return locks ? (locks.request('kh.auth.refresh', fn) as Promise<T>) : fn();
+}
+
+const expiresSoon = (a: AuthState) => a.expiresAt !== undefined && a.expiresAt - Date.now() < 5 * 60_000;
+
+/**
+ * A valid access token, refreshed when it is about to expire. `force` means GitHub just turned the
+ * current token down (401). A refresh that fails for a passing reason (offline, a lost answer while
+ * the computer slept) throws RefreshFailedError and keeps the stored sign-in; only GitHub saying the
+ * refresh token is dead signs out.
+ */
 export async function currentToken(force = false): Promise<string> {
-  const a = loadAuth();
-  if (!a) throw new SignedOutError();
-  const soon = a.expiresAt !== undefined && a.expiresAt - Date.now() < 5 * 60_000;
-  if (!force && !soon) return a.token;
-  if (!a.refreshToken) {
+  const seen = loadAuth();
+  if (!seen) throw new SignedOutError();
+  if (!force && !expiresSoon(seen)) return seen.token;
+  if (!seen.refreshToken) {
     if (force) throw new SignedOutError();
-    return a.token;
+    return seen.token;
   }
-  refreshing ??= (async () => {
+  refreshing ??= withRefreshLock(async () => {
+    // Another tab may have refreshed while this one waited for the lock: use its token.
+    const a = loadAuth();
+    if (!a) throw new SignedOutError();
+    if (a.token !== seen.token && !expiresSoon(a)) return a;
+    if (!a.refreshToken) throw new SignedOutError();
+    let t: TokenResponse;
     try {
-      const t = await workerPost('/oauth/token', { refresh_token: a.refreshToken });
-      if (!t.access_token) {
-        saveAuth(undefined);
-        throw new SignedOutError();
-      }
-      return await fromTokenResponse(t);
-    } finally {
-      refreshing = undefined;
+      t = await workerPost('/oauth/token', { refresh_token: a.refreshToken });
+    } catch (e) {
+      throw new RefreshFailedError(e);
     }
-  })();
+    if (t.access_token) {
+      // Save straight away (same account, no lookup): the old refresh token is spent now.
+      const next: AuthState = { ...a, token: t.access_token, refreshToken: t.refresh_token ?? a.refreshToken, expiresAt: t.expires_in ? Date.now() + t.expires_in * 1000 : undefined };
+      saveAuth(next);
+      return next;
+    }
+    if (t.error && DEAD_REFRESH.has(t.error)) {
+      // Only forget the sign-in this refresh was for, never a newer one saved meanwhile.
+      if (loadAuth()?.refreshToken === a.refreshToken) saveAuth(undefined);
+      throw new SignedOutError();
+    }
+    throw new RefreshFailedError(new Error(t.error_description || t.error || 'no token'));
+  }).finally(() => {
+    refreshing = undefined;
+  });
   return (await refreshing).token;
 }
 

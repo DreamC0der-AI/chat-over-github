@@ -20,6 +20,8 @@ const invitations = {
   "bob/dm-old": [{ id: 101, invitee: { id: 2, login: "alice" }, expired: false, created_at: new Date(Date.now() - 8 * 864e5).toISOString() }],
 };
 let lastLogin;
+const spent = new Set();
+let refreshes = 0;
 
 // ---- fake GitHub (API and login endpoints on one server) ----
 const gh = http.createServer((req, res) => {
@@ -33,6 +35,14 @@ const gh = http.createServer((req, res) => {
     };
     if (u.pathname.startsWith("/login/")) {
       lastLogin = { path: u.pathname, body: JSON.parse(body) };
+      const b = lastLogin.body;
+      if (b.grant_type === "refresh_token") {
+        // GitHub spends a refresh token on first use.
+        if (spent.has(b.refresh_token)) return send(200, { error: "bad_refresh_token" });
+        spent.add(b.refresh_token);
+        refreshes++;
+        return send(200, { access_token: `at-${refreshes}`, refresh_token: `rt-${refreshes}`, expires_in: 28800 });
+      }
       return send(200, { access_token: "x" });
     }
     const me = users[(req.headers.authorization || "").replace("Bearer ", "")];
@@ -231,6 +241,21 @@ test("token exchange adds the secret; device flow doesn't", async () => {
   await call("POST", "/oauth/device/token", null, { device_code: "d" });
   assert.equal(lastLogin.body.client_secret, undefined);
   assert.equal((await call("POST", "/oauth/token", null, {})).status, 400);
+});
+
+test("a refresh asked again (answer lost while asleep) gets the same answer, once GitHub spent the token", async () => {
+  const first = await (await call("POST", "/oauth/token", null, { refresh_token: "r-lost" })).json();
+  assert.ok(first.access_token);
+  const n = refreshes;
+  const again = await (await call("POST", "/oauth/token", null, { refresh_token: "r-lost" })).json();
+  assert.deepEqual(again, first);
+  assert.equal(refreshes, n, "GitHub was not asked again");
+  // Another refresh token gets its own answer, never this one.
+  const other = await (await call("POST", "/oauth/token", null, { refresh_token: "r-other" })).json();
+  assert.notEqual(other.access_token, first.access_token);
+  // A dead refresh token GitHub turns down is passed through, not stored.
+  spent.add("r-dead");
+  assert.equal((await (await call("POST", "/oauth/token", null, { refresh_token: "r-dead" })).json()).error, "bad_refresh_token");
 });
 
 test("CORS only for allowed origins", async () => {
