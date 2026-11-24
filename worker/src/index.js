@@ -28,8 +28,13 @@
 // new entries arrive at once instead of by polling.
 //
 // Until 2026-11-17 the inbox lived in Workers KV (binding INVITES). Each inbox copies its old
-// KV entries once, the first time it is used. KV entries expire within 7 days, after which the
-// INVITES binding can be removed.
+// KV entries once, the first time it is used. Those entries expire within 7 days.
+//
+// The same KV namespace keeps each token refresh's answer for 10 minutes ("rt:" keys), sealed
+// with the refresh token that asked for it. GitHub spends a refresh token on first use, so an
+// answer lost on the way back (the computer went to sleep mid-request) would sign the person
+// out; asking again with the same refresh token now gets the same answer. The key is a hash of
+// the refresh token and only that token opens the value, so the Worker can't read it at rest.
 // Nothing is logged.
 
 import { DurableObject } from "cloudflare:workers";
@@ -93,12 +98,67 @@ async function oauthToken(request, env) {
     if (typeof body.redirect_uri === "string") params.redirect_uri = body.redirect_uri;
     if (typeof body.code_verifier === "string") params.code_verifier = body.code_verifier;
   } else if (typeof body.refresh_token === "string") {
-    params.grant_type = "refresh_token";
-    params.refresh_token = body.refresh_token;
+    return refreshToken(body.refresh_token, params, env);
   } else {
     throw new HttpError(400, "code or refresh_token required");
   }
   return ghLogin("/login/oauth/access_token", params);
+}
+
+const REFRESH_RETRY_TTL_S = 600;
+
+async function refreshToken(rt, params, env) {
+  const kv = env.INVITES;
+  const { id, key } = await refreshSeal(rt);
+  if (kv) {
+    const sealed = await kv.get(`rt:${id}`, "arrayBuffer").catch(() => null);
+    if (sealed) {
+      const text = await unseal(key, sealed).catch(() => null);
+      if (text) return jsonText(text, 200);
+    }
+  }
+  const res = await fetch(GH_WEB + "/login/oauth/access_token", {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ ...params, grant_type: "refresh_token", refresh_token: rt }),
+  });
+  const text = await res.text();
+  if (kv && res.ok) {
+    let ok = false;
+    try {
+      ok = !!JSON.parse(text).access_token;
+    } catch {}
+    if (ok) await kv.put(`rt:${id}`, await seal(key, text), { expirationTtl: REFRESH_RETRY_TTL_S }).catch(() => undefined);
+  }
+  return jsonText(text, res.status);
+}
+
+/** A lookup id and an AES key, both derived from the refresh token (which the Worker never stores). */
+async function refreshSeal(rt) {
+  const raw = await crypto.subtle.importKey("raw", new TextEncoder().encode(rt), "HKDF", false, ["deriveBits", "deriveKey"]);
+  const hkdf = (info) => ({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: new TextEncoder().encode(info) });
+  const idBits = await crypto.subtle.deriveBits(hkdf("chat-over-github refresh retry id"), raw, 256);
+  const key = await crypto.subtle.deriveKey(hkdf("chat-over-github refresh retry key"), raw, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+  return { id: [...new Uint8Array(idBits)].map((b) => b.toString(16).padStart(2, "0")).join(""), key };
+}
+
+async function seal(key, text) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(text)));
+  const out = new Uint8Array(12 + ct.length);
+  out.set(iv);
+  out.set(ct, 12);
+  return out;
+}
+
+async function unseal(key, buf) {
+  const b = new Uint8Array(buf);
+  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: b.slice(0, 12) }, key, b.slice(12));
+  return new TextDecoder().decode(pt);
+}
+
+function jsonText(text, status) {
+  return new Response(text, { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
 }
 
 async function deviceCode(request, env) {

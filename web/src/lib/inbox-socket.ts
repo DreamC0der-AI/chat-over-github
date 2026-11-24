@@ -66,8 +66,10 @@ export class InboxSocket {
     if (this.stopped || this.ws) return;
     let token: string;
     try {
-      // After a failed attempt the token may have expired: get a fresh one.
-      token = await this.token(this.failures > 0);
+      // A socket that fails is usually the network (asleep, offline), not the token: a forced
+      // refresh here would spend the refresh token on every retry. An expired token is renewed
+      // anyway, and a revoked one is renewed by the next GitHub request that gets a 401.
+      token = await this.token(false);
     } catch {
       return this.again();
     }

@@ -35,7 +35,7 @@ import { sha256, toHex } from 'keyhold/util';
 import { generateRecoveryCode, parseRecoveryCode } from 'keyhold/keys';
 import { hkdfAesKey, hkdfBytes } from 'keyhold/util';
 import { CONFIG, installUrl } from '../config';
-import { currentToken, type AuthState } from './auth';
+import { currentToken, SignedOutError, type AuthState } from './auth';
 import { Activities, instrument, type Activity, type PlanStep, type Tracker } from './activity';
 import { InboxSocket } from './inbox-socket';
 import { Db, idbDevice } from './idb';
@@ -272,7 +272,11 @@ export const loginFrom = (address: string) => {
   }
 };
 
+/** fetch's own failure: no connection (asleep, offline), not an answer from GitHub. Chrome, Safari, Firefox. */
+export const isNetworkError = (e: unknown) => e instanceof TypeError && /failed to fetch|load failed|networkerror/i.test(e.message);
+
 export function describeError(e: unknown): string {
+  if (isNetworkError(e)) return 'Offline. Retrying…';
   const m = e instanceof Error ? e.message : String(e);
   if (/rate limit/i.test(m)) return 'GitHub rate limit reached. Wait a few minutes and try again.';
   return m;
@@ -298,6 +302,8 @@ export class Session {
   records = new Map<string, ChatRecord>();
   groupErrors = new Map<string, string>();
   rateRemaining?: number;
+  /** GitHub no longer accepts this sign-in (the refresh token is dead): the app shows sign-in. */
+  signedOut = false;
   /** The conversation on screen. */
   activeConvo?: string;
   lastPollError?: string;
@@ -380,7 +386,16 @@ export class Session {
   /** fetch with the current (refreshed) token, no HTTP cache, and rate-limit tracking. */
   ghFetch = async (url: string, init: { method?: string; headers?: Record<string, string>; body?: string } = {}) => {
     const go = async (force: boolean) => {
-      const token = await (this.env.token ?? currentToken)(force);
+      let token: string;
+      try {
+        token = await (this.env.token ?? currentToken)(force);
+      } catch (e) {
+        if (e instanceof SignedOutError && !this.signedOut) {
+          this.signedOut = true;
+          this.bump();
+        }
+        throw e;
+      }
       return fetch(url, { ...init, headers: { ...(init.headers ?? {}), Authorization: `Bearer ${token}` }, cache: 'no-store' });
     };
     let r = await go(false);
@@ -711,8 +726,24 @@ export class Session {
         }),
       };
     }
+    globalThis.addEventListener?.('online', this.onWake);
+    document.addEventListener('visibilitychange', this.onWake);
     void this.loop();
   }
+
+  /**
+   * Back online, or the tab shown again (often after the computer slept): check everything now, so
+   * a problem from while it was away clears in seconds instead of waiting out the slow timers.
+   */
+  private onWake = () => {
+    if (this.stopped || !this.chat || document.visibilityState === 'hidden') return;
+    this.lastInvites = 0;
+    this.lastClosures = 0;
+    this.lastPull = 0;
+    this.lastCheck.clear();
+    for (const g of this.chat.groups.keys()) if (this.groupErrors.has(g)) this.lastFullSync.delete(g);
+    this.kick?.();
+  };
 
   /** Opened from the stored install check: make sure the install is still there. */
   private async checkInstallStill() {
@@ -1979,9 +2010,12 @@ export class Session {
       // GitHub's change check can lag up to a minute behind a push, so the open chat and busy
       // chats also get a full sync every little while whatever it says.
       const fallback = hidden ? Infinity : this.onScreen(g.id) ? FULL_SYNC_ACTIVE_MS : warm ? FULL_SYNC_WARM_MS : Infinity;
+      // A chat whose last sync failed gets a full one again (not more often than an open chat's),
+      // so its warning clears once GitHub answers, even if nothing new arrived meanwhile.
+      const retry = this.groupErrors.has(g.id) ? (hidden ? HIDDEN_POLL_MS : FULL_SYNC_ACTIVE_MS) : fallback;
       try {
         const changed = await this.headChanged(g.space);
-        if (changed || now - (this.lastFullSync.get(g.id) ?? 0) >= fallback) {
+        if (changed || now - (this.lastFullSync.get(g.id) ?? 0) >= retry) {
           this.lastFullSync.set(g.id, Date.now());
           await this.syncGroup(g);
         }
@@ -2076,6 +2110,8 @@ export class Session {
 
   stop() {
     this.stopped = true;
+    globalThis.removeEventListener?.('online', this.onWake);
+    document.removeEventListener('visibilitychange', this.onWake);
     this.inbox?.stop();
     this.kick?.();
   }
