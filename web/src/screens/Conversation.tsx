@@ -162,7 +162,7 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
       {!live && (
         <div className="flash banner">
           <span>
-            <strong>{group ? 'This chat is no longer available.' : `${last.ended ? endedText(session, last.ended, dm) : 'This chat has ended'}.`}</strong>{' '}
+            <strong>{convo.unreachable ? 'Can\u2019t reach this chat. Retrying…' : group ? 'This chat is no longer available.' : `${last.ended ? endedText(session, last.ended, dm) : 'This chat has ended'}.`}</strong>{' '}
             <Hint text={group ? "GitHub doesn't let you open it right now. If access comes back, it carries on." : 'Your copy of the messages stays here until you delete it.'} />
           </span>
           <span className="row">

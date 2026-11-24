@@ -30,7 +30,7 @@ import {
   type DeviceCertificate,
   type LookupResult,
 } from 'keyhold/chat';
-import type { AttachmentRef } from 'keyhold/chat';
+import type { AppContent, AttachmentRef } from 'keyhold/chat';
 import { sha256, toHex } from 'keyhold/util';
 import { generateRecoveryCode, parseRecoveryCode } from 'keyhold/keys';
 import { hkdfAesKey, hkdfBytes } from 'keyhold/util';
@@ -60,6 +60,12 @@ export interface MsgRecord {
   /** Reaction messages already counted, so one that arrives twice can't toggle twice. */
   rxIds?: string[];
   reply?: string;
+  /** The device that sent it (absent on messages stored by older versions). */
+  fromDevice?: string;
+  /** Rule 2: this device sent a copy of it into the room that stayed (the copy's id). */
+  movedTo?: string;
+  /** This is such a copy: the original's id. */
+  movedFrom?: string;
 }
 
 /** An outgoing message that isn't in the chat yet. A file has a local preview until it's sent. */
@@ -124,12 +130,33 @@ export interface ChatRecord {
   peer?: string;
   /** The room ended for good (closed, quit, removed). Its history stays until Delete chat. */
   ended?: { how: 'closed' | 'moved' | 'quit' | 'removed'; by?: string; at: number };
-  /** Delete chat: messages up to here were deleted and are never shown again. */
+  /**
+   * Delete chat: messages up to here were deleted. The time of the newest message the deleting
+   * browser had (the senders' clocks, like every message's ts), never the deleting browser's clock.
+   */
   clearedAt?: number;
+  /** Synced with clearedAt: the newest message the deleting browser had, by id. */
+  clearedId?: string;
+  /**
+   * This browser only: another browser deleted the chat, and this one hasn't caught up to the last
+   * message that browser had (clearedId), so messages it fetches up to dropTo were deleted there.
+   * Without dropUntil (a delete from an older app), the cut-off is by time only.
+   */
+  dropTo?: number;
+  dropUntil?: string;
+  /** This browser only: the newest read mark known (any browser), so later fetches don't count as unread. */
+  readTo?: number;
   /** DM owner side: the other person quit. */
   peerLeft?: boolean;
   /** Ended and deleted: nothing of it is shown or kept, only this tombstone. */
   purged?: boolean;
+  /** When it was deleted (synced, newest wins): a later rejoin outranks it. */
+  purgedAt?: number;
+  /**
+   * Joined again after it ended for us (quit, removed, then invited back). The synced `ended` and
+   * `purged` are set-once, so this, being newer, is what says they no longer hold (synced, newest wins).
+   */
+  rejoinedAt?: number;
   /**
    * This browser only (not synced): when this browser joined a chat the account was already in,
    * so earlier messages, which stay in each browser, aren't here.
@@ -152,6 +179,8 @@ export interface Convo {
   lastTs: number;
   lastText?: string;
   unread: number;
+  /** Not live only because GitHub refuses us right now (it may come back): retrying, not ended. */
+  unreachable?: boolean;
 }
 
 export interface PendingInvite {
@@ -184,6 +213,8 @@ export interface PendingInvite {
   mine?: boolean;
   /** What the inviter's app told us about the chat, sealed to our devices (absent from older apps). */
   details?: InviteDetails;
+  /** Invited back to a room that had ended for us: joining it again lifts that end. */
+  rejoin?: boolean;
 }
 
 /**
@@ -235,7 +266,8 @@ const INSTALL_KEY = 'install';
 /** Snapshots of what this browser last wrote to the synced store (kv). */
 const PUSHED_KEY = 'sync:pushed';
 /** What each synced chat field does when two browsers change it at once. */
-const CHAT_RULES: Record<string, MergeRule> = { space: 'once', kind: 'once', peer: 'once', name: 'once', createdAt: 'once', ended: 'once', clearedAt: 'max', peerLeft: 'once', purged: 'once' };
+// `ended` stays set-once for older apps; `endedLast` (newest wins) is the end after a rejoin.
+const CHAT_RULES: Record<string, MergeRule> = { space: 'once', kind: 'once', peer: 'once', name: 'once', createdAt: 'once', ended: 'once', clearedAt: 'max', peerLeft: 'once', purged: 'once', purgedAt: 'max', rejoinedAt: 'max' };
 /**
  * The sync schedule: how often each kind of check runs. One sync step (tick) reads it; the loop
  * only decides when to call that step. The mock build (tests) runs the same schedule on a faster
@@ -262,6 +294,11 @@ const INVITE_RETRY_MS = at(10_000);
 const INVITE_RETRY_MAX_MS = at(3 * 60_000);
 // Rotation itself is weekly (keyhold DEFAULT_PREKEYS); this is only how often to look.
 const PREKEY_CHECK_MS = at(10 * 60_000);
+/** A chat GitHub refuses us (maybe for a moment) is tried again after this, then less and less often. */
+const LOST_RETRY_MS = at(60_000);
+const LOST_RETRY_MAX_MS = at(30 * 60_000);
+/** A rate limit without a stated wait pauses syncing this long. */
+const RATE_PAUSE_MS = at(60_000);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export const loginFrom = (address: string) => {
@@ -275,11 +312,25 @@ export const loginFrom = (address: string) => {
 /** fetch's own failure: no connection (asleep, offline), not an answer from GitHub. Chrome, Safari, Firefox. */
 export const isNetworkError = (e: unknown) => e instanceof TypeError && /failed to fetch|load failed|networkerror/i.test(e.message);
 
+/** GitHub's rate limit (primary or secondary), from a keyhold error or a raw answer. */
+export const isRateLimit = (e: unknown) => {
+  const code = (e as { code?: unknown } | undefined)?.code;
+  const m = e instanceof Error ? e.message : String(e);
+  return code === 'too_many_attempts' || /rate limit|secondary limit|\b429\b/i.test(m);
+};
+
+/** How long the error says to wait, in ms, if it says (read defensively: providers may add it). */
+export function retryAfterMs(e: unknown): number | undefined {
+  const x = e as { retryAfter?: unknown; retryAfterMs?: unknown } | undefined;
+  if (typeof x?.retryAfterMs === 'number' && x.retryAfterMs > 0) return x.retryAfterMs;
+  if (typeof x?.retryAfter === 'number' && x.retryAfter > 0) return x.retryAfter * 1000; // seconds, like the header
+  return undefined;
+}
+
 export function describeError(e: unknown): string {
   if (isNetworkError(e)) return 'Offline. Retrying…';
-  const m = e instanceof Error ? e.message : String(e);
-  if (/rate limit/i.test(m)) return 'GitHub rate limit reached. Wait a few minutes and try again.';
-  return m;
+  if (isRateLimit(e)) return 'GitHub rate limit reached. Wait a few minutes and try again.';
+  return e instanceof Error ? e.message : String(e);
 }
 
 export class Session {
@@ -302,6 +353,8 @@ export class Session {
   records = new Map<string, ChatRecord>();
   groupErrors = new Map<string, string>();
   rateRemaining?: number;
+  /** GitHub asked us to slow down: the timed sync steps wait until then (syncNow doesn't). */
+  rateLimitedUntil = 0;
   /** GitHub no longer accepts this sign-in (the refresh token is dead): the app shows sign-in. */
   signedOut = false;
   /** The conversation on screen. */
@@ -359,6 +412,15 @@ export class Session {
   /** Live connection to the invite inbox; while it is up the inbox isn't polled. */
   private inbox?: InboxSocket;
   private peers = new Map<string, Promise<PeerInfo>>();
+  /** Chats GitHub refuses us for now: when to try again, and the wait after that. */
+  private lost = new Map<string, { next: number; delay: number; since: number }>();
+  /** Synced-store writes on their way into the queue (PersonalData.set is async). */
+  private inflight = new Set<Promise<unknown>>();
+  /** Snapshots whose change is queued, not yet written. */
+  private queuedSnaps = new Map<string, string>();
+  /** Snapshots known written (persisted as PUSHED_KEY). */
+  private saved = new Map<string, string>();
+  private syncOpen?: Promise<void>;
 
   constructor(
     readonly auth: AuthState,
@@ -402,8 +464,25 @@ export class Session {
     if (r.status === 401) r = await go(true);
     const left = r.headers.get('x-ratelimit-remaining');
     if (left !== null && url.startsWith(CONFIG.api)) this.rateRemaining = Number(left);
+    if (r.status === 429 || (r.status === 403 && (left === '0' || r.headers.get('retry-after') !== null))) {
+      const after = Number(r.headers.get('retry-after'));
+      const reset = Number(r.headers.get('x-ratelimit-reset'));
+      this.pauseFor(after > 0 ? after * 1000 : reset > 0 ? reset * 1000 - Date.now() : undefined);
+    }
     return r;
   };
+
+  /** Slow down after a rate limit: the timed sync steps wait this long (at least). */
+  private pauseFor(ms: number | undefined) {
+    const until = Date.now() + Math.max(ms ?? RATE_PAUSE_MS, 1_000);
+    if (until > this.rateLimitedUntil) this.rateLimitedUntil = until;
+  }
+
+  /** Remember what a failure means for the schedule; returns what to show. */
+  private noteError(e: unknown): string {
+    if (isRateLimit(e)) this.pauseFor(retryAfterMs(e));
+    return describeError(e);
+  }
 
   private async ghJson<T>(path: string): Promise<{ status: number; data?: T }> {
     const r = await this.ghFetch(CONFIG.api + path, { headers: { Accept: 'application/vnd.github+json' } });
@@ -742,6 +821,7 @@ export class Session {
     this.lastPull = 0;
     this.lastCheck.clear();
     for (const g of this.chat.groups.keys()) if (this.groupErrors.has(g)) this.lastFullSync.delete(g);
+    for (const l of this.lost.values()) l.next = 0;
     this.kick?.();
   };
 
@@ -795,15 +875,26 @@ export class Session {
 
   // ---- sync across this account's browsers (personal store in the home repo) ----
 
-  private async startSync() {
-    if (this.personal) return;
+  /** Open the synced store once: two calls at once share one opening (a second would replace the first's queue). */
+  private startSync(): Promise<void> {
+    if (this.personal) return Promise.resolve();
+    return (this.syncOpen ??= this.startSyncNow().finally(() => (this.syncOpen = undefined)));
+  }
+
+  private async startSyncNow() {
     const raw = await this.device.keystore.get(PERSONAL_KEY_SLOT);
     if (!raw) return;
     this.hasSyncKey = true;
     const key = await crypto.subtle.importKey('raw', raw as Uint8Array<ArrayBuffer>, 'AES-GCM', false, ['encrypt', 'decrypt']);
     // What this browser already wrote, so a reload doesn't write it all again.
     const sent = await this.db.get<Record<string, string>>('kv', PUSHED_KEY);
-    if (sent) for (const [k, v] of Object.entries(sent)) if (!this.pushed.has(k)) this.pushed.set(k, v);
+    if (sent) {
+      for (const [k, v] of Object.entries(sent)) {
+        if (!this.pushed.has(k)) this.pushed.set(k, v);
+        if (!this.saved.has(k)) this.saved.set(k, v);
+      }
+    }
+    if (this.personal) return;
     this.personal = await PersonalData.open(this.provider.personal, key, this.identity!.deviceId);
     // Everything this browser knows goes up once (only what changed since it last did).
     for (const r of this.records.values()) this.push(r);
@@ -816,25 +907,51 @@ export class Session {
     await this.flushPersonal();
   }
 
-  /** Write queued changes; once nothing is left queued, remember what has been written. */
+  /**
+   * Queue a change for the synced store. `snap` is remembered as written only once the change is
+   * in the queue and a flush has written it, so a tab closed in between sends it again on reload.
+   */
+  private queueSet(k: string, snap: string, run: (p: PersonalData) => Promise<void>): Promise<void> {
+    const p = this.personal!;
+    this.pushed.set(k, snap);
+    const job: Promise<void> = run(p).then(
+      () => void this.queuedSnaps.set(k, snap),
+      () => {
+        if (this.pushed.get(k) === snap) this.pushed.delete(k); // try again next time
+      },
+    ).finally(() => this.inflight.delete(job));
+    this.inflight.add(job);
+    return job;
+  }
+
+  /** Write queued changes, then remember what has been written. */
   private async flushPersonal() {
     const p = this.personal;
     if (!p) return;
-    await p.flush();
-    if (!p.pending) await this.db.put('kv', Object.fromEntries(this.pushed), PUSHED_KEY);
+    // Changes still on their way into the queue go in this flush.
+    while (this.inflight.size) await Promise.all([...this.inflight]);
+    const batch = new Map(this.queuedSnaps);
+    this.queuedSnaps.clear();
+    try {
+      await p.flush();
+    } catch (e) {
+      for (const [k, v] of batch) if (!this.queuedSnaps.has(k)) this.queuedSnaps.set(k, v);
+      throw e;
+    }
+    if (!batch.size && this.saved.size) return;
+    for (const [k, v] of batch) this.saved.set(k, v);
+    await this.db.put('kv', Object.fromEntries(this.saved), PUSHED_KEY);
   }
 
   private async syncBlock(address: string, blocked: boolean) {
     const mark = blocked ? 'on' : 'off';
     if (!this.personal || this.pushed.get(`b/${address}`) === mark) return;
-    this.pushed.set(`b/${address}`, mark);
-    await this.personal.set('blocks', address, { blocked: blocked || undefined });
+    await this.queueSet(`b/${address}`, mark, (p) => p.set('blocks', address, { blocked: blocked || undefined }));
   }
 
   private async syncDeclined(space: string) {
     if (!this.personal || this.pushed.has(`d/${space}`)) return;
-    this.pushed.set(`d/${space}`, 'on');
-    await this.personal.set('settings', `declined:${space}`, { value: true }, { value: 'once' });
+    await this.queueSet(`d/${space}`, 'on', (p) => p.set('settings', `declined:${space}`, { value: true }, { value: 'once' }));
   }
 
   /** Queue the synced fields of a chat, if they changed since last time. */
@@ -842,21 +959,18 @@ export class Session {
     if (!this.personal) return;
     const fields: Record<string, unknown> = {
       space: r.space, kind: r.kind, peer: r.peer, name: r.lastName, createdAt: r.createdAt,
-      ended: r.ended, clearedAt: r.clearedAt, peerLeft: r.peerLeft || undefined, purged: r.purged || undefined,
+      ended: r.ended, endedLast: r.ended, clearedAt: r.clearedAt, clearedId: r.clearedId, peerLeft: r.peerLeft || undefined,
+      purged: r.purged || undefined, purgedAt: r.purged ? r.purgedAt : undefined, rejoinedAt: r.rejoinedAt,
     };
-    for (const k of Object.keys(fields)) if (fields[k] === undefined) delete fields[k];
+    // A field never set stays out (older records have no endedLast; set-once fields can't be deleted).
+    for (const k of Object.keys(fields)) if (fields[k] === undefined && k !== 'endedLast') delete fields[k];
+    if (fields.endedLast === undefined && !r.rejoinedAt) delete fields.endedLast;
     const snap = JSON.stringify(fields);
-    if (this.pushed.get(r.groupId) !== snap) {
-      this.pushed.set(r.groupId, snap);
-      void this.personal.set('chats', r.groupId, fields, CHAT_RULES);
-    }
+    if (this.pushed.get(r.groupId) !== snap) void this.queueSet(r.groupId, snap, (p) => p.set('chats', r.groupId, fields, CHAT_RULES));
     // Read up to here: other browsers clear their unread count.
     if (!r.unread) {
       const mark = `read:${r.lastTs}`;
-      if (this.pushed.get(`r/${r.groupId}`) !== mark) {
-        this.pushed.set(`r/${r.groupId}`, mark);
-        void this.personal.set('readMarks', r.groupId, { at: r.lastTs }, { at: 'max' });
-      }
+      if (this.pushed.get(`r/${r.groupId}`) !== mark) void this.queueSet(`r/${r.groupId}`, mark, (p) => p.set('readMarks', r.groupId, { at: r.lastTs }, { at: 'max' }));
     }
   }
 
@@ -869,12 +983,15 @@ export class Session {
       else if (ch.collection === 'contacts') await this.contacts.applyRemote(ch.key, v);
       else if (ch.collection === 'readMarks') {
         const r = this.records.get(ch.key);
-        if (r && typeof v.at === 'number' && v.at >= r.lastTs && r.unread) {
-          r.unread = 0;
+        // Read up to there on some browser: only messages after it count as unread, here and later.
+        if (r && typeof v.at === 'number' && v.at > (r.readTo ?? 0)) {
+          r.readTo = v.at;
+          r.unread = await this.countUnread(r);
           await this.saveRecord(r);
         }
       } else if (ch.collection === 'blocks') {
         this.pushed.set(`b/${ch.key}`, v.blocked ? 'on' : 'off');
+        this.saved.set(`b/${ch.key}`, v.blocked ? 'on' : 'off');
         if (v.blocked) {
           if (!this.blocked.has(ch.key)) {
             this.blocked.add(ch.key);
@@ -884,6 +1001,7 @@ export class Session {
       } else if (ch.collection === 'settings' && ch.key.startsWith('declined:') && v.value) {
         const sp = ch.key.slice('declined:'.length);
         this.pushed.set(`d/${sp}`, 'on');
+        this.saved.set(`d/${sp}`, 'on');
         if (!this.declined.has(sp)) {
           this.declined.add(sp);
           await this.db.put('kv', Date.now(), `declined:${sp}`);
@@ -903,20 +1021,43 @@ export class Session {
     if (!r.lastName && typeof v.name === 'string') r.lastName = v.name;
     if (typeof v.createdAt === 'number' && v.createdAt < r.createdAt) r.createdAt = v.createdAt;
     if (v.peerLeft) r.peerLeft = true;
-    if (typeof v.clearedAt === 'number' && v.clearedAt > (r.clearedAt ?? 0)) await this.applyClear(r, v.clearedAt);
-    if (v.ended && !r.ended) {
-      r.ended = v.ended as ChatRecord['ended'];
+    if (typeof v.clearedAt === 'number' && v.clearedAt > (r.clearedAt ?? 0)) await this.applyClear(r, v.clearedAt, typeof v.clearedId === 'string' ? v.clearedId : undefined, false);
+    // Joined again on another browser: the end (and delete) before that no longer holds.
+    if (typeof v.rejoinedAt === 'number' && v.rejoinedAt > (r.rejoinedAt ?? 0)) {
+      r.rejoinedAt = v.rejoinedAt;
+      if (r.ended && r.ended.at <= v.rejoinedAt) r.ended = undefined;
+      if (r.purged && (r.purgedAt ?? 0) <= v.rejoinedAt) r.purged = undefined;
+    }
+    const ended = (v.endedLast ?? v.ended) as ChatRecord['ended'] | undefined;
+    if (ended && !r.ended && ended.at > (r.rejoinedAt ?? 0)) {
+      r.ended = ended;
       await this.chat!.groups.get(groupId)?.end();
     }
-    if (v.purged && !r.purged) await this.purgeRoom(r);
+    const purgedAt = typeof v.purgedAt === 'number' ? v.purgedAt : 0;
+    if (v.purged && !r.purged && (!r.rejoinedAt || purgedAt > r.rejoinedAt)) await this.purgeRoom(r, purgedAt || undefined);
     // Already in step with storage: don't echo it back.
     await this.db.put('kv', r, `chat:${r.groupId}`);
   }
 
-  /** Delete chat up to a time: this browser's messages up to then go, and never come back. */
-  private async applyClear(r: ChatRecord, at: number) {
+  /**
+   * Delete chat up to a message: `at` is its time, `id` the message. Here (`local`) that is the
+   * newest message this browser had, so whatever arrives later was never seen and shows. Another
+   * browser may not have fetched everything the deleting one had: there, what arrives up to `at`
+   * is dropped until it reaches message `id`.
+   */
+  private async applyClear(r: ChatRecord, at: number, id: string | undefined, local: boolean) {
+    const had = !local && id ? !!(await this.db.get('messages', [r.groupId, id])) : false;
     r.clearedAt = Math.max(r.clearedAt ?? 0, at);
+    if (id) r.clearedId = id;
     await this.db.deleteMessages(r.groupId, at);
+    if (local || had) {
+      r.dropTo = undefined;
+      r.dropUntil = undefined;
+    } else {
+      // A delete from an older app names no message: drop by time, as it always did.
+      r.dropTo = Math.max(r.dropTo ?? 0, at);
+      r.dropUntil = id;
+    }
     if (r.lastTs <= at) {
       r.lastText = undefined;
       r.unread = 0;
@@ -924,8 +1065,9 @@ export class Session {
   }
 
   /** An ended room deleted: drop what's left of it here and keep only a tombstone. */
-  private async purgeRoom(r: ChatRecord) {
+  private async purgeRoom(r: ChatRecord, at = Date.now()) {
     r.purged = true;
+    r.purgedAt = Math.max(r.purgedAt ?? 0, at);
     await this.db.deleteMessages(r.groupId);
     await this.chat!.purge(r.groupId);
     // If GitHub still lists the repo for a while, it must not come back as an invitation.
@@ -1008,12 +1150,14 @@ export class Session {
       lastTs: last.lastTs,
       lastText: last.lastText,
       unread: rooms.reduce((n, r) => n + r.unread, 0),
+      unreachable: !live && this.isUnreachable(current),
     };
   }
 
   /**
-   * Rule 2 tie-break, deterministic on both sides. A room both people are in beats one still
-   * waiting for the other to join; then the lowest owner user id; then the oldest room.
+   * Rule 2 tie-break, deterministic on every browser. A room both people are in beats one still
+   * waiting for the other to join; then the lowest owner user id; then the lowest room id (the same
+   * everywhere, unlike a creation time, which each browser records by itself).
    */
   private winner(rooms: Group[]): Group {
     const both = rooms.filter((g) => g.members().filter((m) => !m.pending).length > 1);
@@ -1022,7 +1166,7 @@ export class Session {
     return [...rooms].sort((a, b) => {
       const ia = id(a), ib = id(b);
       if (ia !== undefined && ib !== undefined && ia !== ib) return ia - ib;
-      return (this.records.get(a.id)?.createdAt ?? 0) - (this.records.get(b.id)?.createdAt ?? 0);
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
     })[0]!;
   }
 
@@ -1067,6 +1211,15 @@ export class Session {
   /** Did this account start the room (own its repo)? Only the owner can close it. */
   isOwner(room: { space?: string }) {
     return room.space?.split('/')[0]?.toLowerCase() === this.login;
+  }
+
+  /**
+   * GitHub refuses us this room for now (keyhold's accessLost): not ended, it may come back. The
+   * flag is keyhold's own; a group out of the map, or ended here, is not "unreachable".
+   */
+  isUnreachable(g: Group | undefined): boolean {
+    if (!g || g.active || this.chat?.groups.get(g.id) !== g || this.records.get(g.id)?.ended) return false;
+    return (g as unknown as { meta?: { accessLost?: boolean } }).meta?.accessLost === true;
   }
 
   isDm(g: Group) {
@@ -1290,7 +1443,12 @@ export class Session {
   async closeChat(g: Group, reason: 'closed' | 'moved' = 'closed') {
     if (!this.isOwner(g)) throw new Error('Only the person who started this chat can close it.');
     const r = this.fill(g);
-    const others = new Set([...g.members().map((m) => m.address), ...r.invited].filter((a) => a !== this.address));
+    // Retiring a duplicate DM room (rule 2): only someone who joined it needs a closure notice. The
+    // notice can't name the room, so an invited peer's app would also drop the invitation to the
+    // room that stays, which went out at the same moment.
+    const others = new Set(
+      (reason === 'moved' ? g.members().filter((m) => !m.pending).map((m) => m.address) : [...g.members().map((m) => m.address), ...r.invited]).filter((a) => a !== this.address),
+    );
     const tell = g.active && g.members().some((m) => m.address !== this.address);
     const plan = [...(tell ? ['Telling the members'] : []), ...(others.size ? ['Leaving closure notices'] : []), 'Deleting the repo on GitHub', 'Erasing this chat\u2019s keys'];
     await this.activities.run(reason === 'moved' ? 'Retiring the old chat' : 'Closing the chat', plan, async (t) => {
@@ -1345,9 +1503,12 @@ export class Session {
   async deleteHistory(key: string) {
     const c = this.convo(key);
     if (!c) return;
-    const now = Date.now();
     for (const r of c.rooms) {
-      await this.applyClear(r, now);
+      // Up to the newest message this browser has, by its own (sender's) time: never this
+      // browser's clock, which may run ahead and would hide what arrives next.
+      const newest = await this.db.lastMessage<MsgRecord>(r.groupId, () => true);
+      const newestReal = await this.db.lastMessage<MsgRecord>(r.groupId, (m) => m.kind !== 'system');
+      if (newest) await this.applyClear(r, newest.ts, newestReal?.id, true);
       const g = this.chat!.groups.get(r.groupId);
       if (!g || !g.active) await this.purgeRoom(r);
       await this.saveRecord(r);
@@ -1394,6 +1555,12 @@ export class Session {
     return this.db.messages<MsgRecord>(groupId);
   }
 
+  /** Messages from others after the newest read mark. */
+  private async countUnread(r: ChatRecord) {
+    const to = r.readTo ?? 0;
+    return (await this.messages(r.groupId)).filter((m) => !m.mine && m.kind !== 'system' && !m.deleted && m.ts > to).length;
+  }
+
   /** Send a text. It shows at once as "Sending…", and stays as "Not sent" with Retry if it fails. */
   async send(g: Group, body: string) {
     const item: Sending = { id: Math.random().toString(36).slice(2), body, ts: Date.now() };
@@ -1436,7 +1603,7 @@ export class Session {
       } else sent = await g.send({ t: 'text', body: item.body ?? '' });
     } catch (e) {
       await this.syncGroup(g).catch(() => undefined);
-      item.failed = !g.active ? 'This chat has ended' : describeError(e);
+      item.failed = this.isUnreachable(g) ? "Can't reach this chat right now. Try again in a moment." : !g.active ? 'This chat has ended' : this.noteError(e);
       this.bump();
       return;
     }
@@ -1456,7 +1623,9 @@ export class Session {
     this.reacting.set(key, entry);
     this.bump();
     try {
-      await g.send({ t: 'react', ref, emoji });
+      // Explicit on/off: two of my browsers adding the same reaction must not cancel out. Older
+      // apps ignore `on` and toggle, as they always did.
+      await g.send({ t: 'react', ref, emoji, on: add } as AppContent);
     } catch (e) {
       this.reacting.delete(key);
       this.bump();
@@ -1550,7 +1719,7 @@ export class Session {
   private async onMessage(g: Group, m: ReceivedMessage) {
     const msg = m.message;
     const mine = m.from.fingerprint === this.identity?.fingerprint;
-    const base = { groupId: g.id, id: msg.id, ts: msg.ts, from: m.from.address, fromFp: m.from.fingerprint, mine };
+    const base = { groupId: g.id, id: msg.id, ts: msg.ts, from: m.from.address, fromFp: m.from.fingerprint, fromDevice: m.from.deviceId, mine };
     const r = this.fill(g);
     if (msg.t === 'sys.close') {
       // Only the repo owner can end the room.
@@ -1558,19 +1727,31 @@ export class Session {
       if (!mine && m.from.address === owner) this.toEnd.set(g.id, { how: msg.reason === 'moved' ? 'moved' : 'closed', by: owner, at: msg.ts });
       return;
     }
-    // Delete chat: never show what was deleted again, even though old keys may still open it.
-    if (r.purged || (r.clearedAt && msg.ts <= r.clearedAt)) return;
+    if (r.purged) return;
+    // Another browser deleted the chat and this one is still catching up to what that one had.
+    if (r.dropTo !== undefined && msg.ts <= r.dropTo) {
+      if (msg.id === r.dropUntil) {
+        r.dropTo = undefined;
+        r.dropUntil = undefined;
+        await this.saveRecord(r);
+      }
+      return;
+    }
     const touch = async (preview: string) => {
       r.lastTs = Math.max(r.lastTs, msg.ts);
       r.lastText = preview;
-      if (!mine && !this.onScreen(g.id)) r.unread++;
+      if (!mine && !this.onScreen(g.id) && msg.ts > (r.readTo ?? 0)) r.unread++;
       await this.saveRecord(r);
     };
     switch (msg.t) {
-      case 'text':
-        await this.put({ ...base, kind: 'text', body: msg.body, reply: msg.reply });
+      case 'text': {
+        // A copy of a message from a retired duplicate room (rule 2): shown only if not here already.
+        const moved = (msg as { moved?: unknown }).moved;
+        if (typeof moved === 'string' && (await this.inConvo(r, moved))) break;
+        await this.put({ ...base, kind: 'text', body: msg.body, reply: msg.reply, ...(typeof moved === 'string' ? { movedFrom: moved } : {}) });
         await touch(msg.body);
         break;
+      }
       case 'attachment': {
         // Our own upload: keep the local copy so the picture shows without downloading it again.
         const local = mine ? this.sending.get(g.id)?.find((p) => p.file && p.file.name === msg.file.name && p.file.size === msg.file.size) : undefined;
@@ -1603,7 +1784,11 @@ export class Session {
         if (cur && !cur.rxIds?.includes(msg.id)) {
           const rx = { ...(cur.reactions ?? {}) };
           const who = new Set(rx[msg.emoji] ?? []);
-          if (who.has(m.from.address)) who.delete(m.from.address);
+          const on = (msg as { on?: unknown }).on;
+          // New apps say on or off; older ones send a toggle.
+          if (on === true) who.add(m.from.address);
+          else if (on === false) who.delete(m.from.address);
+          else if (who.has(m.from.address)) who.delete(m.from.address);
           else who.add(m.from.address);
           rx[msg.emoji] = [...who];
           if (!rx[msg.emoji]!.length) delete rx[msg.emoji];
@@ -1622,6 +1807,17 @@ export class Session {
         break;
     }
     this.bump();
+  }
+
+  /** Is this message (or a copy of it) already in any room of r's conversation? */
+  private async inConvo(r: ChatRecord, id: string) {
+    const key = this.convoKey(r);
+    for (const room of this.records.values()) {
+      if (this.convoKey(room) !== key) continue;
+      if (await this.db.get('messages', [room.groupId, id])) return true;
+      if ((await this.messages(room.groupId)).some((x) => x.movedFrom === id)) return true;
+    }
+    return false;
   }
 
   private async onEvents(g: Group, events: GroupEvent[]) {
@@ -1650,7 +1846,7 @@ export class Session {
       } else if (e.type === 'removed') this.toEnd.set(g.id, { how: 'removed', at: Date.now() });
       else if (e.type === 'access-lost') {
         // Our own repo gone means we closed it (on another device, or on github.com). Someone
-        // else's is only unavailable: it may come back, so nothing is deleted.
+        // else's is only unavailable: it may come back, so nothing is deleted and it is retried.
         if (this.isOwner(g) && (await this.ghFetch(`${CONFIG.api}/repos/${g.space}`)).status === 404) {
           this.toEnd.set(g.id, { how: 'closed', by: this.address, at: Date.now() });
         }
@@ -1670,8 +1866,13 @@ export class Session {
       await this.onEvents(g, r.events);
       this.groupErrors.delete(g.id);
     } catch (e) {
-      this.groupErrors.set(g.id, describeError(e));
+      this.groupErrors.set(g.id, this.noteError(e));
     }
+    // Refused by GitHub (maybe only for a moment): try again later, less and less often. Only a
+    // signed close or a removal we can read ends the room; until then it is "can't reach".
+    if (this.isUnreachable(g)) {
+      if (!this.lost.has(g.id)) this.lost.set(g.id, { next: Date.now() + LOST_RETRY_MS, delay: LOST_RETRY_MS, since: Date.now() });
+    } else this.lost.delete(g.id);
     const end = this.toEnd.get(g.id);
     if (end) {
       this.toEnd.delete(g.id);
@@ -1708,7 +1909,7 @@ export class Session {
       try {
         notices = await p.inviteInbox.list();
       } catch (e) {
-        this.lastPollError = describeError(e);
+        this.lastPollError = this.noteError(e);
       }
     }
     let have = known();
@@ -1746,9 +1947,18 @@ export class Session {
     if (force || now - this.lastSpaceScan >= scanEvery) {
       this.lastSpaceScan = now;
       have = known();
+      // Rooms that ended for us (quit, removed, declined, deleted): not offered again by themselves,
+      // but an invitation accepted since can be for one of them (invited back).
+      const retired: string[] = [];
       for (const space of await p.channel.listSpaces()) {
-        if (have.has(space) || this.invites.has(space) || this.declined.has(space)) continue;
-        if ([...this.records.values()].some((r) => r.space === space && r.ended)) continue;
+        const liveRec = [...this.records.values()].some((r) => r.space === space && !r.ended && !r.purged);
+        if (this.invites.has(space)) continue;
+        const g = [...chat.groups.values()].find((x) => x.space === space);
+        if (g && !this.isUnreachable(g)) continue;
+        if (g || (this.declined.has(space) && !liveRec) || [...this.records.values()].some((r) => r.space === space && r.ended)) {
+          retired.push(space);
+          continue;
+        }
         const owner = space.split('/')[0]!.toLowerCase();
         const from = toAddress(owner);
         if (this.blocked.has(from)) continue;
@@ -1770,10 +1980,22 @@ export class Session {
         }
         this.invites.set(space, { key: space, space, from, status: accepted ? 'joining' : 'invited', since: now, attempts: 0, nextTry: 0, mine, details });
       }
+      // Invited back: an invitation the person accepted that matched no other repo of that person
+      // is for the room they had left. Only the accepted invitation brings it back, never the listing.
+      for (const space of retired) {
+        const from = toAddress(space.split('/')[0]!.toLowerCase());
+        if (this.blocked.has(from)) continue;
+        const n = [...this.invites].find(([k, v]) => k.startsWith('notice:') && v.status !== 'invited' && v.from === from);
+        if (!n) continue;
+        this.invites.delete(n[0]);
+        this.activities.rekey(n[0], space);
+        this.invites.set(space, { key: space, space, from, status: 'joining', since: now, attempts: 0, nextTry: 0, details: n[1].details, rejoin: true });
+      }
       // Accepted notices whose repo never showed up go away after a few minutes.
       for (const [k, v] of this.invites) if (k.startsWith('notice:') && v.status !== 'invited' && now - v.since > 5 * 60_000) this.invites.delete(k);
     }
-    have = known();
+    // A room GitHub refused us doesn't count as joined: being invited back is how access returns.
+    have = new Set([...chat.groups.values()].filter((g) => g.active).map((g) => g.space));
     for (const inv of [...this.invites.values()]) {
       if (inv.space && have.has(inv.space)) {
         this.invites.delete(inv.key);
@@ -1789,6 +2011,14 @@ export class Session {
         if (g) {
           const r = this.fill(g); // while the invitation (and its note) is still known
           this.invites.delete(inv.key);
+          if (r.ended || r.purged || inv.rejoin) {
+            // Invited back: this join is newer than the end, on every browser of the account.
+            r.ended = undefined;
+            r.purged = undefined;
+            r.rejoinedAt = Date.now();
+            this.lost.delete(g.id);
+            await this.saveRecord(r);
+          }
           this.activities.stepFor(inv.key, JOIN_LOAD);
           const a = this.activities.forKey(inv.key);
           if (a && !a.ended) a.link = `/c/${encodeURIComponent(this.convoKey(r))}`;
@@ -1845,8 +2075,10 @@ export class Session {
       await (auto ? this.checkInvitesNow(true) : this.checkInvites(true));
       // Already accepted elsewhere shows up as a repo in that scan; if nothing did, it's gone.
       const still = [...this.invites.values()].find((i) => i === inv || (inv.space && i.key === inv.space)) ?? this.invites.get(key);
-      // Taken by the app itself (both started a DM at once) and already retired: nothing to say.
-      if (still && gone && auto) this.invites.delete(still.key);
+      // Taken by the app itself (both started a DM at once) and already retired, or a duplicate
+      // room retired while another invitation from them waits (rule 2): nothing to say.
+      const another = [...this.invites.values()].some((i) => i !== still && i.from === inv.from && i.status === 'invited') || (inv.details?.kind === 'dm' && !!this.liveDm(inv.from));
+      if (still && gone && (auto || another)) this.invites.delete(still.key);
       else if (still && gone) {
         Object.assign(still, { status: 'error', error: `@${from} withdrew this invitation or closed the chat.` });
         throw new Error(still.error);
@@ -1911,6 +2143,7 @@ export class Session {
     const c = key ? this.convo(key) : undefined;
     if (c) {
       for (const r of c.rooms) {
+        r.readTo = Math.max(r.readTo ?? 0, r.lastTs);
         if (r.unread) {
           r.unread = 0;
           void this.saveRecord(r);
@@ -1953,6 +2186,9 @@ export class Session {
     this.lastFullSync.clear();
     this.lastSpaceScan = 0;
     for (const inv of this.invites.values()) inv.nextTry = 0;
+    for (const l of this.lost.values()) l.next = 0;
+    // Asked for now: a rate-limit pause only holds back the timed steps.
+    this.rateLimitedUntil = 0;
     return new Promise<void>((resolve) => {
       this.afterTick.push(resolve);
       this.kick?.();
@@ -1969,7 +2205,7 @@ export class Session {
         await this.tick();
         this.lastPollError = undefined;
       } catch (e) {
-        this.lastPollError = describeError(e);
+        this.lastPollError = this.noteError(e);
         this.bump();
       }
       for (const done of waiting) done();
@@ -1988,6 +2224,8 @@ export class Session {
   private async tick() {
     if (!this.chat) return;
     const now = Date.now();
+    // GitHub asked us to slow down: nothing goes out until the pause is over.
+    if (now < this.rateLimitedUntil) return;
     const hidden = document.visibilityState === 'hidden';
     if (now - this.lastInvites > (hidden ? HIDDEN_POLL_MS : this.invites.size ? INVITE_PENDING_POLL_MS : INVITE_POLL_MS)) {
       this.lastInvites = now;
@@ -1999,8 +2237,21 @@ export class Session {
     }
     await this.resolveDuplicates().catch(() => undefined);
     await this.syncPersonal(now, hidden);
-    for (const g of this.chat.groups.values()) {
-      if (!g.active) continue;
+    for (const g of [...this.chat.groups.values()]) {
+      if (!g.active) {
+        // Refused by GitHub, maybe only for a moment: check again with a growing wait (also after
+        // a reload, when it is tried at once). The sync clears it once GitHub answers.
+        if (!this.isUnreachable(g)) continue;
+        const l = this.lost.get(g.id);
+        if (l && now < l.next) continue;
+        await this.syncGroup(g);
+        const again = this.lost.get(g.id);
+        if (again) {
+          again.delay = l ? Math.min(l.delay * 2, LOST_RETRY_MAX_MS) : LOST_RETRY_MS;
+          again.next = Date.now() + again.delay;
+        }
+        continue;
+      }
       const rec = this.records.get(g.id);
       // Recently busy chats, and chats waiting for someone to join, are checked more often.
       const warm = rec && (now - rec.lastTs < 2 * 60_000 || this.pending(g).length > 0);
@@ -2020,7 +2271,7 @@ export class Session {
           await this.syncGroup(g);
         }
       } catch (e) {
-        this.groupErrors.set(g.id, describeError(e));
+        this.groupErrors.set(g.id, this.noteError(e));
       }
     }
     // Keep this browser's pre-key published and fresh (accounts from before pre-keys get one
@@ -2059,7 +2310,7 @@ export class Session {
       }
       this.syncError = undefined;
     } catch (e) {
-      this.syncError = describeError(e);
+      this.syncError = this.noteError(e);
     }
   }
 
@@ -2099,12 +2350,61 @@ export class Session {
   private async resolveDuplicates() {
     for (const c of this.conversations()) {
       if (!c.dm || !c.live) continue;
-      const active = c.rooms.map((r) => this.chat!.groups.get(r.groupId)).filter((g): g is Group => !!g && g.active);
-      if (active.length < 2) continue;
+      let active = c.rooms.map((r) => this.chat!.groups.get(r.groupId)).filter((g): g is Group => !!g && g.active);
+      if (active.length < 2) {
+        await this.rescueRetired(c);
+        continue;
+      }
       const owners = await Promise.all(active.map((g) => this.userId(g.space.split('/')[0]!)));
       if (owners.some((o) => o === undefined)) continue;
+      // Decide on fresh state: "who joined which room" changes as browsers catch up, and two
+      // browsers of the owner deciding on different views would retire both rooms.
+      if (active.some((g) => g !== this.winner(active) && this.isOwner(g))) {
+        for (const g of active) await this.syncGroup(g);
+        active = active.filter((g) => g.active);
+        if (active.length < 2) continue;
+      }
       const win = this.winner(active);
+      // What this browser wrote only in the room that goes must not be lost: copy it over first.
+      for (const g of active) if (g !== win) await this.moveOwn(g.id, win);
       for (const g of active) if (g !== win && this.isOwner(g)) await this.closeChat(g, 'moved');
+    }
+  }
+
+  /**
+   * The other side retired a duplicate room before this browser noticed there were two (it only
+   * sees it closed, or can't reach it any more): copy over what this browser wrote there. Only for a
+   * room that ended while the live room already existed, so an old chat's history never moves.
+   */
+  private async rescueRetired(c: Convo) {
+    const liveRec = this.records.get(c.live!.id);
+    if (!liveRec) return;
+    for (const r of c.rooms) {
+      if (r.groupId === c.live!.id || r.purged) continue;
+      const lostSince = this.lost.get(r.groupId)?.since;
+      const endAt = r.ended && (r.ended.how === 'moved' || r.ended.how === 'closed') ? r.ended.at : lostSince;
+      if (endAt === undefined || liveRec.createdAt > endAt) continue;
+      await this.moveOwn(r.groupId, c.live!);
+    }
+  }
+
+  /**
+   * Rule 2: send this device's texts from a retired room again in the room that stays, once each.
+   * The copy names the original, so apps that have the original (the sender's other browsers, and
+   * the peer if it read the old room) don't show it twice. Files can't move: their data lives in
+   * the old repo.
+   */
+  private async moveOwn(fromId: string, to: Group) {
+    const me = this.identity?.deviceId;
+    if (!me || !to.active) return;
+    for (const m of await this.messages(fromId)) {
+      if (m.kind !== 'text' || m.deleted || m.movedTo || m.fromDevice !== me || m.body === undefined) continue;
+      try {
+        const sent = await to.send({ t: 'text', body: m.body, moved: m.movedFrom ?? m.id } as AppContent);
+        await this.put({ ...m, movedTo: sent.id });
+      } catch {
+        return; // next sync step tries again
+      }
     }
   }
 

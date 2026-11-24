@@ -151,7 +151,7 @@ function ChatRow({ session, c, active }: { session: Session; c: Convo; active: b
   const pending = c.live ? session.pending(c.live) : [];
   const waiting = c.dm && pending.length > 0;
   const preview = c.lastText
-    ?? (!c.live ? (last.ended ? endedText(session, last.ended, c.dm) : 'No longer available')
+    ?? (!c.live ? (c.unreachable ? 'Can\u2019t reach this chat. Retrying…' : last.ended ? endedText(session, last.ended, c.dm) : 'No longer available')
       : waiting ? 'Invitation sent' : c.rooms.some((r) => r.joinedAt && !((r.clearedAt ?? 0) >= r.joinedAt)) ? EARLIER_ELSEWHERE : 'No messages yet');
   return (
     <li className={`chat-row${active ? ' active' : ''}`}>
@@ -161,7 +161,7 @@ function ChatRow({ session, c, active }: { session: Session; c: Convo; active: b
           <span className="name">
             <span>{c.title}</span>
             {!c.dm && g && <span className="count">{session.joinedMembers(g).length}</span>}
-            {!c.live && <span className="label">Ended</span>}
+            {!c.live && <span className="label">{c.unreachable ? 'Can\u2019t reach' : 'Ended'}</span>}
           </span>
           <span className="preview">{busyLabel ?? preview}</span>
         </span>
