@@ -1362,6 +1362,7 @@ export class Session {
         existing = this.liveDm(address);
         if (existing) return existing.key;
         t.step(`Finding @${login} on GitHub`);
+        await this.ensurePublished();
         if (!(await this.userExists(login))) throw new Error(`No GitHub user named ${login}`);
         // Rooms that are only unavailable get replaced now: their secrets can go.
         for (const c of this.conversations()) {
@@ -1395,7 +1396,7 @@ export class Session {
       [...(logins.length ? ['Checking usernames'] : []), ...NEW_ROOM, ...(logins.length ? [inviteLabel(logins)] : [])],
       async (t) => {
         // Side by side: each lookup is a GitHub round trip.
-        const exists = await Promise.all(logins.map((l) => this.userExists(l)));
+        const [exists] = await Promise.all([Promise.all(logins.map((l) => this.userExists(l))), logins.length ? this.ensurePublished() : undefined]);
         const missing = logins.find((_, i) => !exists[i]);
         if (missing) throw new Error(`No GitHub user named ${missing}`);
         const g = await this.chat!.createGroup('group', name.trim() || undefined);
@@ -1419,11 +1420,29 @@ export class Session {
   async invite(g: Group, input: string, onStart?: (a: Activity) => void) {
     const login = this.normLogin(input);
     await this.activities.run(`Inviting @${login}`, [`Finding @${login} on GitHub`, `Inviting @${login}`], async (t) => {
+      await this.ensurePublished();
       if (!(await this.userExists(login))) throw new Error(`No GitHub user named ${login}`);
       t.step(`Inviting @${login}`);
       const [failed] = await this.inviteNow(g, [login]);
       if (failed) throw new Error(failed.replace(/^[^:]+: /, ''));
     }, { key: this.convoKey(this.record(g.id)), space: g.space, onStart });
+  }
+
+  private publishedAt = 0;
+  /**
+   * Invitees' apps accept a Welcome only from a device in the inviter's published directory, so
+   * an invitation from a browser missing there (its identity unpublished, or this browser
+   * removed) would never let them in. Fail here, where the person sees it. Checked every 10 min.
+   */
+  private async ensurePublished() {
+    if (Date.now() - this.publishedAt < 10 * 60_000) return;
+    const dir = await verifyDirectory(await this.provider.directory.read(this.address));
+    const me = this.identity!;
+    const listed = !!dir && dir.fingerprint === me.fingerprint && [...dir.devices.values()].some((c) => c.deviceId === me.deviceId && c.device === me.cert.device) && !dir.revoked.has(me.cert.device);
+    if (!listed) {
+      throw new Error(dir ? 'This browser was removed from your identity, so people you invite could not join. Set it up again from Account and devices.' : 'Your identity is not published on GitHub, so people you invite could not join. Reload the app to set it up again.');
+    }
+    this.publishedAt = Date.now();
   }
 
   /** What the invitee may read before accepting: kind, group name, how many are in it. */

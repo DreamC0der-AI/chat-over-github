@@ -106,3 +106,13 @@ describe('synced store writes', () => {
     open.mockRestore();
   });
 });
+
+describe('rate-limit errors from the provider', () => {
+  it("the pause length comes from the provider's RateLimitError (seconds)", async () => {
+    const { RateLimitError } = await import('chat-over-github-provider');
+    const { retryAfterMs, isRateLimit } = await import('../src/lib/session');
+    const e = new RateLimitError('GitHub rate limit reached; try again in 120s', 120);
+    expect(isRateLimit(e)).toBe(true);
+    expect(retryAfterMs(e)).toBe(120_000);
+  });
+});
