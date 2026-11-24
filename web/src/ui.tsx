@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { CONFIG } from './config';
 import type { Session } from './lib/session';
+import { useNewVersion } from './lib/update-check';
 
 export function useSession(s: Session) {
   useSyncExternalStore(s.subscribe, s.getVersion);
@@ -105,6 +106,9 @@ export const Icon = {
   file: (s = 20) => (
     <svg width={s} height={s} viewBox="0 0 24 24" {...P} aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" /><path d="M14 3v5h5" /></svg>
   ),
+  refresh: (s = 16) => (
+    <svg width={s} height={s} viewBox="0 0 24 24" {...P} strokeWidth={2.4} aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66" /><path d="M20 4v4.5h-4.5" /></svg>
+  ),
   alert: (s = 16) => (
     <svg width={s} height={s} viewBox="0 0 24 24" {...P} strokeWidth={2.4} aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7.5v5M12 16h.01" /></svg>
   ),
@@ -154,6 +158,60 @@ export function Modal({ title, onClose, children }: { title: string; onClose: ()
       </div>
     </div>
   );
+}
+
+/**
+ * The app's status notices, all in one place: above the message box in a chat, else floating at
+ * the bottom. A newer build comes first; a sync problem (it retries by itself) next.
+ */
+let composers = 0;
+const composerListeners = new Set<() => void>();
+const composerCount = (n: number) => {
+  composers += n;
+  composerListeners.forEach((l) => l());
+};
+
+export function Notices({ sync }: { sync?: string }) {
+  // Registers this message box's spot, so the floating copy (FloatingNotices) stands down.
+  useEffect(() => {
+    composerCount(1);
+    return () => composerCount(-1);
+  }, []);
+  return <NoticeList sync={sync} />;
+}
+
+function NoticeList({ sync }: { sync?: string }) {
+  const newer = useNewVersion();
+  if (newer) {
+    return (
+      <div className="notice info" role="status">
+        <span className="notice-icon">{Icon.refresh()}</span>
+        <span className="notice-text">New version available</span>
+        <button className="btn primary small" onClick={() => location.reload()}>Reload</button>
+      </div>
+    );
+  }
+  if (!sync) return null;
+  return (
+    <div className="notice warn" role="status">
+      <span className="notice-icon">{Icon.alert()}</span>
+      <span className="notice-text">{sync}</span>
+    </div>
+  );
+}
+
+/** Notices where no chat's message box is on screen (chat list, settings, an ended chat). */
+export function FloatingNotices() {
+  const n = useSyncExternalStore(
+    (l) => {
+      composerListeners.add(l);
+      return () => composerListeners.delete(l);
+    },
+    () => composers,
+  );
+  const newer = useNewVersion();
+  if (n > 0 || !newer) return null;
+  return <div className="notice-float"><NoticeList /></div>;
 }
 
 export function ErrorFlash({ error }: { error?: string }) {

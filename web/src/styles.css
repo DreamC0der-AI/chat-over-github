@@ -684,5 +684,13 @@ body.resizing iframe, body.resizing img { pointer-events: none; }
 .progress-time { flex: none; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 
-/* a newer build is live: ask this tab to reload */
-.new-version { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 65; display: flex; align-items: center; gap: 12px; padding: 6px 6px 6px 14px; border-radius: 999px; background: var(--tip-bg); color: var(--tip-fg); font-size: 13px; box-shadow: var(--shadow-md); white-space: nowrap; }
+/* status notices (new version, sync problem): above the message box, else floating at the bottom */
+.notice { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 6px 6px 6px 14px; border-radius: var(--r-lg); font-size: 13px; color: var(--fg); }
+.notice .notice-icon { display: inline-flex; flex: none; }
+.notice .notice-text { flex: 1; min-width: 0; padding: 4px 0; }
+.notice.info { background: var(--accent-bg); }
+.notice.info .notice-icon { color: var(--accent); }
+.notice.warn { background: var(--attention-bg); padding-right: 14px; }
+.notice.warn .notice-icon { color: var(--attention); }
+.notice-float { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 65; width: min(420px, calc(100vw - 32px)); border-radius: var(--r-lg); background: var(--canvas); box-shadow: var(--shadow-md); }
+@media (max-width: 760px) { .notice-float { bottom: 76px; } } /* clear of the account bar under the chat list */

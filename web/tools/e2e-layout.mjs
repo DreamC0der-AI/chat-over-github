@@ -53,6 +53,16 @@ try {
   await alice.page.locator('#composer').press('Enter');
   await alice.page.waitForTimeout(1500);
 
+  // ---- status notices sit above the message box when a chat is open (none floating)
+  await alice.page.route(BASE, (r) => r.request().resourceType() === 'fetch' ? r.fulfill({ contentType: 'text/html', body: '<script type="module" src="/assets/index-Newer123.js"></script>' }) : r.continue());
+  await alice.page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await alice.page.locator('.composer .notice.info').waitFor({ timeout: 5000 });
+  check((await alice.page.locator('.notice-float').count()) === 0, 'in a chat, "New version" sits above the message box, not floating');
+  await alice.page.screenshot({ path: `${SHOTS}/notice-new-version-chat.png` });
+  await alice.page.unroute(BASE);
+  await alice.page.reload();
+  await alice.page.locator('#composer').waitFor();
+
   // ---- chat list width
   const p = alice;
   check(Math.round(await sideW(p)) === 320, 'chat list starts at 320 px');
@@ -163,7 +173,7 @@ try {
   await ph.page.screenshot({ path: `${SHOTS}/phone-settings-dimmed.png` });
 
   // ---- a newer build on the server: the tab offers a reload
-  const nv = ph.page.locator('.new-version');
+  const nv = ph.page.locator('.notice.info');
   check(!(await nv.isVisible()), 'no "New version" while the build is current');
   await ph.page.route(BASE, (r) => r.request().resourceType() === 'fetch' ? r.fulfill({ contentType: 'text/html', body: '<script type="module" src="/assets/index-Newer123.js"></script>' }) : r.continue());
   await ph.page.evaluate(() => window.dispatchEvent(new Event('focus')));
