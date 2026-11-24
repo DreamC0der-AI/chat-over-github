@@ -9,7 +9,7 @@ const QUIT_ASK = { title: 'Quit this chat?', body: 'You stop receiving messages.
 /** The "…" button of a chat: info, verify, delete, close or quit, block. Used in the chat list and the chat header. */
 export function ChatMenu({ session, convo, className }: { session: Session; convo: Convo; className?: string }) {
   const [info, setInfo] = useState(false);
-  const [verify, setVerify] = useState<string>();
+  const [verify, setVerify] = useState<{ address: string; fingerprint?: string }>();
   const dm = convo.dm;
   const live = convo.live;
   const peer = convo.peer;
@@ -26,7 +26,7 @@ export function ChatMenu({ session, convo, className }: { session: Session; conv
           return (
             <>
               <MenuItem icon={dm ? Icon.info() : Icon.people()} onClick={pick(() => setInfo(true))}>{dm ? 'Chat info' : 'Members'}</MenuItem>
-              {dm && peer && <MenuItem icon={Icon.shield(true, 16)} onClick={pick(() => setVerify(peer))}>Safety number</MenuItem>}
+              {dm && peer && <MenuItem icon={Icon.shield(true, 16)} onClick={pick(() => setVerify({ address: peer, fingerprint: (convo.live ?? convo.current)?.members().find((m) => m.address === peer && !m.pending)?.fingerprint }))}>Safety number</MenuItem>}
               <div className="menu-sep" role="separator" />
               <MenuItem icon={Icon.trash()} disabled={busy} onClick={pick(() => act(async () => {
                 if (!(await ask(deleteAsk(dm ? convo.title : undefined)))) return;
@@ -51,14 +51,14 @@ export function ChatMenu({ session, convo, className }: { session: Session; conv
           );
         }}
       </Menu>
-      {info && <ChatInfo session={session} convo={convo} onClose={() => setInfo(false)} onVerify={(a) => { setInfo(false); setVerify(a); }} />}
-      {verify && <VerifyModal session={session} address={verify} onClose={() => setVerify(undefined)} />}
+      {info && <ChatInfo session={session} convo={convo} onClose={() => setInfo(false)} onVerify={(a, fp) => { setInfo(false); setVerify({ address: a, fingerprint: fp }); }} />}
+      {verify && <VerifyModal session={session} address={verify.address} fingerprint={verify.fingerprint} onClose={() => setVerify(undefined)} />}
     </>
   );
 }
 
 /** Who is in the chat and where it is stored. Admins of a group rename, invite and remove here. */
-function ChatInfo({ session, convo, onClose, onVerify }: { session: Session; convo: Convo; onClose: () => void; onVerify: (a: string) => void }) {
+function ChatInfo({ session, convo, onClose, onVerify }: { session: Session; convo: Convo; onClose: () => void; onVerify: (address: string, fingerprint: string) => void }) {
   const dm = convo.dm;
   const live = convo.live;
   const group = live ?? convo.current;
@@ -89,10 +89,11 @@ function ChatInfo({ session, convo, onClose, onVerify }: { session: Session; con
                 <div className="member-name">
                   <strong>{login}</strong>{me && <span className="muted">you</span>}
                   {m.admin && !dm && <span className="label blue">Admin</span>}
+                  {session.keyMismatch(m) && <span className="label red" title="The key this member uses here is not the one you trust for them. Their messages may not be from them.">Key doesn’t match</span>}
                 </div>
                 <div className="small muted">{m.devices.length} {m.devices.length === 1 ? 'device' : 'devices'}</div>
               </div>
-              {!me && <button className="btn" onClick={() => onVerify(m.address)}>Verify</button>}
+              {!me && <button className="btn" onClick={() => onVerify(m.address, m.fingerprint)}>Verify</button>}
               {!me && !dm && iAmAdmin && live && (
                 <button className="btn danger" disabled={busy} onClick={() => run(async () => {
                   if (await ask({ title: `Remove ${login}?`, body: 'Keys rotate right away, so they can\'t read new messages.', confirm: 'Remove', danger: true })) await session.removeMember(live, m.fingerprint);
@@ -131,26 +132,36 @@ function ChatInfo({ session, convo, onClose, onVerify }: { session: Session; con
   );
 }
 
-export function VerifyModal({ session, address, onClose }: { session: Session; address: string; onClose: () => void }) {
+export function VerifyModal({ session, address, fingerprint, onClose }: { session: Session; address: string; fingerprint?: string; onClose: () => void }) {
   return (
     <Modal title={`Verify ${loginFrom(address)}`} onClose={onClose}>
-      <VerifyPanel session={session} address={address} />
+      <VerifyPanel session={session} address={address} fingerprint={fingerprint} />
     </Modal>
   );
 }
 
 /** Safety number and the verify or accept-new-key button. In the verify dialog and on a contact. */
-export function VerifyPanel({ session, address }: { session: Session; address: string }) {
+/** `fingerprint`: the key their leaf in a chat carries; it is what gets compared when given. */
+export function VerifyPanel({ session, address, fingerprint }: { session: Session; address: string; fingerprint?: string }) {
   const [p, setP] = useState<PeerInfo>();
   const { busy, error, run } = useAction();
   const login = loginFrom(address);
   const v = session.getVersion();
   useEffect(() => {
-    void session.peer(address, true).then(setP);
-  }, [address, v]);
+    void session.peer(address, true, fingerprint).then(setP);
+  }, [address, fingerprint, v]);
   if (!p) return <span className="spinner" />;
   if (p.status === 'none') return <p>{login} hasn't created an identity yet.</p>;
   if (p.status === 'error') return <ErrorFlash error={p.error} />;
+  if (p.status === 'mismatch') {
+    return (
+      <>
+        <div className="flash warn">The key {login} uses in this chat is not the one published for them. Messages from it may not be from {login}. Ask them in person before you trust it.</div>
+        <p className="verify-lead">Safety number of the key in this chat:</p>
+        <div className="safety">{p.safety?.split(' ').map((g, i) => <span key={i}>{g}</span>)}</div>
+      </>
+    );
+  }
   return (
     <>
       {p.status === 'key-changed' && (

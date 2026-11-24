@@ -257,7 +257,8 @@ export interface Person {
 
 export interface PeerInfo {
   address: string;
-  status: LookupResult['status'] | 'error';
+  /** mismatch: the key they use in this chat is not the one published (and trusted) for them. */
+  status: LookupResult['status'] | 'error' | 'mismatch';
   fingerprint?: string;
   safety?: string;
   verified?: boolean;
@@ -1840,9 +1841,12 @@ export class Session {
       if (pending) this.markSent(g.id, pending, msg.id);
     }
     if (msg.t === 'sys.close') {
-      // Only the repo owner can end the room.
+      // Only the repo owner can end the room, under the key this account trusts for them: a
+      // member's device that only claims the owner's address can't.
       const owner = toAddress(g.space.split('/')[0]!.toLowerCase());
-      if (!mine && m.from.address === owner) this.toEnd.set(g.id, { how: msg.reason === 'moved' ? 'moved' : 'closed', by: owner, at: msg.ts });
+      if (!mine && m.from.address === owner && m.from.fingerprint === (await this.trustedKey(owner))) {
+        this.toEnd.set(g.id, { how: msg.reason === 'moved' ? 'moved' : 'closed', by: owner, at: msg.ts });
+      }
       return;
     }
     if (r.purged) return;
@@ -2643,7 +2647,34 @@ export class Session {
     return [...by.values()].sort((x, y) => x.login.localeCompare(y.login));
   }
 
-  peer(address: string, refresh = false): Promise<PeerInfo> {
+  /**
+   * The root key this account trusts for an address: its pin (this browser's, else the synced
+   * one), or what the directory serves on first contact (which pins it).
+   */
+  async trustedKey(address: string): Promise<string | undefined> {
+    if (address === this.address) return this.identity?.fingerprint;
+    const pinned = this.contacts.pinned(address);
+    if (pinned) return pinned;
+    try {
+      const r = await this.registry.lookup(address);
+      return r.status === 'none' ? undefined : r.status === 'key-changed' ? r.pinned.fingerprint : r.view.fingerprint;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** A member whose key in the chat differs from the one this account trusts for their address. */
+  keyMismatch(m: { address: string; fingerprint: string }): boolean {
+    const want = m.address === this.address ? this.identity?.fingerprint : this.contacts.pinned(m.address);
+    return !!want && want !== m.fingerprint;
+  }
+
+  /**
+   * What to show when verifying someone. `inChat`: the root key their leaf in a chat carries
+   * (Member.fingerprint), which is what must be compared, not a fresh look at their address.
+   */
+  peer(address: string, refresh = false, inChat?: string): Promise<PeerInfo> {
+    if (inChat) return this.lookupPeer(address, inChat);
     if (refresh) this.peers.delete(address);
     let p = this.peers.get(address);
     if (!p) {
@@ -2653,9 +2684,13 @@ export class Session {
     return p;
   }
 
-  private async lookupPeer(address: string): Promise<PeerInfo> {
+  private async lookupPeer(address: string, inChat?: string): Promise<PeerInfo> {
     try {
       const r = await this.registry.lookup(address);
+      // The key in the chat is neither the published one nor (after a change) the one to accept.
+      if (inChat && (r.status === 'none' || inChat !== r.view.fingerprint)) {
+        return { address, status: 'mismatch', fingerprint: inChat, safety: await safetyNumber(this.identity!.fingerprint, inChat) };
+      }
       if (r.status === 'none') return { address, status: 'none' };
       const fp = r.view.fingerprint;
       const pin = await this.registry.pins.get(address);

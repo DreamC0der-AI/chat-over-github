@@ -61,6 +61,9 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
   const live = convo.live;
   const group = live ?? convo.current;
   const peerAddr = convo.peer;
+  // The key the other person's leaf carries here, compared with the one this account trusts for them.
+  const peerKey = dm ? group?.members().find((m) => m.address === peerAddr && !m.pending) : undefined;
+  const forged = !!peerKey && session.keyMismatch(peerKey);
   const title = convo.title;
   const listRef = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
@@ -147,7 +150,13 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
           <ChatMenu session={session} convo={convo} />
         </div>
       </div>
-      {peer?.status === 'key-changed' && (
+      {forged && (
+        <div className="flash warn banner">
+          <span><strong>The key {title} uses in this chat is not the one you trust for them.</strong> <Hint text="Their messages here may not be from them. Compare safety numbers in person." /></span>
+          <button className="btn" onClick={() => setVerify(peerAddr)}>Review</button>
+        </div>
+      )}
+      {!forged && peer?.status === 'key-changed' && (
         <div className="flash warn banner">
           <span><strong>{loginFrom(peer.address)}'s identity key changed.</strong> <Hint text="They may have a new device or reset their account, or someone may be impersonating them. Compare safety numbers before you trust it." /></span>
           <button className="btn" onClick={() => setVerify(peer.address)}>Review</button>
@@ -230,7 +239,7 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
         <div className="composer ended">This chat has ended</div>
       )}
       {viewing && <Lightbox v={viewing} onClose={() => setViewing(undefined)} />}
-      {verify && <VerifyModal session={session} address={verify} onClose={() => setVerify(undefined)} />}
+      {verify && <VerifyModal session={session} address={verify} fingerprint={verify === peerAddr ? peerKey?.fingerprint : undefined} onClose={() => setVerify(undefined)} />}
     </>
   );
 }
