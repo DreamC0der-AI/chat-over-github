@@ -175,14 +175,21 @@ try {
   // finish before a poll sees it, and a missed transient state made this step flaky.
   let releaseUpload;
   const uploadHeld = new Promise((r) => (releaseUpload = r));
-  const holdUpload = async (route) => {
-    if (route.request().method() === 'PUT') await uploadHeld;
-    await route.continue();
+  const inFlight = [];
+  const holdUpload = (route) => {
+    const done = (async () => {
+      if (route.request().method() === 'PUT') await uploadHeld;
+      await route.continue();
+    })();
+    inFlight.push(done);
+    return done;
   };
   await alice.page.route(/\/contents\/blob\//, holdUpload);
   await alice.page.locator('#composer').press('Enter');
   const pendingShown = await alice.page.locator('.media.pending img').waitFor({ timeout: 5000 }).then(() => true, () => false);
   releaseUpload();
+  // Let held requests go on before removing the handler, or Playwright reports them handled twice.
+  await Promise.all(inFlight);
   await alice.page.unroute(/\/contents\/blob\//, holdUpload);
   check(pendingShown, 'sent picture shows at once with an upload state');
   await alice.page.locator('.msg.mine .media img[alt="photo.png"]').waitFor({ timeout: 30000 });
