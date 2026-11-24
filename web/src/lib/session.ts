@@ -39,6 +39,8 @@ import { currentToken, SignedOutError, type AuthState } from './auth';
 import { Activities, instrument, type Activity, type PlanStep, type Tracker } from './activity';
 import { InboxSocket } from './inbox-socket';
 import { Db, idbDevice } from './idb';
+import { WorkGate } from './tab-lock';
+import { servedType } from './mime';
 import { ContactBook } from './contacts';
 
 export type Phase = 'loading' | 'install' | 'new-identity' | 'restore' | 'ready' | 'error';
@@ -323,6 +325,13 @@ export class Session {
   private version = 0;
   private listeners = new Set<() => void>();
   private stopped = false;
+  /** This tab's work in progress (GitHub calls, IndexedDB), so a stop can wait for it to finish. */
+  private gate = new WorkGate();
+  private gated = false;
+  /** The sync loop, while it runs. */
+  private looping?: Promise<void>;
+  /** Set by stop(): resolves once the work running at the stop has finished. */
+  private quiescing?: Promise<boolean>;
   private lastCheck = new Map<string, number>();
   private etags = new Map<string, string>();
   private lastInvites = 0;
@@ -414,8 +423,25 @@ export class Session {
   // ---- start-up ----
 
   async start() {
+    // Every GitHub and Worker call goes through the gate, so a stop can wait for them and a
+    // hand-over to another tab can keep this one from starting new ones.
+    if (!this.gated) {
+      this.gated = true;
+      const ghFetch = this.ghFetch;
+      this.ghFetch = (url, init) => this.gate.track(async () => readFully(await ghFetch(url, init)));
+    }
     try {
-      this.db = await Db.open(`keyhold-chat:${this.auth.id}`, this.env.indexedDB);
+      this.db = await Db.open(`keyhold-chat:${this.auth.id}`, this.env.indexedDB, {
+        gate: this.gate,
+        onVersionChange: () => {
+          // Another tab upgrades or deletes this browser's data: this one must not write any more.
+          this.gate.fence();
+          this.stop();
+          this.phase = 'error';
+          this.error = 'Reload to continue.';
+          this.bump();
+        },
+      });
       this.device = idbDevice(this.db);
       await this.decidePhase();
     } catch (e) {
@@ -673,6 +699,11 @@ export class Session {
   // ---- chats ----
 
   private async openChat() {
+    // Reopened after a stop (the install came back): the old chat's work must be over first, or
+    // its groups and the new ones would both use the same keys.
+    if (this.quiescing) await this.quiescing;
+    this.quiescing = undefined;
+    if (this.gate.isFenced) return;
     this.stopped = false;
     this.chat = await Chat.open({
       provider: this.provider,
@@ -728,7 +759,7 @@ export class Session {
     }
     globalThis.addEventListener?.('online', this.onWake);
     document.addEventListener('visibilitychange', this.onWake);
-    void this.loop();
+    this.looping = this.loop();
   }
 
   /**
@@ -1522,7 +1553,7 @@ export class Session {
   fetchFile(g: Group, file: AttachmentRef): Promise<Blob> {
     let p = this.files.get(file.ref);
     if (!p) {
-      p = g.fetchAttachment(file).then((data) => new Blob([data as Uint8Array<ArrayBuffer>], { type: file.mime || 'application/octet-stream' }));
+      p = g.fetchAttachment(file).then((data) => new Blob([data as Uint8Array<ArrayBuffer>], { type: servedType(file.mime) }));
       p.catch(() => this.files.delete(file.ref));
       this.files.set(file.ref, p);
     }
@@ -1976,6 +2007,7 @@ export class Session {
       // Someone asked for another step while this one ran: run it now, don't wait for the timer.
       if (this.afterTick.length) continue;
       await new Promise<void>((resolve) => {
+        if (this.stopped) return resolve(); // stopped during the step: end now, not after the timer
         const t = setTimeout(resolve, LOOP_MS);
         this.kick = () => {
           clearTimeout(t);
@@ -2108,12 +2140,31 @@ export class Session {
     }
   }
 
-  stop() {
-    this.stopped = true;
-    globalThis.removeEventListener?.('online', this.onWake);
-    document.removeEventListener('visibilitychange', this.onWake);
-    this.inbox?.stop();
-    this.kick?.();
+  /**
+   * Start no new work. Resolves true once the work already running (a send, a commit, a sync step
+   * waiting on GitHub) has finished, false if it didn't within the time limit.
+   */
+  stop(): Promise<boolean> {
+    if (!this.stopped || !this.quiescing) {
+      this.stopped = true;
+      globalThis.removeEventListener?.('online', this.onWake);
+      document.removeEventListener('visibilitychange', this.onWake);
+      this.inbox?.stop();
+      this.kick?.();
+      this.quiescing = this.gate.idle(this.looping);
+    }
+    return this.quiescing;
+  }
+
+  /**
+   * Another tab takes over: stop, let the running work finish, then never call GitHub or write
+   * IndexedDB again. Resolves when the other tab may start (false: work was cut off at the time limit).
+   */
+  async handOver(): Promise<boolean> {
+    const clean = await this.stop();
+    this.gate.fence();
+    this.db?.close();
+    return clean;
   }
 
   // ---- people ----
@@ -2202,6 +2253,13 @@ export class Session {
 }
 
 export { sleep };
+
+/** The response with its body already read, so a call counts as running until its answer is in. */
+async function readFully(r: Response): Promise<Response> {
+  const empty = [101, 204, 205, 304].includes(r.status);
+  const body = empty ? null : await r.arrayBuffer();
+  return new Response(body, { status: r.status, statusText: r.statusText, headers: r.headers });
+}
 
 function fromB64(s: string): Uint8Array {
   const bin = atob(s);
