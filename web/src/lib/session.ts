@@ -916,6 +916,12 @@ export class Session {
       const p = this.dmPeer(g);
       if (p && r.peer !== p) { r.peer = p; changed = true; }
     } else if (g.name && r.lastName !== g.name) { r.lastName = g.name; changed = true; }
+    else if (!g.name && !r.lastName) {
+      // A new member learns the name only from a message an admin sends once they see the join.
+      // Until then, use the name from the invitation note.
+      const noted = [...this.invites.values()].find((i) => i.space === g.space && i.details?.kind === 'group')?.details?.name;
+      if (noted) { r.lastName = noted; changed = true; }
+    }
     if (changed) void this.saveRecord(r);
     return r;
   }
@@ -1056,7 +1062,7 @@ export class Session {
       const p = this.dmPeer(g);
       return p ? loginFrom(p) : 'Direct message';
     }
-    return g.name || 'Untitled group';
+    return g.name || this.records.get(g.id)?.lastName || 'Untitled group';
   }
 
   /** People invited who haven't joined yet (added with pre-keys, or only invited). */
@@ -1750,8 +1756,8 @@ export class Session {
       try {
         const g = await chat.join(inv.space);
         if (g) {
+          const r = this.fill(g); // while the invitation (and its note) is still known
           this.invites.delete(inv.key);
-          const r = this.fill(g);
           this.activities.stepFor(inv.key, JOIN_LOAD);
           const a = this.activities.forKey(inv.key);
           if (a && !a.ended) a.link = `/c/${encodeURIComponent(this.convoKey(r))}`;

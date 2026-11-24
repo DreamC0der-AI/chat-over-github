@@ -54,12 +54,16 @@ describe('progress and invitation details', () => {
 
     // Accepting is tracked too, step by step, and ends with the chat open.
     const inv = bob.inviteFrom('alice')!;
+    // From the moment the chat appears it has its name, before any admin repeats it in a message.
+    const titles = new Set<string>();
+    bob.s.subscribe(() => { for (const c of bob.chats()) titles.add(c.title); });
     let joining: Activity | undefined;
     const joinSeen = watch(() => (joining ??= bob.s.activities.all().find((a) => a.title === 'Joining Weekend hikers')), (fn) => bob.s.subscribe(fn));
     await bob.s.acceptInvite(inv.key);
     expect(joinSeen.steps).toEqual(['Accepting the GitHub invitation', 'Finding the chat', 'Unlocking the encryption', 'Loading messages']);
     expect(joining!.error).toBeUndefined();
     expect(bob.chat('Weekend hikers')?.live).toBeTruthy();
+    expect([...titles]).toEqual(['Weekend hikers']);
   });
 
   it('a DM invitation says it is a direct chat; a failed step shows where it stopped', async () => {
