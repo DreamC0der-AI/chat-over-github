@@ -308,6 +308,12 @@ const PREKEY_CHECK_MS = at(10 * 60_000);
 /** A chat GitHub refuses us (maybe for a moment) is tried again after this, then less and less often. */
 const LOST_RETRY_MS = at(60_000);
 const LOST_RETRY_MAX_MS = at(30 * 60_000);
+/**
+ * An own chat repo with nothing in it (a creation that stopped before its first log entry, on a
+ * browser that won't finish it) is deleted once it has looked empty this long. Real time: another
+ * browser making a chat fills its repo within seconds.
+ */
+const ORPHAN_MS = 10 * 60_000;
 /** A rate limit without a stated wait pauses syncing this long. */
 const RATE_PAUSE_MS = at(60_000);
 
@@ -802,6 +808,8 @@ export class Session {
       registry: this.registry,
       features: resolveFeatures(this.provider, { historyBackup: false, preKeys: true }),
       onMessage: (g, m) => this.onMessage(g, m),
+      // Read the clock on each call (keyhold's default keeps the function it found at load).
+      now: () => Date.now(),
     });
     for (const k of await this.db.keys('kv', 'chat:')) {
       const r = await this.db.get<ChatRecord>('kv', k);
@@ -2062,10 +2070,18 @@ export class Session {
       // Rooms that ended for us (quit, removed, declined, deleted): not offered again by themselves,
       // but an invitation accepted since can be for one of them (invited back).
       const retired: string[] = [];
+      // Chats this browser started that stopped part way (the tab closed, GitHub failed): finish them.
+      for (const g of await chat.finishCreates().catch(() => [] as Group[])) await this.finishedCreate(g);
       for (const space of await p.channel.listSpaces()) {
         const liveRec = [...this.records.values()].some((r) => r.space === space && !r.ended && !r.purged);
-        if (this.invites.has(space)) continue;
         const g = [...chat.groups.values()].find((x) => x.space === space);
+        // Our own repo that no chat here knows: being made here, a chat to catch up on, or left empty.
+        if (!g && space.split('/')[0]!.toLowerCase() === this.login && ![...this.records.values()].some((r) => r.space === space) && !(await this.ownRepoInUse(space))) {
+          const inv = this.invites.get(space);
+          if (inv && inv.status !== 'invited') this.invites.delete(space);
+          continue;
+        }
+        if (this.invites.has(space)) continue;
         if (g && !this.isUnreachable(g)) continue;
         if (g || (this.declined.has(space) && !liveRec) || [...this.records.values()].some((r) => r.space === space && r.ended)) {
           retired.push(space);
@@ -2155,6 +2171,48 @@ export class Session {
       inv.nextTry = Date.now() + Math.min(INVITE_RETRY_MS * 2 ** Math.min(inv.attempts - 1, 5), INVITE_RETRY_MAX_MS);
     }
     this.bump();
+  }
+
+  /**
+   * One of our repos no chat here knows: is it a chat (catch up on it), or is it a creation still
+   * running here or left empty? An empty one is deleted after ORPHAN_MS, counted from when this
+   * browser first saw it empty, so older leftovers go too.
+   */
+  private async ownRepoInUse(space: string): Promise<boolean> {
+    let state: Awaited<ReturnType<Chat['inspectSpace']>>;
+    try {
+      state = await this.chat!.inspectSpace(space);
+    } catch {
+      return true; // can't tell now: treat it as before
+    }
+    const key = `orphan:${space}`;
+    if (state === 'chat') {
+      await this.db.del('kv', key);
+      return true;
+    }
+    if (state === 'creating') return false;
+    const since = await this.db.get<number>('kv', key);
+    if (since === undefined) {
+      await this.db.put('kv', Date.now(), key);
+      return false;
+    }
+    if (Date.now() - since < ORPHAN_MS) return false;
+    const r = await this.ghFetch(`${CONFIG.api}/repos/${space}`, { method: 'DELETE', headers: { Accept: 'application/vnd.github+json' } });
+    if (r.status === 204 || r.status === 404) await this.db.del('kv', key);
+    return false;
+  }
+
+  /** A creation finished by keyhold after it had stopped part way. */
+  private async finishedCreate(g: Group) {
+    const r = this.fill(g);
+    // A DM whose invitation never went out has nobody to talk to: retire it quietly.
+    if (this.isDm(g) && !r.invited.length && !g.members().some((m) => m.address !== this.address)) {
+      await this.closeChat(g).catch(() => undefined);
+      r.hidden = true;
+      await this.saveRecord(r);
+      return;
+    }
+    await this.syncGroup(g);
   }
 
   /** I invited them to a DM and they haven't joined yet. */
