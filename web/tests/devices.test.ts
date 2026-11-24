@@ -26,6 +26,7 @@ describe('two browsers of one account', () => {
 
     await bob.s.send(bob.chat('alice')!.live!, 'for both browsers');
     await w.until(async () => (await alice2.texts(alice2.chat('bob'))).includes('for both browsers') && (await alice.texts(alice.chat('bob'))).includes('for both browsers'), 'both browsers get it');
+  await w.checkConverged();
   });
 
   it('messages sent back to back reach both browsers of the receiver, none undecryptable', async () => {
@@ -46,6 +47,7 @@ describe('two browsers of one account', () => {
     const all = async (b: typeof alice) => (await b.texts(b.chat('bob'))).filter((t) => ['one', 'two', 'three'].includes(t)).length === 3;
     await w.until(async () => (await all(alice)) && (await all(alice2)), 'both browsers have all three');
     for (const b of [alice, alice2]) expect((await b.notes(b.chat('bob'))).filter((n) => n.includes('could not be decrypted'))).toEqual([]);
+  await w.checkConverged();
   });
 
   it('a burst typed quickly goes out in two writes and arrives as four messages, in order, everywhere', async () => {
@@ -118,5 +120,32 @@ describe('two browsers of one account', () => {
     expect(alice2.chat('bob')!.rooms.at(-1)!.joinedAt).toBeUndefined(); // new room: nothing earlier to miss
     await bob.s.send(bob.chat('alice')!.live!, 'new room');
     await w.until(async () => (await alice2.texts(alice2.chat('bob'))).includes('new room'), 'alice2 gets new messages');
+  });
+
+  it('read on one browser clears the unread count on the other, even if it fetches the messages after the read mark', async () => {
+    w = await world();
+    const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
+    const code = await alice.setup();
+    await bob.setup();
+    await w.dm(alice, bob);
+    const alice2 = await w.browser('alice');
+    await alice2.restore(code);
+    await w.until(() => !!alice2.chat('bob')?.live, 'alice2 joined');
+    await w.rounds(2);
+    for (const t of ['one', 'two', 'three']) await bob.s.send(bob.chat('alice')!.live!, t);
+    // Only the first browser fetches them, and reads them.
+    for (let i = 0; i < 5 && (await alice.texts(alice.chat('bob'))).length < 3; i++) await alice.sync();
+    expect(alice.chat('bob')!.unread).toBe(3);
+    alice.s.setActive(alice.chat('bob')!.key);
+    alice.s.setActive(undefined);
+    await alice.sync(2);
+    // The second browser reads the read mark first, then fetches the messages.
+    await alice2.sync(3);
+    expect(await alice2.texts(alice2.chat('bob'))).toEqual(['one', 'two', 'three']);
+    expect(alice2.chat('bob')!.unread).toBe(0);
+    // A newer message is unread again on both.
+    await bob.s.send(bob.chat('alice')!.live!, 'four');
+    await w.until(() => alice.chat('bob')!.unread === 1 && alice2.chat('bob')!.unread === 1, 'one unread on both');
+    await w.checkConverged();
   });
 });

@@ -30,5 +30,60 @@ describe('groups', () => {
     await w.until(async () => (await alice.texts(alice.chat('Weekend hikers'))).includes('after carol'), 'the group goes on');
     await w.rounds(2);
     expect(await carol.texts(carol.chat('Weekend hikers'))).not.toContain('after carol');
+  await w.checkConverged();
+  });
+
+  async function hikers() {
+    w = await world();
+    const [alice, bob, carol] = [await w.browser('alice'), await w.browser('bob'), await w.browser('carol')];
+    for (const b of [alice, bob, carol]) await b.setup();
+    await alice.s.createGroup('Hikers', ['bob', 'carol']);
+    await w.until(() => !!bob.inviteFrom('alice') && !!carol.inviteFrom('alice'), 'both see the invitation');
+    for (const b of [bob, carol]) await b.s.acceptInvite(b.inviteFrom('alice')!.key);
+    await w.until(() => !!bob.chat('Hikers')?.live && !!carol.chat('Hikers')?.live, 'both joined');
+    return { alice, bob, carol };
+  }
+
+  async function reinvite(alice: Awaited<ReturnType<typeof hikers>>['alice'], who: typeof alice) {
+    await alice.s.invite(alice.chat('Hikers')!.live!, who.login);
+    await w.until(() => !!who.inviteFrom('alice'), `${who.login} sees the new invitation`);
+    await who.s.acceptInvite(who.inviteFrom('alice')!.key);
+    await w.until(() => !!who.chat('Hikers')?.live, `${who.login} is back in`, 30);
+    await who.s.send(who.chat('Hikers')!.live!, `${who.login} is back`);
+    await w.until(async () => (await alice.texts(alice.chat('Hikers'))).includes(`${who.login} is back`), 'alice reads it');
+    await alice.s.send(alice.chat('Hikers')!.live!, `welcome back ${who.login}`);
+    await w.until(async () => (await who.texts(who.chat('Hikers'))).includes(`welcome back ${who.login}`), `${who.login} reads it`);
+    expect(who.chats().filter((c) => c.title === 'Hikers')).toHaveLength(1);
+    expect(who.invites()).toEqual([]);
+  }
+
+  it('someone who quit can be invited back and join again', async () => {
+    const { alice, bob } = await hikers();
+    await bob.s.quitChat(bob.chat('Hikers')!.live!);
+    await w.until(async () => (await alice.notes(alice.chat('Hikers'))).some((n) => n.includes('@bob left')), 'alice sees bob left');
+    await w.rounds(2);
+    await reinvite(alice, bob);
+    await w.checkConverged();
+  });
+
+  it('someone removed can be invited back and join again', async () => {
+    const { alice, carol } = await hikers();
+    const g = alice.chat('Hikers')!.live!;
+    await alice.s.removeMember(g, g.members().find((m) => m.address === 'github:carol')!.fingerprint);
+    await w.until(() => !carol.chat('Hikers')?.live, 'carol is out');
+    await w.rounds(2);
+    await reinvite(alice, carol);
+    await w.checkConverged();
+  });
+
+  it('someone who quit and deleted the chat can be invited back and join again', async () => {
+    const { alice, bob } = await hikers();
+    await bob.s.quitChat(bob.chat('Hikers')!.live!);
+    await bob.s.deleteHistory(bob.chat('Hikers')!.key);
+    expect(bob.chat('Hikers')).toBeUndefined();
+    await w.until(async () => (await alice.notes(alice.chat('Hikers'))).some((n) => n.includes('@bob left')), 'alice sees bob left');
+    await w.rounds(2);
+    await reinvite(alice, bob);
+    await w.checkConverged();
   });
 });

@@ -28,6 +28,7 @@ describe('direct messages', () => {
     await w.until(async () => (await bob.texts(bob.chat('alice'))).includes('hello bob\nsecond line'), 'bob got it');
     expect(await bob.texts(bob.chat('alice'))).toEqual(['hi alice', 'hello bob\nsecond line']);
     expect(bob.chats()).toHaveLength(1);
+    await w.checkConverged();
   });
 
   it('safety numbers match on both sides and can be marked verified', async () => {
@@ -141,5 +142,100 @@ describe('direct messages', () => {
     );
     await carol.s.send(carol.chat('bob')!.live!, 'one room for us');
     await w.until(async () => (await bob.texts(bob.chat('carol'))).includes('one room for us'), 'messages flow in it');
+    await w.checkConverged();
+  });
+
+  it("both of alice's browsers start a DM with bob at once: one live room stays, everywhere (rule 2)", async () => {
+    w = await world();
+    const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
+    const code = await alice.setup();
+    await bob.setup();
+    const alice2 = await w.browser('alice');
+    await alice2.restore(code);
+    await w.rounds(2);
+    await Promise.all([alice.s.startDm('bob'), alice2.s.startDm('bob')]);
+    // Bob takes whichever invitation shows first; the other one comes in later.
+    for (let i = 0; i < 30; i++) {
+      const inv = bob.inviteFrom('alice');
+      if (inv) await bob.s.acceptInvite(inv.key);
+      await w.rounds(1);
+    }
+    await w.until(
+      () => [alice, alice2].every((a) => a.chats().length === 1 && !!a.chat('bob')?.live && a.chat('bob')!.live!.id === bob.chat('alice')?.live?.id) && !bob.inviteFrom('alice'),
+      'one live room for all three browsers',
+      30,
+    );
+    await bob.s.send(bob.chat('alice')!.live!, 'which room?');
+    await w.until(async () => (await alice.texts(alice.chat('bob'))).includes('which room?') && (await alice2.texts(alice2.chat('bob'))).includes('which room?'), 'both of alice\'s browsers get it');
+    await w.checkConverged();
+  });
+
+  it('both start a DM at once and write at once: nothing written in the room that is retired is lost', async () => {
+    w = await world();
+    const [bob, carol] = [await w.browser('bob'), await w.browser('carol')];
+    await bob.setup();
+    await carol.setup();
+    await w.rounds(2); // pre-keys published: each is added to the other's room at once and can read it all
+    await Promise.all([bob.s.startDm('carol'), carol.s.startDm('bob')]);
+    // Each writes in their own room before seeing the other's invitation.
+    await bob.s.send(bob.chat('carol')!.live!, 'from bob, early');
+    await carol.s.send(carol.chat('bob')!.live!, 'from carol, early');
+    await w.until(
+      () => !!bob.chat('carol')?.live && bob.chat('carol')!.live!.id === carol.chat('bob')?.live?.id && bob.chat('carol')!.rooms.filter((r) => !r.ended).length === 1 && carol.chat('bob')!.rooms.filter((r) => !r.ended).length === 1,
+      'one live room on both sides',
+      30,
+    );
+    const both = async () => {
+      const [b, c] = [await bob.texts(bob.chat('carol')), await carol.texts(carol.chat('bob'))];
+      return ['from bob, early', 'from carol, early'].every((t) => b.includes(t) && c.includes(t));
+    };
+    await w.until(both, 'each sees both early messages', 30);
+    await w.rounds(3);
+    // Each shows once: the copy in the room that stays is not shown twice to anyone.
+    for (const [b, peer] of [[bob, 'carol'], [carol, 'bob']] as const) {
+      const t = await b.texts(b.chat(peer));
+      expect(t.filter((x) => x === 'from bob, early')).toHaveLength(1);
+      expect(t.filter((x) => x === 'from carol, early')).toHaveLength(1);
+    }
+    await w.checkConverged();
+  });
+
+  it("the same reaction added from two of a person's browsers stays on (it doesn't cancel out)", async () => {
+    w = await world();
+    const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
+    const code = await alice.setup();
+    await bob.setup();
+    await w.dm(alice, bob);
+    const alice2 = await w.browser('alice');
+    await alice2.restore(code);
+    await w.until(() => !!alice2.chat('bob')?.live, 'alice2 joined');
+    await bob.s.send(bob.chat('alice')!.live!, 'vote');
+    await w.until(async () => !!(await alice.msg(alice.chat('bob'), 'vote')) && !!(await alice2.msg(alice2.chat('bob'), 'vote')), 'both browsers have it');
+    const ref = (await alice.msg(alice.chat('bob'), 'vote'))!.id;
+    await Promise.all([alice.s.react(alice.chat('bob')!.live!, ref, '👍', true), alice2.s.react(alice2.chat('bob')!.live!, ref, '👍', true)]);
+    await w.rounds(4);
+    for (const b of [alice, alice2, bob]) {
+      const c = b === bob ? bob.chat('alice') : b.chat('bob');
+      expect((await b.msg(c, 'vote'))!.reactions?.['👍']).toEqual(['github:alice']);
+    }
+    // Taking it back from one browser takes it back everywhere.
+    await alice2.s.react(alice2.chat('bob')!.live!, ref, '👍', false);
+    await w.until(async () => !(await bob.msg(bob.chat('alice'), 'vote'))!.reactions?.['👍'], 'bob sees it taken back');
+    await w.until(async () => !(await alice.msg(alice.chat('bob'), 'vote'))!.reactions?.['👍'], 'alice sees it taken back');
+  });
+
+  it('a reaction from an older app (a toggle) still counts', async () => {
+    w = await world();
+    const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
+    await alice.setup();
+    await bob.setup();
+    await w.dm(alice, bob);
+    await bob.s.send(bob.chat('alice')!.live!, 'old');
+    await w.until(async () => !!(await alice.msg(alice.chat('bob'), 'old')), 'alice got it');
+    const ref = (await alice.msg(alice.chat('bob'), 'old'))!.id;
+    await alice.chat('bob')!.live!.send({ t: 'react', ref, emoji: '❤️' });
+    await w.until(async () => ((await bob.msg(bob.chat('alice'), 'old'))?.reactions?.['❤️'] ?? []).length === 1, 'bob sees it');
+    await alice.chat('bob')!.live!.send({ t: 'react', ref, emoji: '❤️' });
+    await w.until(async () => !(await bob.msg(bob.chat('alice'), 'old'))?.reactions?.['❤️'], 'the second toggle takes it back');
   });
 });
