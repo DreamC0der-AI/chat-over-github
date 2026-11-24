@@ -7,42 +7,73 @@ import type { DeviceKeystore, DeviceStorage, EphemeralKeyStore } from 'keyhold/s
 const STORES = ['keystore', 'ephemeral', 'kv', 'messages'] as const;
 type StoreName = (typeof STORES)[number];
 
-export class Db {
-  private constructor(readonly db: IDBDatabase, readonly name: string) {}
+/** How long an open or delete may wait for this app's other tabs to let go of the database. */
+const BLOCKED_MS = 5000;
+export const BLOCKED_MESSAGE = 'Chat over GitHub is open in another tab. Close it, then try again.';
 
-  /** `factory` is the browser's indexedDB; tests pass their own, one per simulated browser. */
-  static open(name: string, factory: IDBFactory = indexedDB): Promise<Db> {
-    return new Promise((resolve, reject) => {
-      const req = factory.open(name, 1);
-      req.onupgradeneeded = () => {
-        const db = req.result;
-        for (const s of STORES) {
-          if (db.objectStoreNames.contains(s)) continue;
-          if (s === 'messages') {
-            const os = db.createObjectStore(s, { keyPath: ['groupId', 'id'] });
-            os.createIndex('byGroup', ['groupId', 'ts']);
-          } else db.createObjectStore(s);
-        }
-      };
-      req.onsuccess = () => resolve(new Db(req.result, name));
-      req.onerror = () => reject(req.error);
-    });
+export interface DbOptions {
+  /** Counts and fences this tab's transactions (see WorkGate). */
+  gate?: { track<T>(fn: () => Promise<T>): Promise<T> };
+  /** Another tab is upgrading or deleting the database: this connection has been closed, reload. */
+  onVersionChange?: () => void;
+}
+
+export class Db {
+  private closed = false;
+  private constructor(readonly db: IDBDatabase, readonly name: string, private readonly opts: DbOptions = {}) {
+    // Without this, another tab's upgrade (or "Forget this browser") waits on us forever.
+    db.onversionchange = () => {
+      this.close();
+      opts.onVersionChange?.();
+    };
   }
 
+  /** `factory` is the browser's indexedDB; tests pass their own, one per simulated browser. */
+  static async open(name: string, factory: IDBFactory = indexedDB, opts: DbOptions = {}): Promise<Db> {
+    // Open whatever version is there; if a store is missing (a store added in a later build),
+    // reopen one version up so the upgrade adds it.
+    let db = await openRaw(name, factory);
+    if (STORES.some((s) => !db.objectStoreNames.contains(s))) {
+      const v = db.version + 1;
+      db.close();
+      db = await openRaw(name, factory, v);
+    }
+    return new Db(db, name, opts);
+  }
+
+  /** Delete the database; resolves only once it is gone. Rejects if another tab keeps it open. */
   static delete(name: string, factory: IDBFactory = indexedDB): Promise<void> {
     return new Promise((resolve, reject) => {
       const req = factory.deleteDatabase(name);
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
-      req.onblocked = () => resolve();
+      let t: ReturnType<typeof setTimeout> | undefined;
+      req.onsuccess = () => {
+        clearTimeout(t);
+        resolve();
+      };
+      req.onerror = () => {
+        clearTimeout(t);
+        reject(req.error);
+      };
+      // Other connections were asked to close (versionchange). Up-to-date tabs do at once; give
+      // an old one a moment, then say what to do. The delete still happens once it closes.
+      req.onblocked = () => {
+        t ??= setTimeout(() => reject(new Error(BLOCKED_MESSAGE)), BLOCKED_MS);
+      };
     });
   }
 
   close() {
+    this.closed = true;
     this.db.close();
   }
 
   private run<T>(store: StoreName, mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<T> | void): Promise<T> {
+    const go = () => this.runNow(store, mode, fn);
+    return this.opts.gate ? this.opts.gate.track(go) : go();
+  }
+
+  private runNow<T>(store: StoreName, mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<T> | void): Promise<T> {
+    if (this.closed) return Promise.reject(new Error('The local database is closed. Reload the page.'));
     return new Promise((resolve, reject) => {
       const tx = this.db.transaction(store, mode);
       const s = tx.objectStore(store);
@@ -136,6 +167,40 @@ class IdbEphemeral implements EphemeralKeyStore {
     return n;
   }
   keys(prefix?: string) { return this.db.keys('ephemeral', prefix); }
+}
+
+function openRaw(name: string, factory: IDBFactory, version?: number): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = version === undefined ? factory.open(name) : factory.open(name, version);
+    let gaveUp = false;
+    let t: ReturnType<typeof setTimeout> | undefined;
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      for (const s of STORES) {
+        if (db.objectStoreNames.contains(s)) continue;
+        if (s === 'messages') {
+          const os = db.createObjectStore(s, { keyPath: ['groupId', 'id'] });
+          os.createIndex('byGroup', ['groupId', 'ts']);
+        } else db.createObjectStore(s);
+      }
+    };
+    req.onsuccess = () => {
+      clearTimeout(t);
+      if (gaveUp) req.result.close();
+      else resolve(req.result);
+    };
+    req.onerror = () => {
+      clearTimeout(t);
+      reject(req.error);
+    };
+    // An older tab holds the database open at the old version and doesn't close it.
+    req.onblocked = () => {
+      t ??= setTimeout(() => {
+        gaveUp = true;
+        reject(new Error(BLOCKED_MESSAGE));
+      }, BLOCKED_MS);
+    };
+  });
 }
 
 export function idbDevice(db: Db): DeviceStorage {
