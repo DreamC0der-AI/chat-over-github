@@ -294,6 +294,8 @@ export function instrument(p: StorageProvider, acts: Activities): StorageProvide
         get(b, m, r) {
           const v = Reflect.get(b, m, r);
           if (typeof m !== 'string' || typeof v !== 'function') return v;
+          // Made locally (no request): nothing for the progress views.
+          if (m === 'newId') return (v as (...a: unknown[]) => unknown).bind(b);
           const op = `${prop}.${m}`;
           return (...args: unknown[]) => {
             const space = SPACED.has(prop) || (prop === 'channel' && SPACED_CHANNEL.has(m)) ? (args[0] as string) : undefined;

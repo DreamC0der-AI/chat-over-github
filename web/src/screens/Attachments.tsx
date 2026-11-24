@@ -115,7 +115,7 @@ export function PendingAttachment({ p }: { p: Sending }) {
           <span className="media-veil">{p.failed ? <span className="veil-icon">{Icon.alert(22)}</span> : <span className="ring" />}</span>
         </div>
       ) : (
-        <FileCard name={f.name} size={f.size}>{!p.failed && <span className="file-act"><span className="spinner" /></span>}</FileCard>
+        <FileCard name={f.name} size={p.size ?? f.size}>{!p.failed && <span className="file-act"><span className="spinner" /></span>}</FileCard>
       )}
       {p.caption && <div className="attach-caption">{p.caption}</div>}
     </div>

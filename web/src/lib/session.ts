@@ -2,7 +2,7 @@
  * One signed-in account in this browser: Keyhold chat over the GitHub provider, the local
  * stores, and a polling loop that keeps chats up to date without burning the rate limit.
  */
-import { githubProvider, toAddress, loginOf } from 'chat-over-github-provider';
+import { githubProvider, toAddress, loginOf, retryAfterOf } from 'chat-over-github-provider';
 import type { FetchFn } from 'chat-over-github-provider';
 import { resolveFeatures } from 'keyhold/storage';
 import type { DeviceStorage, StorageProvider } from 'keyhold/storage';
@@ -21,6 +21,8 @@ import {
   backupRootKey,
   restoreRootKey,
   PersonalData,
+  unsentMessages,
+  type AppMessage,
   type MergeRule,
   type DeviceIdentity,
   type Group,
@@ -81,6 +83,13 @@ export interface Sending {
   failed?: string;
   /** Sent: the id it has in the chat. The bubble stays until the chat shows the real message. */
   sentId?: string;
+  /**
+   * The chat message keyhold encrypted and saved for it, once a send failed after that: Retry
+   * posts this very message again (never a fresh one, which could arrive twice), Remove drops it.
+   */
+  msgId?: string;
+  /** Size of the file, for a "Not sent" file found after a reload (only its name and size are known then). */
+  size?: number;
 }
 
 /** A reaction on its way out. `add` is what the person asked for; `sent` once GitHub has it. */
@@ -323,6 +332,8 @@ export const isRateLimit = (e: unknown) => {
 
 /** How long the error says to wait, in ms, if it says (read defensively: providers may add it). */
 export function retryAfterMs(e: unknown): number | undefined {
+  const s = retryAfterOf(e); // the provider's RateLimitError: seconds, like the header
+  if (s !== undefined && s > 0) return s * 1000;
   const x = e as { retryAfter?: unknown; retryAfterMs?: unknown } | undefined;
   if (typeof x?.retryAfterMs === 'number' && x.retryAfterMs > 0) return x.retryAfterMs;
   if (typeof x?.retryAfter === 'number' && x.retryAfter > 0) return x.retryAfter * 1000; // seconds, like the header
@@ -797,7 +808,10 @@ export class Session {
       if (r) this.records.set(r.groupId, r);
     }
     await this.repairPreviews();
-    for (const g of this.chat.groups.values()) this.fill(g);
+    for (const g of this.chat.groups.values()) {
+      this.fill(g);
+      await this.restoreUnsent(g);
+    }
     for (const k of await this.db.keys('kv', 'declined:')) this.declined.add(k.slice('declined:'.length));
     for (const k of await this.db.keys('kv', 'block:')) this.blocked.add(k.slice('block:'.length));
     this.hasSyncKey = !!(await this.device.keystore.get(PERSONAL_KEY_SLOT));
@@ -1483,7 +1497,7 @@ export class Session {
     const tell = g.active && g.members().some((m) => m.address !== this.address);
     const plan = [...(tell ? ['Telling the members'] : []), ...(others.size ? ['Leaving closure notices'] : []), 'Deleting the repo on GitHub', 'Erasing this chat\u2019s keys'];
     await this.activities.run(reason === 'moved' ? 'Retiring the old chat' : 'Closing the chat', plan, async (t) => {
-      if (tell) await g.send({ t: 'sys.close', reason }).catch(() => undefined);
+      if (tell) await g.send({ t: 'sys.close', reason }).catch((e) => this.dropUnsent(g, e));
       const tag = await this.closureTag(g.id);
       if (others.size) t.step('Leaving closure notices');
       for (const a of others) {
@@ -1574,7 +1588,10 @@ export class Session {
 
   async rename(g: Group, name: string) {
     await this.activities.run('Renaming the group', ['Saving the new name', 'Updating the chat'], async (t) => {
-      await g.send({ t: 'meta', name });
+      await g.send({ t: 'meta', name }).catch((e) => {
+        this.dropUnsent(g, e);
+        throw e;
+      });
       t.step('Updating the chat');
       await this.syncGroup(g);
     }, { key: this.convoKey(this.record(g.id)), space: g.space, anyCall: false });
@@ -1618,31 +1635,86 @@ export class Session {
     await this.deliver(g, item);
   }
 
+  /** Remove: the bubble goes, and keyhold stops trying to send the saved message. */
   discardSend(groupId: string, id: string) {
     const item = this.sending.get(groupId)?.find((p) => p.id === id);
     if (item?.preview) URL.revokeObjectURL(item.preview);
     this.sending.set(groupId, (this.sending.get(groupId) ?? []).filter((p) => p.id !== id));
+    // Not once it is sent: then there is nothing left to stop.
+    if (item?.msgId && !item.sentId) void this.chat?.groups.get(groupId)?.discardUnsent(item.msgId).catch(() => undefined);
     this.bump();
   }
 
   private async deliver(g: Group, item: Sending) {
     let sent: { id: string };
     try {
-      if (item.file) {
+      if (item.msgId) {
+        // Retry: the same encrypted message (and mail id) again. Nothing to post means a copy
+        // landed after all (its reply was lost), and the chat has it now.
+        await g.resend(item.msgId);
+        sent = { id: item.msgId };
+      } else if (item.file) {
         const data = new Uint8Array(await item.file.arrayBuffer());
         sent = await g.sendAttachment(data, { name: item.file.name, mime: item.file.type || undefined, caption: item.caption });
       } else sent = await g.send({ t: 'text', body: item.body ?? '' });
     } catch (e) {
+      this.claimUnsent(g, item, e);
       await this.syncGroup(g).catch(() => undefined);
+      if (item.sentId) return; // the sync found it landed
       item.failed = this.isUnreachable(g) ? "Can't reach this chat right now. Try again in a moment." : !g.active ? 'This chat has ended' : this.noteError(e);
       this.bump();
       return;
     }
-    // The real message is stored by now; the screen drops this bubble as soon as it shows that one.
-    item.sentId = sent.id;
-    this.bump();
-    setTimeout(() => this.discardSend(g.id, item.id), SETTLE_MS);
+    this.markSent(g.id, item, sent.id);
     void this.syncGroup(g);
+  }
+
+  /** The real message is stored by now; the screen drops this bubble as soon as it shows that one. */
+  private markSent(groupId: string, item: Sending, id: string) {
+    if (item.sentId) return;
+    item.sentId = id;
+    item.failed = undefined;
+    this.bump();
+    setTimeout(() => this.discardSend(groupId, item.id), SETTLE_MS);
+  }
+
+  /** A failed send: which saved, encrypted message is this bubble's (a burst fails together). */
+  private claimUnsent(g: Group, item: Sending, e: unknown) {
+    if (item.msgId) return;
+    const taken = new Set((this.sending.get(g.id) ?? []).map((p) => p.msgId));
+    const m = (unsentMessages(e) ?? []).find((u) => !taken.has(u.id) && sameContent(item, u));
+    if (m) item.msgId = m.id;
+  }
+
+  /**
+   * A send the person didn't see as a bubble (a reaction, a delete, a name, a moved copy) failed:
+   * keyhold keeps it to send again, but the app sends anew when asked, so drop the saved copy.
+   */
+  private dropUnsent(g: Group, e: unknown) {
+    for (const m of unsentMessages(e) ?? []) if (!isBubble(m)) void g.discardUnsent(m.id).catch(() => undefined);
+  }
+
+  /**
+   * After a reload: messages keyhold saved but couldn't post show as "Not sent" with Retry and
+   * Remove. Other kinds the app sends again itself when needed.
+   */
+  private async restoreUnsent(g: Group) {
+    for (const m of g.unsent()) {
+      if (!isBubble(m)) {
+        await g.discardUnsent(m.id).catch(() => undefined);
+        continue;
+      }
+      const list = this.sending.get(g.id) ?? [];
+      if (list.some((p) => p.msgId === m.id)) continue;
+      const item: Sending = { id: `unsent-${m.id}`, msgId: m.id, ts: m.ts, failed: 'Not sent' };
+      if (m.t === 'text') item.body = m.body;
+      else if (m.t === 'attachment') {
+        item.file = new File([], m.file.name ?? 'file', { type: m.file.mime ?? '' });
+        item.size = m.file.size;
+        item.caption = m.caption;
+      }
+      this.sending.set(g.id, [...list, item]);
+    }
   }
 
   /** Add or take back my reaction. Shows at once; on failure it goes back and the error is thrown. */
@@ -1658,6 +1730,7 @@ export class Session {
       // apps ignore `on` and toggle, as they always did.
       await g.send({ t: 'react', ref, emoji, on: add } as AppContent);
     } catch (e) {
+      this.dropUnsent(g, e);
       this.reacting.delete(key);
       this.bump();
       throw new Error(`Reaction not sent. Try again in a moment.`, { cause: e });
@@ -1695,6 +1768,7 @@ export class Session {
     try {
       await g.send({ t: 'delete', ref });
     } catch (e) {
+      this.dropUnsent(g, e);
       this.deleting.delete(key);
       this.bump();
       throw new Error(`Message not deleted. Try again in a moment.`, { cause: e });
@@ -1752,6 +1826,11 @@ export class Session {
     const mine = m.from.fingerprint === this.identity?.fingerprint;
     const base = { groupId: g.id, id: msg.id, ts: msg.ts, from: m.from.address, fromFp: m.from.fingerprint, fromDevice: m.from.deviceId, mine };
     const r = this.fill(g);
+    if (mine) {
+      // A message of ours that a send or Retry left "Not sent" landed after all.
+      const pending = this.sending.get(g.id)?.find((p) => p.msgId === msg.id);
+      if (pending) this.markSent(g.id, pending, msg.id);
+    }
     if (msg.t === 'sys.close') {
       // Only the repo owner can end the room.
       const owner = toAddress(g.space.split('/')[0]!.toLowerCase());
@@ -1774,6 +1853,8 @@ export class Session {
       if (!mine && !this.onScreen(g.id) && msg.ts > (r.readTo ?? 0)) r.unread++;
       await this.saveRecord(r);
     };
+    // Delivery is at least once: a message already stored (maybe edited or reacted to since) stays as it is.
+    if ((msg.t === 'text' || msg.t === 'attachment') && (await this.db.get('messages', [g.id, msg.id]))) return;
     switch (msg.t) {
       case 'text': {
         // A copy of a message from a retired duplicate room (rule 2): shown only if not here already.
@@ -1887,7 +1968,7 @@ export class Session {
       else if (e.type === 'rejected') console.warn(`chat ${g.id}: ignored group change ${e.index} (${e.reason})`);
     }
     if (shareName && g.active && !this.isDm(g) && g.name && g.policy.admins.includes(this.identity!.fingerprint)) {
-      await g.send({ t: 'meta', name: g.name }).catch(() => undefined);
+      await g.send({ t: 'meta', name: g.name }).catch((e) => this.dropUnsent(g, e));
     }
   }
 
@@ -2434,7 +2515,8 @@ export class Session {
       try {
         const sent = await to.send({ t: 'text', body: m.body, moved: m.movedFrom ?? m.id } as AppContent);
         await this.put({ ...m, movedTo: sent.id });
-      } catch {
+      } catch (e) {
+        this.dropUnsent(to, e);
         return; // next sync step tries again
       }
     }
@@ -2559,6 +2641,18 @@ async function readFully(r: Response): Promise<Response> {
   const empty = [101, 204, 205, 304].includes(r.status);
   const body = empty ? null : await r.arrayBuffer();
   return new Response(body, { status: r.status, statusText: r.statusText, headers: r.headers });
+}
+
+/** Kinds that show as a bubble of their own while sending (not a moved copy, which the app re-sends itself). */
+function isBubble(m: AppMessage): boolean {
+  return (m.t === 'text' && typeof (m as { moved?: unknown }).moved !== 'string') || m.t === 'attachment';
+}
+
+/** Is this saved message the one this bubble sent? */
+function sameContent(item: Sending, m: AppMessage): boolean {
+  if (!isBubble(m)) return false;
+  if (item.file) return m.t === 'attachment' && m.file.name === item.file.name && m.file.size === item.file.size && (m.caption ?? undefined) === (item.caption ?? undefined);
+  return m.t === 'text' && m.body === (item.body ?? '');
 }
 
 function fromB64(s: string): Uint8Array {
