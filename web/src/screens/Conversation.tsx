@@ -2,7 +2,7 @@ import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Group } from 'keyhold/chat';
 import { describeError, loginFrom, type Convo, type MsgRecord, type PeerInfo, type Session } from '../lib/session';
 import { EARLIER_ELSEWHERE, endedText } from './Home';
-import { ask, Avatar, ErrorFlash, go, Hint, Icon, MenuItem, timeLabel, toast, useAction } from '../ui';
+import { ask, Avatar, ErrorFlash, go, Hint, Icon, MenuItem, Notices, timeLabel, toast, useAction } from '../ui';
 import { ChatMenu, CLOSE_ASK, deleteAsk, VerifyModal } from './ChatMenu';
 import { AttachmentView, DraftTray, isImage, Lightbox, PendingAttachment, saveBlob, toDrafts, type Draft, type Viewing } from './Attachments';
 import { EmojiRow, MsgPopup, useLongPress, type Anchor } from './MessageMenu';
@@ -424,7 +424,7 @@ function Composer({ session, group, disabledReason, error }: { session: Session;
   const canSend = !disabledReason && (!!text.trim() || drafts.length > 0);
   return (
     <div className="composer">
-      {(sendError || error) && <ErrorFlash error={sendError ?? `Sync problem: ${error}`} />}
+      {sendError ? <ErrorFlash error={sendError} /> : <Notices sync={error} />}
       <div className={`composer-box${drafts.length ? ' with-tray' : ''}`}>
         {drafts.length > 0 && <DraftTray drafts={drafts} onRemove={remove} />}
         <div className="composer-row">
