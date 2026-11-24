@@ -28,7 +28,7 @@ export function mockBackend() {
   /** Answer one request; null when the path isn't the API or the Worker. */
   async function handle(req: { method: string; url: URL; headers: Record<string, string | undefined>; body?: string }): Promise<MockReply | null> {
     const { url, body } = req;
-    const send = (status: number, b = '', headers: Record<string, string> = {}): MockReply => ({ status, body: b, headers: { 'X-RateLimit-Remaining': '4999', ...headers } });
+    const send = (status: number, b = '', headers: Record<string, string> = {}): MockReply => ({ status, body: b, headers: { ...(Object.keys(headers).some((k) => k.toLowerCase() === 'x-ratelimit-remaining') ? {} : { 'X-RateLimit-Remaining': '4999' }), ...headers } });
     const json = (status: number, data: unknown, h: Record<string, string> = {}) => send(status, JSON.stringify(data), { 'Content-Type': 'application/json', ...h });
     const auth = req.headers.authorization;
     const user = userOf(auth);
@@ -95,7 +95,7 @@ export function mockBackend() {
       }
       const r = await gh.fetch((isGh ? gh.api : gh.worker) + rest, { method, headers: auth ? { Authorization: auth } : {}, body });
       const text = await r.text();
-      return send(r.status, text, text ? { 'Content-Type': 'application/json' } : {});
+      return send(r.status, text, { ...r.rawHeaders, ...(text ? { 'Content-Type': 'application/json' } : {}) });
     }
     return null;
   }
