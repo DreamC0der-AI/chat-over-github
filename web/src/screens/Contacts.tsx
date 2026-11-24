@@ -64,7 +64,7 @@ export function Contacts({ session, onNewGroup }: { session: Session; onNewGroup
                     <button className="contact-item" onClick={() => go(`/c/${encodeURIComponent(c.key)}`)}>
                       <Avatar name={c.title} square size="lg" />
                       <span className="meta">
-                        <span className="name">{c.title}{!c.live && <span className="label">Ended</span>}</span>
+                        <span className="name">{c.title}{!c.live && <span className="label">{c.unreachable ? 'Can\u2019t reach' : 'Ended'}</span>}</span>
                         <span className="preview">{n ? `${n} ${n === 1 ? 'member' : 'members'}` : 'Not available'}</span>
                       </span>
                     </button>

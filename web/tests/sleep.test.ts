@@ -78,6 +78,49 @@ describe('token refresh', () => {
     expect(loadAuth()?.refreshToken).toBe('rt-1');
   });
 
+  it('an answer lost while asleep is asked again with the same retry key, and the stored key goes once the new tokens are saved', async () => {
+    expired('rt-1');
+    // A Worker like the real one: the first refresh spends rt-1 at GitHub; asking again gets the
+    // cached answer only with the retry key that first asked.
+    const bodies: { refresh_token: string; retry_key?: string }[] = [];
+    let cachedFor: string | undefined;
+    let n = 0;
+    let loseAnswer = true;
+    globalThis.fetch = ((_url: string, init?: RequestInit) => {
+      const b = JSON.parse(String(init?.body)) as { refresh_token: string; retry_key?: string };
+      bodies.push(b);
+      let answer: object;
+      if (b.refresh_token === 'rt-1' && cachedFor === undefined) {
+        cachedFor = b.retry_key;
+        answer = { access_token: 'new', refresh_token: 'rt-2', expires_in: 28800 };
+      } else if (b.refresh_token === 'rt-1') {
+        answer = b.retry_key && b.retry_key === cachedFor ? { access_token: 'new', refresh_token: 'rt-2', expires_in: 28800 } : { error: 'bad_refresh_token' };
+      } else answer = { access_token: `new-${++n}`, refresh_token: `rt-${2 + n}`, expires_in: 28800 };
+      if (loseAnswer) {
+        loseAnswer = false;
+        return Promise.reject(new TypeError('Failed to fetch')); // GitHub spent rt-1, the answer never came back
+      }
+      return Promise.resolve(new Response(JSON.stringify(answer)));
+    }) as typeof fetch;
+    await expect(currentToken()).rejects.toBeInstanceOf(RefreshFailedError);
+    const kept = loadAuth()!;
+    expect(kept.refreshToken).toBe('rt-1');
+    expect(kept.retryKey).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
+    expect(bodies[0].retry_key).toBe(kept.retryKey);
+    // The tab comes back (even after a reload: the key is stored with the sign-in) and asks again.
+    expect(await currentToken()).toBe('new');
+    expect(bodies[1]).toEqual({ refresh_token: 'rt-1', retry_key: kept.retryKey });
+    expect(loadAuth()).toMatchObject({ token: 'new', refreshToken: 'rt-2' });
+    expect(loadAuth()?.retryKey).toBeUndefined();
+    // The next refresh uses a fresh key.
+    localStorage.setItem('kh.auth', JSON.stringify({ ...loadAuth(), expiresAt: Date.now() - 1000 }));
+    expect(await currentToken()).toBe('new-1');
+    expect(bodies[2].refresh_token).toBe('rt-2');
+    expect(bodies[2].retry_key).toBeTruthy();
+    expect(bodies[2].retry_key).not.toBe(kept.retryKey);
+    expect(loadAuth()?.retryKey).toBeUndefined();
+  });
+
   it("another tab's newer sign-in is never wiped by a stale refresh", async () => {
     expired('rt-1');
     globalThis.fetch = (() => {

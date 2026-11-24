@@ -144,6 +144,11 @@ export class ContactBook implements PinStore {
     return this.local.get(address)?.firstSeen ?? this.synced.get(address)?.firstSeen;
   }
 
+  /** The root key this browser trusts for the person (its own pin, else the account's), without a lookup. */
+  pinned(address: string): string | undefined {
+    return this.local.get(address)?.fingerprint ?? this.synced.get(address)?.pin?.fingerprint;
+  }
+
   /** Verified for the key this browser trusts (without a lookup). */
   verified(address: string): boolean {
     if (this.conflict(address)) return false;

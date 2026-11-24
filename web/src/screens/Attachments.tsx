@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import type { AttachmentRef, Group } from 'keyhold/chat';
 import { describeError, MAX_FILE_BYTES, type Sending, type Session } from '../lib/session';
 import { Icon } from '../ui';
+import { isImage } from '../lib/mime';
 
-export const isImage = (mime?: string) => !!mime && /^image\/(png|jpe?g|gif|webp|avif|bmp|svg\+xml)$/i.test(mime);
+export { isImage };
 export const fileSize = (n: number) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.ceil(n / 1024))} KB`);
 
 export function saveBlob(url: string, name: string) {
@@ -114,7 +115,7 @@ export function PendingAttachment({ p }: { p: Sending }) {
           <span className="media-veil">{p.failed ? <span className="veil-icon">{Icon.alert(22)}</span> : <span className="ring" />}</span>
         </div>
       ) : (
-        <FileCard name={f.name} size={f.size}>{!p.failed && <span className="file-act"><span className="spinner" /></span>}</FileCard>
+        <FileCard name={f.name} size={p.size ?? f.size}>{!p.failed && <span className="file-act"><span className="spinner" /></span>}</FileCard>
       )}
       {p.caption && <div className="attach-caption">{p.caption}</div>}
     </div>

@@ -171,9 +171,27 @@ try {
   await alice.page.locator('input[type=file]').setInputFiles({ name: 'photo.png', mimeType: 'image/png', buffer: PNG });
   await alice.page.locator('.tray-item.pic img').waitFor();
   await alice.page.locator('#composer').fill('look at this');
+  // Hold the upload until the pending state was seen: against the local mock the whole send can
+  // finish before a poll sees it, and a missed transient state made this step flaky.
+  let releaseUpload;
+  const uploadHeld = new Promise((r) => (releaseUpload = r));
+  const inFlight = [];
+  const holdUpload = (route) => {
+    const done = (async () => {
+      if (route.request().method() === 'PUT') await uploadHeld;
+      await route.continue();
+    })();
+    inFlight.push(done);
+    return done;
+  };
+  await alice.page.route(/\/contents\/blob\//, holdUpload);
   await alice.page.locator('#composer').press('Enter');
-  await alice.page.locator('.media.pending img').waitFor({ timeout: 5000 });
-  check(true, 'sent picture shows at once with an upload state');
+  const pendingShown = await alice.page.locator('.media.pending img').waitFor({ timeout: 5000 }).then(() => true, () => false);
+  releaseUpload();
+  // Let held requests go on before removing the handler, or Playwright reports them handled twice.
+  await Promise.all(inFlight);
+  await alice.page.unroute(/\/contents\/blob\//, holdUpload);
+  check(pendingShown, 'sent picture shows at once with an upload state');
   await alice.page.locator('.msg.mine .media img[alt="photo.png"]').waitFor({ timeout: 30000 });
   await bob.page.locator('.media img[alt="photo.png"]').waitFor({ timeout: 30000 });
   const cap = await bob.page.locator('.attach', { has: bob.page.locator('img[alt="photo.png"]') }).locator('.attach-caption').innerText();

@@ -48,9 +48,10 @@ export function githubWorld() {
   const gh = new MockGitHub();
   return {
     gh,
-    session(login: string) {
+    session(login: string, opts: { now?: () => number } = {}) {
       const u = gh.users.get(login) ?? gh.addUser(login);
-      return githubProvider({ fetch: gh.fetch, token: u.token, login, workerUrl: gh.worker, apiBase: gh.api });
+      // Retries wait for nothing: the mock has no clock to wait for.
+      return githubProvider({ fetch: gh.fetch, token: u.token, login, workerUrl: gh.worker, apiBase: gh.api, sleep: async () => {}, now: opts.now });
     },
     address: toAddress,
   };

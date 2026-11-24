@@ -43,9 +43,11 @@ function Signed({ auth, onSignOut, onSignedOut }: { auth: AuthState; onSignOut: 
   useEffect(() => {
     let alive = true;
     let release: (() => void) | undefined;
-    void acquireTabLock(String(auth.id), () => {
-      session.stop();
+    void acquireTabLock(String(auth.id), async () => {
+      // Another tab took over. Show that at once; it starts as soon as this tab's running work
+      // has finished. Cut off at the time limit: reload, which ends anything still in flight.
       if (alive) setTab('elsewhere');
+      if (!(await session.handOver())) location.reload();
     }).then((lock) => {
       if (!alive) {
         if (lock.held) lock.release();

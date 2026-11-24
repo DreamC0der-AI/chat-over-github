@@ -13,6 +13,12 @@ export interface AuthState {
   expiresAt?: number;
   login: string;
   id: number;
+  /**
+   * Random key sent with the refresh of `refreshToken`, kept until the new tokens are saved. If
+   * the answer is lost (the computer slept mid-request), asking again with the same key gets the
+   * Worker's cached answer; someone holding only the spent refresh token gets nothing.
+   */
+  retryKey?: string;
 }
 
 const KEY = 'kh.auth';
@@ -193,15 +199,23 @@ export async function currentToken(force = false): Promise<string> {
     if (!a) throw new SignedOutError();
     if (a.token !== seen.token && !expiresSoon(a)) return a;
     if (!a.refreshToken) throw new SignedOutError();
+    // Keep the retry key with the refresh token before asking, so a reload after a lost answer still has it.
+    let retryKey = a.retryKey;
+    if (!retryKey) {
+      retryKey = randomString(24);
+      saveAuth({ ...a, retryKey });
+    }
     let t: TokenResponse;
     try {
-      t = await workerPost('/oauth/token', { refresh_token: a.refreshToken });
+      t = await workerPost('/oauth/token', { refresh_token: a.refreshToken, retry_key: retryKey });
     } catch (e) {
       throw new RefreshFailedError(e);
     }
     if (t.access_token) {
       // Save straight away (same account, no lookup): the old refresh token is spent now.
-      const next: AuthState = { ...a, token: t.access_token, refreshToken: t.refresh_token ?? a.refreshToken, expiresAt: t.expires_in ? Date.now() + t.expires_in * 1000 : undefined };
+      // The retry key belonged to the spent refresh token; the next refresh gets a new one.
+      const { retryKey: _spent, ...rest } = a;
+      const next: AuthState = { ...rest, token: t.access_token, refreshToken: t.refresh_token ?? a.refreshToken, expiresAt: t.expires_in ? Date.now() + t.expires_in * 1000 : undefined };
       saveAuth(next);
       return next;
     }

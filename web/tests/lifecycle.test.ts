@@ -26,6 +26,7 @@ describe('ending chats', () => {
     await w.until(async () => (await bob.texts(bob.chat('alice'))).includes('after the clear'), 'new messages arrive');
     expect(await bob.texts(bob.chat('alice'))).toEqual(['after the clear']);
     expect(await alice.texts(alice.chat('bob'))).toEqual(['hi alice', 'after the clear']);
+    await w.checkConverged();
   });
 
   it('Close: the other side learns why and keeps a copy; a new chat is the same entry', async () => {
@@ -69,5 +70,39 @@ describe('ending chats', () => {
     await alice.s.closeChat(alice.chat('bob')!.live ?? alice.chat('bob')!.current!).catch(() => undefined);
     await alice.s.startDm('bob');
     await w.until(() => !!bob.inviteFrom('alice'), 'after unblocking, invitations show again');
+  });
+
+  it("Delete chat on a browser whose clock is ahead doesn't hide the next messages", async () => {
+    const { alice, bob } = await talking();
+    const real = Date.now;
+    Date.now = () => real() + 2 * 60_000; // bob's clock runs two minutes fast
+    try {
+      await bob.s.deleteHistory(bob.chat('alice')!.key);
+    } finally {
+      Date.now = real;
+    }
+    await alice.s.send(alice.chat('bob')!.live!, 'right after');
+    await w.until(async () => (await bob.texts(bob.chat('alice'))).includes('right after'), 'bob gets it at once');
+    expect(await bob.texts(bob.chat('alice'))).toEqual(['right after']);
+    await w.checkConverged();
+  });
+
+  it('a message sent just before Delete chat, not fetched yet, still shows; the other browser agrees', async () => {
+    w = await world();
+    const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
+    await alice.setup();
+    const code = await bob.setup();
+    await w.dm(alice, bob);
+    const bob2 = await w.browser('bob');
+    await bob2.restore(code);
+    await w.until(() => !!bob2.chat('alice')?.live, 'bob2 joined');
+    await alice.s.send(alice.chat('bob')!.live!, 'seen');
+    await w.until(async () => (await bob.texts(bob.chat('alice'))).includes('seen') && (await bob2.texts(bob2.chat('alice'))).includes('seen'), 'both have it');
+    await alice.s.send(alice.chat('bob')!.live!, 'not fetched yet');
+    await bob.s.deleteHistory(bob.chat('alice')!.key);
+    await w.until(async () => (await bob.texts(bob.chat('alice'))).includes('not fetched yet'), 'bob sees it');
+    expect(await bob.texts(bob.chat('alice'))).toEqual(['not fetched yet']);
+    await w.until(async () => !(await bob2.texts(bob2.chat('alice'))).includes('seen'), 'the delete reaches bob2');
+    expect(await bob2.texts(bob2.chat('alice'))).toEqual(['not fetched yet']);
   });
 });

@@ -285,6 +285,7 @@ code { background: var(--subtle); padding: 1px 5px; border-radius: 5px; }
 .label.green { background: var(--green-bg); color: var(--green-fg); }
 .label.yellow { background: var(--attention-bg); color: var(--attention); }
 .label.blue { background: var(--accent-bg); color: var(--accent); }
+.label.red { background: var(--danger-bg); color: var(--danger); }
 .counter { min-width: 20px; padding: 0 6px; border-radius: 999px; background: var(--accent-solid); color: #fff; font-size: 12px; font-weight: 600; text-align: center; line-height: 20px; }
 
 /* avatars */

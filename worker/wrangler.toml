@@ -12,8 +12,9 @@ enabled = false
 
 [vars]
 GITHUB_CLIENT_ID = "Iv23liFOHVM634uq8c39"
-# Comma-separated list of web origins allowed to call the Worker from a browser.
-ALLOWED_ORIGINS = "https://chat-over-github.akagishigerutokyo.workers.dev,http://localhost:5173"
+# Comma-separated list of web origins allowed to call the Worker from a browser. Production only:
+# `npm run dev` adds http://localhost:5173 for local work (see package.json), never the deployed Worker.
+ALLOWED_ORIGINS = "https://chat-over-github.akagishigerutokyo.workers.dev"
 
 # The old invite inbox, read once per user to copy pending entries into their Durable Object.
 # Everything in it expires by 2026-11-24; after that this binding can go.
@@ -31,3 +32,17 @@ class_name = "Inbox"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Inbox"]
+
+# Rate limits (Workers rate limiting binding; counted per Cloudflare location, approximate). The code skips a limit whose binding is missing. namespace_id is any number unique
+# in the account.
+# OAuth calls per client IP: sign-in, refresh, and device-flow polling (one poll every 5 s).
+[[ratelimits]]
+name = "OAUTH_LIMIT"
+namespace_id = "7301"
+simple = { limit = 60, period = 60 }
+
+# Invite and closure posts per GitHub user (closing a chat posts one notice per member).
+[[ratelimits]]
+name = "INBOX_POST_LIMIT"
+namespace_id = "7302"
+simple = { limit = 100, period = 60 }
