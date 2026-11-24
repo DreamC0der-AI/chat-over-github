@@ -295,3 +295,74 @@ describe('chat repos are hardened', () => {
     expect(w.gh.repos.get(s)).toBeDefined();
   });
 });
+
+describe('posts with ids chosen before the first try (keyhold retries)', () => {
+  const mailFiles = (repo: { files: Map<string, unknown> }) => [...repo.files.keys()].filter((p) => p.startsWith('mail/'));
+
+  it('newId makes ids that sort in the order made, without a request', async () => {
+    const { a, gh } = await space();
+    const before = gh.log.length;
+    const ids = Array.from({ length: 300 }, () => a.mailbox.newId!());
+    expect(gh.log.length).toBe(before);
+    expect([...ids].sort()).toEqual(ids);
+    expect(new Set(ids).size).toBe(300);
+  });
+
+  it('the same id with the same bytes lands once; with other bytes it is a conflict', async () => {
+    const { w, a, s, repo } = await space();
+    const id = a.mailbox.newId!();
+    expect(await a.mailbox.post(s, bytes('once'), { id })).toBe(id);
+    expect(await a.mailbox.post(s, bytes('once'), { id })).toBe(id);
+    expect(mailFiles(repo)).toEqual([`mail/${today()}/${id}`]);
+    await expect(a.mailbox.post(s, bytes('other'), { id })).rejects.toMatchObject({ code: 'conflict' });
+    expect(str(repo.files.get(`mail/${today()}/${id}`)!.content)).toBe('once');
+    // A new app (after a reload) retrying an id it didn't make itself: same answers.
+    const reloaded = w.session('alice');
+    expect(await reloaded.mailbox.post(s, bytes('once'), { id })).toBe(id);
+    await expect(reloaded.mailbox.post(s, bytes('other'), { id })).rejects.toMatchObject({ code: 'conflict' });
+    expect(mailFiles(repo)).toHaveLength(1);
+  });
+
+  it('a retried batch whose reply was lost writes nothing twice, and keeps its ids', async () => {
+    const { a, s, gh, repo } = await space();
+    const ids = [a.mailbox.newId!(), a.mailbox.newId!()];
+    gh.faults = { lostReply: { match: '^PATCH .*/git/refs/' } };
+    gh.gitDataDown = false;
+    // The batch lands but the app never hears; the provider falls back, finds them, and says ok.
+    expect(await a.mailbox.postMany!(s, [bytes('a'), bytes('b')], { ids })).toEqual(ids);
+    gh.faults = undefined;
+    // keyhold's resend posts the same bytes at the same ids again.
+    expect(await a.mailbox.postMany!(s, [bytes('a'), bytes('b')], { ids })).toEqual(ids);
+    expect(mailFiles(repo).sort()).toEqual(ids.map((i) => `mail/${today()}/${i}`).sort());
+    expect((await a.mailbox.list(s)).items.map((i) => [i.id, str(i.data)])).toEqual([[ids[0], 'a'], [ids[1], 'b']]);
+    await expect(a.mailbox.postMany!(s, [bytes('a'), bytes('x')], { ids })).rejects.toMatchObject({ code: 'conflict' });
+  });
+
+  it('the day folder comes from the id; an id older than yesterday not there yet gets a fresh one', async () => {
+    let t = Date.UTC(2026, 0, 10, 23, 59);
+    const w = githubWorld();
+    const a = w.session('alice', { now: () => t });
+    const s = await a.channel.createSpace('chat');
+    const repo = w.gh.repos.get(s)!;
+    const id = a.mailbox.newId!();
+    t = Date.UTC(2026, 0, 11, 0, 5); // after midnight: still yesterday's folder, where readers look
+    expect(await a.mailbox.post(s, bytes('late'), { id })).toBe(id);
+    expect(mailFiles(repo)).toEqual([`mail/20260110/${id}`]);
+    // Saved for days (offline), then retried: its day is behind every reader's cursor.
+    const old = a.mailbox.newId!();
+    t = Date.UTC(2026, 0, 14, 12);
+    const used = await a.mailbox.post(s, bytes('days later'), { id: old });
+    expect(used).not.toBe(old);
+    expect(mailFiles(repo)).toContain(`mail/20260114/${used}`);
+    // A batch the same way: each old id replaced, in order.
+    const olds = [a.mailbox.newId!(), a.mailbox.newId!()];
+    t = Date.UTC(2026, 0, 20, 12);
+    const got = await a.mailbox.postMany!(s, [bytes('1'), bytes('2')], { ids: olds });
+    expect(got.every((g, i) => g !== olds[i])).toBe(true);
+    expect([...got].sort()).toEqual(got);
+    const l = await a.mailbox.list(s);
+    expect(l.items.slice(-2).map((i) => [i.id, str(i.data)])).toEqual([[got[0], '1'], [got[1], '2']]);
+    // But an old id that did land (its reply was lost) is found, not posted again.
+    expect(await a.mailbox.post(s, bytes('late'), { id })).toBe(id);
+  });
+});

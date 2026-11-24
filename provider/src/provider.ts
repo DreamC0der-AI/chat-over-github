@@ -277,6 +277,61 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
   /** Mail ids for a batch: same time stamp, then a counter, so they sort in the order given. */
   const batchIds = (t: number, n: number) => Array.from({ length: n }, (_, i) => `${t.toString(36)}-${i.toString(16).padStart(2, '0')}${toHex(randomBytes(9))}`);
 
+  /**
+   * Mail ids for `mailbox.newId`: the time, a counter within that millisecond, then randomness,
+   * so ids made one after another sort in that order (like batchIds).
+   */
+  let lastIdTime = 0;
+  let idSeq = 0;
+  const nextId = () => {
+    let t = now();
+    if (t <= lastIdTime) {
+      t = lastIdTime;
+      if (++idSeq > 0xff) {
+        t = ++lastIdTime;
+        idSeq = 0;
+      }
+    } else idSeq = 0;
+    lastIdTime = t;
+    return `${t.toString(36)}-${idSeq.toString(16).padStart(2, '0')}${toHex(randomBytes(9))}`;
+  };
+  /** Ids from newId() not tried yet: nothing can be at them, so a first post needs no check. */
+  const issued = new Set<string>();
+  const MAIL_ID = /^([0-9a-z]{1,11})-[0-9a-f]{8,64}$/;
+
+  /**
+   * Where items with caller-chosen ids go (see Mailbox in keyhold). The day folder comes from the
+   * id's time. An id that may have been tried before (a retry, maybe after a reload) is looked up
+   * first: the same bytes there are a success (`done`), other bytes a conflict. A day older than
+   * yesterday is behind every reader's cursor, so an item not there yet gets a fresh id instead.
+   */
+  async function placeWithIds(ow: string, re: string, items: { id: string; data: Bytes }[]) {
+    const oldest = prevDay(day(now()));
+    const out: { id: string; path: string; data: Bytes; done: boolean }[] = [];
+    for (const it of items) {
+      const m = MAIL_ID.exec(seg(it.id, 'mail id'));
+      const t = m ? parseInt(m[1]!, 36) : NaN;
+      if (!Number.isFinite(t) || t <= 0) throw new KeyholdError('bad_format', 'bad mail id');
+      const fresh = issued.delete(it.id);
+      const d = day(t);
+      if (!fresh) {
+        const cur = await getFile(ow, re, `mail/${d}/${it.id}`);
+        if (cur) {
+          if (cur.version !== (await gitBlobSha(it.data))) throw new KeyholdError('conflict', 'another item has this id');
+          out.push({ ...it, path: `mail/${d}/${it.id}`, done: true });
+          continue;
+        }
+      }
+      if (d < oldest) {
+        const id = nextId();
+        out.push({ id, data: it.data, path: `mail/${day(parseInt(id.split('-')[0]!, 36))}/${id}`, done: false });
+        continue;
+      }
+      out.push({ ...it, path: `mail/${d}/${it.id}`, done: false });
+    }
+    return out;
+  }
+
 
   /** New files as ONE commit (Git Data API): blobs side by side, then tree, commit and ref. */
   async function writeBatch(space: SpaceRef, files: { path: string; data: Bytes }[]): Promise<void> {
@@ -525,8 +580,21 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
       },
     },
     mailbox: {
-      async post(space, data) {
+      /** A fresh mail id, made here (no network). Ids sort by time, then in the order made. */
+      newId() {
+        const id = nextId();
+        issued.add(id);
+        return id;
+      },
+      async post(space, data, options) {
         const [ow, re] = splitSpace(space);
+        if (options?.id) {
+          const [item] = await placeWithIds(ow, re, [{ id: options.id, data }]);
+          if (item!.done) return item!.id;
+          if ((await putFile(ow, re, item!.path, data, null)) === 'ok') return item!.id;
+          // The same id holding other bytes: not ours to overwrite.
+          throw new KeyholdError('conflict', 'another item has this id');
+        }
         const t = now();
         for (let attempt = 0; attempt < 3; attempt++) {
           // putFile is idempotent for this path: a lost reply, retried, finds our bytes and succeeds.
@@ -540,11 +608,21 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
        * Several items as ONE commit (Git Data API), so a burst costs one write however long it
        * is. Readers still see one ordinary file per item; ids sort in the order given.
        */
-      async postMany(space, data) {
+      async postMany(space, data, options) {
         const [ow, re] = splitSpace(space);
-        const t = now();
-        const ids = batchIds(t, data.length);
-        const files = data.map((d, i) => ({ path: `mail/${day(t)}/${ids[i]}`, data: d }));
+        let ids: string[];
+        let files: { path: string; data: Bytes }[];
+        if (options?.ids && options.ids.length === data.length) {
+          const placed = await placeWithIds(ow, re, data.map((d, i) => ({ id: options.ids![i]!, data: d })));
+          ids = placed.map((p) => p.id);
+          // Items a lost reply already landed are not written again.
+          files = placed.filter((p) => !p.done).map((p) => ({ path: p.path, data: p.data }));
+          if (!files.length) return ids;
+        } else {
+          const t = now();
+          ids = batchIds(t, data.length);
+          files = data.map((d, i) => ({ path: `mail/${day(t)}/${ids[i]}`, data: d }));
+        }
         try {
           await writeBatch(space, files);
         } catch (e) {
