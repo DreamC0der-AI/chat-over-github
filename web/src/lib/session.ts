@@ -1971,7 +1971,11 @@ export class Session {
           this.toEnd.set(g.id, { how: 'closed', by: this.address, at: Date.now() });
         }
       }
+      // keyhold opened it, but this browser couldn't keep it (storage full for too long): not a decryption problem.
+      else if (e.type === 'undecryptable' && e.reason === 'the app did not take it') await this.systemNote(g.id, 'A message could not be saved in this browser (storage full).');
       else if (e.type === 'undecryptable') await this.systemNote(g.id, 'A message could not be decrypted.');
+      // A message the sender's app counted out never arrived (dropped on GitHub, or not posted).
+      else if (e.type === 'gap') await this.systemNote(g.id, `A message from @${loginFrom(e.from.address)} may be missing.`);
       // A commit everyone ignores: nothing the people in the chat can act on.
       else if (e.type === 'rejected') console.warn(`chat ${g.id}: ignored group change ${e.index} (${e.reason})`);
     }
@@ -1984,7 +1988,10 @@ export class Session {
     try {
       const r = await g.sync();
       await this.onEvents(g, r.events);
-      this.groupErrors.delete(g.id);
+      // Saving new messages here failed (IndexedDB full?): keyhold keeps them and hands them over again.
+      const stuck = r.events.find((e) => e.type === 'delivery-failed');
+      if (stuck) this.groupErrors.set(g.id, `New messages couldn't be saved in this browser (${stuck.waiting} waiting). Free up some storage space; nothing is lost.`);
+      else this.groupErrors.delete(g.id);
     } catch (e) {
       this.groupErrors.set(g.id, this.noteError(e));
     }
