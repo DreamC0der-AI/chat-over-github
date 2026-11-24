@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { clampSide, saveSideWidth, SIDE_DEFAULT, SIDE_MAX, SIDE_MIN, sideWidth } from '../lib/prefs';
 import { loginFrom, type Convo, type PendingInvite, type Session } from '../lib/session';
-import { Avatar, ErrorFlash, go, Hint, Icon, Modal, timeLabel, useAction, useSession } from '../ui';
+import { Avatar, ErrorFlash, go, Hint, Notices, Icon, Modal, timeLabel, useAction, useSession } from '../ui';
 import { ChatMenu } from './ChatMenu';
 import { Contacts } from './Contacts';
 import { Conversation } from './Conversation';
@@ -62,6 +62,8 @@ export function Home({ session, route }: { session: Session; route: string }) {
               </li>
             )}
           </ul>
+          {/* On a phone the chat list is the whole screen, so the notice sits above the account bar. */}
+          {!convo && !contacts && <Notices className="foot side" />}
           <Me session={session} />
           <SideResizer width={sideW} onChange={setSideW} />
         </nav>
@@ -78,6 +80,8 @@ export function Home({ session, route }: { session: Session; route: string }) {
               <h3>Pick a chat or start a new one</h3>
             </div>
           )}
+          {/* A chat shows the notices above its message box. */}
+          {!convo && <Notices className="foot" />}
         </main>
       </div>
       {modal === 'dm' && <NewDm session={session} onClose={() => setModal(undefined)} onGroup={() => setModal('group')} />}

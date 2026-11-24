@@ -163,12 +163,12 @@ try {
   await ph.page.screenshot({ path: `${SHOTS}/phone-settings-dimmed.png` });
 
   // ---- a newer build on the server: the tab offers a reload
-  const nv = ph.page.locator('.new-version');
-  check(!(await nv.isVisible()), 'no "New version" while the build is current');
+  const nv = ph.page.locator('.flash.notice');
+  check(!(await nv.isVisible()), 'no new-version notice while the build is current');
   await ph.page.route(BASE, (r) => r.request().resourceType() === 'fetch' ? r.fulfill({ contentType: 'text/html', body: '<script type="module" src="/assets/index-Newer123.js"></script>' }) : r.continue());
   await ph.page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await nv.waitFor({ timeout: 5000 });
-  check(true, '"New version" shows once the server has another build');
+  check(true, 'the new-version notice shows once the server has another build');
   await ph.page.screenshot({ path: `${SHOTS}/phone-new-version.png` });
   await ph.page.unroute(BASE);
   await nv.getByRole('button', { name: 'Reload' }).click();

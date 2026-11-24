@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { CONFIG } from './config';
 import type { Session } from './lib/session';
+import { useNewVersion } from './lib/update-check';
 
 export function useSession(s: Session) {
   useSyncExternalStore(s.subscribe, s.getVersion);
@@ -159,6 +160,26 @@ export function Modal({ title, onClose, children }: { title: string; onClose: ()
 export function ErrorFlash({ error }: { error?: string }) {
   if (!error) return null;
   return <div className="flash error" role="alert">{error}</div>;
+}
+
+/**
+ * The app's status notices, in one place and one style: above the message box in a chat, at the
+ * foot of the screen elsewhere. A newer build asks for a reload; `error` is a sync or send problem.
+ */
+export function Notices({ error, className }: { error?: string; className?: string }) {
+  const newer = useNewVersion();
+  if (!newer && !error) return null;
+  return (
+    <div className={`notices${className ? ` ${className}` : ''}`}>
+      {newer && (
+        <div className="flash notice" role="status">
+          <span>A new version is available.</span>
+          <button className="btn small" onClick={() => location.reload()}>Reload</button>
+        </div>
+      )}
+      <ErrorFlash error={error} />
+    </div>
+  );
 }
 
 export function timeLabel(ts: number) {

@@ -2,7 +2,7 @@ import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Group } from 'keyhold/chat';
 import { describeError, loginFrom, type Convo, type MsgRecord, type PeerInfo, type Session } from '../lib/session';
 import { EARLIER_ELSEWHERE, endedText } from './Home';
-import { ask, Avatar, ErrorFlash, go, Hint, Icon, MenuItem, timeLabel, toast, useAction } from '../ui';
+import { ask, Avatar, ErrorFlash, go, Notices, Hint, Icon, MenuItem, timeLabel, toast, useAction } from '../ui';
 import { ChatMenu, CLOSE_ASK, deleteAsk, VerifyModal } from './ChatMenu';
 import { AttachmentView, DraftTray, isImage, Lightbox, PendingAttachment, saveBlob, toDrafts, type Draft, type Viewing } from './Attachments';
 import { EmojiRow, MsgPopup, useLongPress, type Anchor } from './MessageMenu';
@@ -227,7 +227,10 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
       {live ? (
         <Composer session={session} group={live} disabledReason={busyLabel ?? (peerLeft ? `${title} left this chat` : !joined ? (dm ? 'Waiting for the other person to join…' : 'Waiting for someone to join…') : undefined)} error={err} />
       ) : (
-        <div className="composer ended">This chat has ended</div>
+        <>
+          <Notices className="foot" />
+          <div className="composer ended">This chat has ended</div>
+        </>
       )}
       {viewing && <Lightbox v={viewing} onClose={() => setViewing(undefined)} />}
       {verify && <VerifyModal session={session} address={verify} onClose={() => setVerify(undefined)} />}
@@ -424,7 +427,7 @@ function Composer({ session, group, disabledReason, error }: { session: Session;
   const canSend = !disabledReason && (!!text.trim() || drafts.length > 0);
   return (
     <div className="composer">
-      {(sendError || error) && <ErrorFlash error={sendError ?? `Sync problem: ${error}`} />}
+      <Notices error={sendError ?? (error ? `Sync problem: ${error}` : undefined)} />
       <div className={`composer-box${drafts.length ? ' with-tray' : ''}`}>
         {drafts.length > 0 && <DraftTray drafts={drafts} onRemove={remove} />}
         <div className="composer-row">

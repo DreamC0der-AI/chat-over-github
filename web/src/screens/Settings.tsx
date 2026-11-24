@@ -3,7 +3,7 @@ import type { DeviceCertificate } from 'keyhold/chat';
 import { signOut } from '../lib/auth';
 import { onTheme, saveSideWidth, setTheme, SIDE_DEFAULT, sideWidth, themeChoice, THEMES } from '../lib/prefs';
 import { loginFrom, type Session } from '../lib/session';
-import { ask, Avatar, ErrorFlash, Hint, Icon, Modal, useAction, useSession } from '../ui';
+import { ask, Avatar, ErrorFlash, Hint, Notices, Icon, Modal, useAction, useSession } from '../ui';
 
 type SectionId = 'appearance' | 'devices' | 'privacy' | 'storage' | 'account';
 const SECTIONS: { id: SectionId; name: string; icon: () => JSX.Element }[] = [
@@ -33,6 +33,7 @@ export function Settings({ session, route }: { session: Session; route: string }
 
   return (
     <div className="app">
+      <Notices className="floating" />
       <div className="page">
         <div className={`settings${picked ? ' has-section' : ''}`}>
           <aside className="settings-side">
