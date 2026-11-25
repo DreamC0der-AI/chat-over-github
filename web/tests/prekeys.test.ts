@@ -80,4 +80,62 @@ describe('pre-keys', () => {
     await bob.s.send(bob.chat('alice')!.live!, 'yes');
     await w.until(async () => (await alice.texts(alice.chat('bob'))).includes('yes'), 'alice gets the reply');
   });
+
+  it('a new chat is made without reading it back, and joined with one look at each thing', async () => {
+    w = await world();
+    const [alice, carol] = [await w.browser('alice'), await w.browser('carol')];
+    await alice.setup();
+    await carol.setup();
+    await w.until(() => preKeys('carol') === 1, 'pre-key published');
+    await w.rounds(2);
+    /** What went to the chat's repo since `from`, as "METHOD what", sorted. */
+    const toChat = (from: number) =>
+      w.requests
+        .slice(from)
+        .filter((r) => r.url.includes('/ghchat-'))
+        .map((r) => `${r.method} ${/\/(compare|commits|collaborators|topics|rulesets|actions|invitations|contents\/(?:mail|drop|log\/\d{5}\/\d{8}|log))\b/.exec(r.url)?.[1] ?? 'repo'}`)
+        .sort();
+
+    // Writes only: nothing is asked of a repo that was made a moment ago. (Its settings, the
+    // chat's first two log entries, carol's ticket and welcome, and her invitation.)
+    let from = w.requests.length;
+    await alice.s.startDm('carol');
+    expect(toChat(from)).toEqual([
+      'POST rulesets',
+      'PUT actions',
+      'PUT collaborators',
+      'PUT contents/drop',
+      'PUT contents/drop',
+      'PUT contents/log/00000/00000000',
+      'PUT contents/log/00000/00000001',
+      'PUT topics',
+    ]);
+
+    // Joining: her drops (listed, both read, the ticket deleted without a second read), the log
+    // (listed, its two entries read, hers written without asking for the one before), the mail
+    // (nothing yet, and no second look at the repo).
+    await w.until(() => !!carol.inviteFrom('alice'), 'carol sees the invitation');
+    from = w.requests.length;
+    await carol.s.acceptInvite(carol.inviteFrom('alice')!.key);
+    expect(toChat(from)).toEqual([
+      'DELETE contents/drop',
+      'GET commits',
+      'GET compare',
+      'GET contents/drop',
+      'GET contents/drop',
+      'GET contents/drop',
+      'GET contents/log',
+      'GET contents/log/00000/00000000',
+      'GET contents/log/00000/00000001',
+      'GET contents/mail',
+      'PUT contents/log/00000/00000002',
+    ]);
+
+    // And the chat works both ways.
+    await alice.s.send(alice.chat('carol')!.live!, 'hello');
+    await carol.s.send(carol.chat('alice')!.live!, 'hi');
+    await w.until(async () => (await carol.texts(carol.chat('alice'))).includes('hello'), 'carol reads alice');
+    await w.until(async () => (await alice.texts(alice.chat('carol'))).includes('hi'), 'alice reads carol');
+    await w.checkConverged();
+  });
 });

@@ -52,6 +52,17 @@ export interface GitHubProviderOptions {
   now?: () => number;
   /** How to wait between retries (tests pass a fast one). */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Where small files that never change under their name are kept across reloads, by git blob
+   * sha: log entries, directory entries, the synced store's items. All of it is ciphertext or
+   * signed public data, as in the repos. Only a cache: anything missing is fetched again.
+   */
+  blobStore?: BlobStore;
+}
+
+export interface BlobStore {
+  get(sha: string): Promise<Uint8Array | undefined>;
+  put(sha: string, data: Uint8Array): Promise<void>;
 }
 
 export const GITHUB_PREFIX = 'github:';
@@ -129,6 +140,60 @@ const MAIL_SPAN_DAYS = 4;
 /** How many GitHub reads one listing runs at once: well under GitHub's limit on concurrent requests. */
 const READ_CONCURRENCY = 6;
 
+/**
+ * What this browser knows of one chat repo, so that a check does not list its folders again.
+ * It is made complete by a listing (the mailbox's days, the log's shard) and kept up by asking
+ * GitHub which files the commits after `head` added: one request, and free when nothing did.
+ * In memory only: after a reload the folders are listed again.
+ */
+interface View {
+  /** The commit the view is complete up to. Always read before the listing it goes with. */
+  head?: string;
+  /** ETag of the last answer to "what changed since head", for a free "nothing". */
+  etag?: string;
+  /** A check under way: everyone waits for the same one. */
+  checking?: Promise<boolean>;
+  /** Counts answered checks; `genAt` is when the last one was answered. */
+  gen: number;
+  genAt: number;
+  /** The check the mailbox / the log last built on (see `fresh`). */
+  mailGen: number;
+  logGen: number;
+  /** Goes up when a check brings changes; `readRev` is the one the mailbox last handed out. */
+  rev: number;
+  readRev: number;
+  /** Mail files by day, complete for the days from `mailFloor` on. */
+  mail?: Map<string, Map<string, DirEntry>>;
+  mailFloor: string;
+  /** The log's newest shard. */
+  log?: { shard: string; entries: Map<string, DirEntry> };
+  /** Asked to list again whatever the view says (the app's safety net). */
+  relistMail: boolean;
+  relistLog: boolean;
+}
+/** A check answered this long ago is still good for the sync that follows it. */
+const VIEW_FRESH_MS = 1500;
+/** A view not checked for this long is rebuilt from a listing: the list of changes could be long. */
+const VIEW_STALE_MS = 5 * 60_000;
+/** GitHub lists at most this many changed files per comparison. */
+const COMPARE_MAX_FILES = 300;
+/** Small files kept by blob sha (mail, log entries, keys), so the same bytes are fetched once. */
+const BLOB_CACHE_ITEM = 256 * 1024;
+const BLOB_CACHE_BYTES = 8 * 1024 * 1024;
+const MAIL_FILE = /^mail\/(\d{8})\/([^/]+)$/;
+const LOG_FILE = /^log\/(\d{5})\/(\d{8})$/;
+
+/** The change check the app drives (see `View`). */
+export interface ChangeWatch {
+  /**
+   * Has the chat repo changed since the last look? True also when it can't tell, and until the
+   * mailbox has handed out what an earlier check found. One request.
+   */
+  check(space: SpaceRef): Promise<boolean>;
+  /** The next mailbox list and log read of this repo list its folders again. */
+  relist(space: SpaceRef): void;
+}
+
 /** `fn` over every item, a few at a time; results in the items' order. */
 export async function inParallel<T, R>(items: T[], fn: (item: T) => Promise<R>, limit = READ_CONCURRENCY): Promise<R[]> {
   const out = new Array<R>(items.length);
@@ -143,7 +208,7 @@ export async function inParallel<T, R>(items: T[], fn: (item: T) => Promise<R>, 
   return out;
 }
 
-export function githubProvider(o: GitHubProviderOptions): StorageProvider & { client: GitHubClient } {
+export function githubProvider(o: GitHubProviderOptions): StorageProvider & { client: GitHubClient; changes: ChangeWatch } {
   const gh = new GitHubClient({ fetch: o.fetch, token: o.token, apiBase: o.apiBase, sleep: o.sleep });
   const login = o.login.toLowerCase();
   const self = toAddress(login);
@@ -166,6 +231,163 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
     const r = await gh.call('GET', repoPath(owner, repo));
     if (r.status === 404 || r.status === 403) throw new KeyholdError('forbidden', `no access to ${owner}/${repo} (${what}: ${status})`);
     throw new KeyholdError('config', `${what}: ${status}`);
+  }
+
+  // ---- Small files by blob sha: the same bytes are never fetched twice ---------------------
+  const blobCache = new Map<string, Uint8Array<ArrayBuffer>>();
+  let blobCacheBytes = 0;
+  function remember(sha: string, data: Bytes) {
+    if (data.length > BLOB_CACHE_ITEM || blobCache.has(sha)) return;
+    blobCache.set(sha, new Uint8Array(data));
+    blobCacheBytes += data.length;
+    for (const [k, d] of blobCache) {
+      if (blobCacheBytes <= BLOB_CACHE_BYTES) break;
+      blobCache.delete(k);
+      blobCacheBytes -= d.length;
+    }
+  }
+
+  /** From memory, or from the store kept across reloads (checked against its sha: it is only a cache). */
+  async function stored(sha: string): Promise<Uint8Array<ArrayBuffer> | undefined> {
+    const have = blobCache.get(sha);
+    if (have || !o.blobStore) return have;
+    try {
+      const d = await o.blobStore.get(sha);
+      if (!d || (await gitBlobSha(d)) !== sha) return undefined;
+      remember(sha, d);
+      return blobCache.get(sha) ?? new Uint8Array(d);
+    } catch {
+      return undefined;
+    }
+  }
+  /** Remember, also across reloads. */
+  function keep(sha: string, data: Bytes) {
+    remember(sha, data);
+    if (o.blobStore && data.length <= BLOB_CACHE_ITEM) void o.blobStore.put(sha, new Uint8Array(data)).catch(() => undefined);
+  }
+  /** Files worth keeping across reloads when we write them ourselves. */
+  const KEPT = /^(log\/\d{5}\/\d{8}|items\/[^/]+|dir\/[^/]+)$/;
+
+  // ---- What changed in a chat repo, in one request (see View) -------------------------------
+  const views = new Map<string, View>();
+  const viewKey = (ow: string, re: string) => `${ow}/${re}`.toLowerCase();
+  function viewOf(ow: string, re: string): View {
+    let v = views.get(viewKey(ow, re));
+    if (!v) views.set(viewKey(ow, re), (v = { gen: 0, genAt: -Infinity, mailGen: 0, logGen: 0, rev: 0, readRev: 0, mailFloor: '', relistMail: false, relistLog: false }));
+    return v;
+  }
+  /** Nothing known any more: the next list and read ask GitHub for listings. */
+  function forget(v: View) {
+    v.head = v.etag = v.mail = v.log = undefined;
+  }
+  /** One file added, replaced or (no sha) removed, as far as the view covers its folder. */
+  function applyChange(v: View, path: string, sha: string | undefined) {
+    let m = MAIL_FILE.exec(path);
+    if (m) {
+      if (!v.mail || m[1]! < v.mailFloor) return;
+      let files = v.mail.get(m[1]!);
+      if (!files) v.mail.set(m[1]!, (files = new Map()));
+      if (sha) files.set(m[2]!, { name: m[2]!, path, sha, type: 'file' });
+      else files.delete(m[2]!);
+      return;
+    }
+    if (!(m = LOG_FILE.exec(path)) || !v.log) return;
+    // A newer shard has begun: the view of the log is over, the next read lists.
+    if (m[1]! > v.log.shard) v.log = undefined;
+    else if (m[1] === v.log.shard) {
+      if (sha) v.log.entries.set(m[2]!, { name: m[2]!, path, sha, type: 'file' });
+      else v.log.entries.delete(m[2]!);
+    }
+  }
+  async function readHead(ow: string, re: string): Promise<string | undefined> {
+    const r = await gh.call('GET', `${repoPath(ow, re)}/commits?per_page=1`);
+    const sha = r.status === 200 && Array.isArray(r.data) ? r.data[0]?.sha : undefined;
+    return typeof sha === 'string' && sha ? sha : undefined;
+  }
+  /** See ChangeWatch.check. Errors (offline, a rate limit) are the caller's to handle. */
+  function check(space: SpaceRef): Promise<boolean> {
+    const [ow, re] = splitSpace(space);
+    const v = viewOf(ow, re);
+    const look = async (): Promise<boolean> => {
+      if (v.head && now() - v.genAt > VIEW_STALE_MS) forget(v);
+      if (!v.head) {
+        // No starting point (first look, or the view was dropped): take one now. It is older
+        // than any listing made after it, so nothing can fall between the two.
+        v.head = await readHead(ow, re);
+        return true;
+      }
+      const base = v.head;
+      const r = await gh.call('GET', `${repoPath(ow, re)}/compare/${enc(base)}...HEAD`, undefined, undefined, false, v.etag ? { 'If-None-Match': v.etag } : undefined);
+      if (r.status === 304) return v.rev !== v.readRev;
+      const d = r.data;
+      if (r.status !== 200 || !d || typeof d !== 'object') {
+        // The starting point is gone (history rewritten), or the repo is: the listings tell.
+        forget(v);
+        return true;
+      }
+      if (d.status === 'identical' || d.status === 'behind') {
+        if (v.head === base) v.etag = r.etag;
+        return v.rev !== v.readRev;
+      }
+      const tip = Array.isArray(d.commits) ? d.commits[d.commits.length - 1]?.sha : undefined;
+      if (d.status !== 'ahead' || typeof tip !== 'string' || !tip || !Array.isArray(d.files) || d.commits.length !== d.total_commits || d.files.length >= COMPARE_MAX_FILES) {
+        // More than one answer carries (a long gap), or an answer we don't understand.
+        forget(v);
+        return true;
+      }
+      for (const f of d.files as { filename?: unknown; previous_filename?: unknown; status?: unknown; sha?: unknown }[]) {
+        if (typeof f?.filename !== 'string') continue;
+        if (typeof f.previous_filename === 'string') applyChange(v, f.previous_filename, undefined);
+        applyChange(v, f.filename, f.status !== 'removed' && typeof f.sha === 'string' ? f.sha : undefined);
+      }
+      // A write of ours that landed meanwhile moved the start itself: keep that one (the
+      // answer may be older), and let the next check repeat what it must.
+      if (v.head === base) {
+        v.head = tip;
+        v.etag = undefined;
+      }
+      v.rev++;
+      return true;
+    };
+    v.checking ??= look()
+      .then((changed) => {
+        // Only an answer counts as a look: after a failure the next caller asks again.
+        v.gen++;
+        v.genAt = now();
+        return changed;
+      })
+      .finally(() => {
+        v.checking = undefined;
+      });
+    return v.checking;
+  }
+  /**
+   * The view, checked for this caller. The app usually checks first and syncs right after: the
+   * mailbox and the log then build on that check, each once, and ask nothing. Any other caller
+   * (a send that syncs first, a join) gets a check of its own.
+   */
+  async function fresh(space: SpaceRef, part: 'mailGen' | 'logGen'): Promise<View> {
+    const [ow, re] = splitSpace(space);
+    const v = viewOf(ow, re);
+    if (v.checking) await v.checking;
+    else if (!(v[part] < v.gen && now() - v.genAt <= VIEW_FRESH_MS)) await check(space);
+    v[part] = v.gen;
+    return v;
+  }
+  /**
+   * Our own write landed as `commit` on top of `parent`. If that is where the view stood, nothing
+   * of anyone else's came between: the view moves along, and the next check has nothing to say.
+   */
+  async function wrote(ow: string, re: string, files: { path: string; data?: Bytes; sha?: string }[], commit: unknown, parent: unknown) {
+    const v = views.get(viewKey(ow, re));
+    const mine = !!v?.head && typeof commit === 'string' && !!commit && parent === v.head;
+    const shas = await Promise.all(files.map(async (f) => (!f.data ? undefined : (f.sha ?? (mine || f.data.length <= BLOB_CACHE_ITEM ? await gitBlobSha(f.data) : undefined)))));
+    files.forEach((f, i) => f.data && shas[i] && (KEPT.test(f.path) ? keep : remember)(shas[i]!, f.data));
+    // Checked again: the view may have moved while the hashes were made.
+    if (!mine || v!.head !== parent) return;
+    v!.head = commit as string;
+    v!.etag = undefined;
+    files.forEach((f, i) => applyChange(v!, f.path, shas[i]));
   }
 
   /** A file's bytes and blob sha; undefined when missing or not a file (a folder, a symlink). */
@@ -217,8 +439,14 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
    */
   /** A mail file's bytes, by the blob sha its listing gave; undefined while GitHub can't serve it yet. */
   async function readMail(owner: string, repo: string, f: DirEntry): Promise<Versioned['data'] | undefined> {
+    const have = blobCache.get(f.sha);
+    if (have) return have;
     const b = await gh.call('GET', `${repoPath(owner, repo)}/git/blobs/${enc(f.sha)}`);
-    if (b.status === 200 && typeof b.data?.content === 'string') return fromB64(b.data.content);
+    if (b.status === 200 && typeof b.data?.content === 'string') {
+      const data = fromB64(b.data.content);
+      remember(f.sha, data);
+      return data;
+    }
     if (b.status === 403) return denied(owner, repo, `read ${f.path}`, b.status);
     if (b.status !== 404) throw new KeyholdError('config', `read ${f.path}: ${b.status}`);
     return (await getFile(owner, repo, f.path))?.data;
@@ -264,7 +492,10 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
     for (let attempt = 0; attempt < 5; attempt++) {
       if (attempt > 0) await gh.backoff(attempt - 1);
       const r = await gh.call('PUT', contents(owner, repo, path), body, undefined, true);
-      if (r.status === 200 || r.status === 201) return 'ok';
+      if (r.status === 200 || r.status === 201) {
+        await wrote(owner, repo, [{ path, data }], r.data?.commit?.sha, r.data?.commit?.parents?.[0]?.sha);
+        return 'ok';
+      }
       if (r.status === 409 || r.status === 422) {
         const cur = await getFile(owner, repo, path);
         mine ??= await gitBlobSha(data);
@@ -289,7 +520,10 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
     for (let attempt = 0; attempt < 5; attempt++) {
       if (attempt > 0) await gh.backoff(attempt - 1);
       const r = await gh.call('DELETE', contents(owner, repo, path), { message: 'update', sha }, undefined, true);
-      if (r.status === 200) return 'ok';
+      if (r.status === 200) {
+        await wrote(owner, repo, [{ path }], r.data?.commit?.sha, r.data?.commit?.parents?.[0]?.sha);
+        return 'ok';
+      }
       if (r.status === 404) return 'conflict';
       if (r.status === 409 || r.status === 422) {
         const cur = await getFile(owner, repo, path);
@@ -369,12 +603,24 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
   async function writeBatch(space: SpaceRef, files: { path: string; data: Bytes }[]): Promise<void> {
     const [ow, re] = splitSpace(space);
     const repo = `/repos/${enc(ow)}/${enc(re)}`;
+    // One or two files: plain writes, a round trip each, where a commit built by hand takes four.
+    if (files.length <= 2) {
+      for (const f of files) {
+        if ((await putFile(ow, re, f.path, f.data, null)) !== 'ok') throw new KeyholdError('conflict', 'could not post');
+      }
+      return;
+    }
     const data = files.map((f) => f.data);
     const fail = async (what: string, status: number): Promise<never> => {
       if (status === 403 || status === 404) return denied(ow, re, what, status);
       throw new KeyholdError('config', `${what}: ${status}`);
     };
-    // The blobs go up side by side; they belong to no commit until the ref moves.
+    let branch = branches.get(repo);
+    const tip = () => Promise.all([gh.call('GET', `${repo}/commits/HEAD`), branch ? undefined : gh.call('GET', repo)]);
+    // The blobs go up side by side (they belong to no commit until the ref moves), and the
+    // branch's head is asked for meanwhile.
+    const first = tip();
+    first.catch(() => undefined);
     const blobs = await Promise.all(
       data.map(async (d) => {
         const r = await gh.call('POST', `${repo}/git/blobs`, { content: toB64(d), encoding: 'base64' }, undefined, true);
@@ -383,9 +629,8 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
       }),
     );
     const tree = files.map((f, i) => ({ path: f.path, mode: '100644', type: 'blob', sha: blobs[i] }));
-    let branch = branches.get(repo);
     for (let attempt = 0; attempt < 5; attempt++) {
-      const [head, info] = await Promise.all([gh.call('GET', `${repo}/commits/HEAD`), branch ? undefined : gh.call('GET', repo)]);
+      const [head, info] = await (attempt ? tip() : first);
       if (head.status !== 200) await fail('read head', head.status);
       if (info) {
         if (info.status !== 200) await fail('read repo', info.status);
@@ -400,7 +645,10 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
       // write landed first -> build on top of it and try again. A lost reply is retried the same
       // way: if the first update landed, the retry commits the same files again, changing nothing.
       const r = await gh.call('PATCH', `${repo}/git/refs/heads/${enc(branch!)}`, { sha: c.data.sha, force: false }, undefined, true);
-      if (r.status === 200) return;
+      if (r.status === 200) {
+        await wrote(ow, re, files.map((f, i) => ({ ...f, sha: blobs[i] })), c.data.sha, head.data.sha);
+        return;
+      }
       if (r.status !== 409 && r.status !== 422) await fail('move branch', r.status);
     }
     throw new KeyholdError('conflict', 'could not post');
@@ -421,7 +669,13 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
   // A folder's files are read several at a time: one by one, a new browser catching up on a chat
   // (every log entry, every mail) took minutes on a phone.
   const readAll = async (owner: string, repo: string, entries: DirEntry[]) => {
-    const files = await inParallel(entries.filter((e) => e.type === 'file'), (e) => getFile(owner, repo, e.path));
+    const files = await inParallel(entries.filter((e) => e.type === 'file'), async (e) => {
+      const have = await stored(e.sha);
+      if (have) return { data: have, version: e.sha };
+      const f = await getFile(owner, repo, e.path);
+      if (f) keep(f.version, f.data);
+      return f;
+    });
     return files.filter((f) => !!f).map((f) => f.data);
   };
 
@@ -437,13 +691,14 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
       // 422 can only be our own create landing behind a lost reply: the name is random.
       await gh.expect('POST', '/user/repos', [201, 422], { name, private: true, auto_init: true, description, has_issues: false, has_wiki: false, has_projects: false });
       const repo = repoPath(login, name);
-      await gh.call('PUT', `${repo}/topics`, { names: ['keyhold-chat'] });
       // Members get full write access (GitHub ignores permission 'push' on personal repos).
       // Best effort, as plans without rulesets on private repos refuse: keep the history from
       // being force-pushed away or the branch deleted, and keep Actions workflows from running.
       // The app itself only ever fast-forwards (Contents API, and writeBatch with force: false).
       const quietly = (p: Promise<unknown>) => p.catch(() => undefined);
+      // The three settings go out together: nothing reads them before the first invitation.
       await Promise.all([
+        gh.call('PUT', `${repo}/topics`, { names: ['keyhold-chat'] }),
         quietly(
           gh.call('POST', `${repo}/rulesets`, {
             name: 'protect history',
@@ -460,28 +715,29 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
     async listSpaces() {
       const out = new Set<string>();
       const inst = await gh.expect('GET', '/user/installations?per_page=100', [200]);
-      for (const i of inst.data.installations ?? []) {
+      // One installation per account we share a chat with: asked side by side.
+      await inParallel((inst.data.installations ?? []) as { id: number }[], async (i) => {
         for (let page = 1; page < 50; page++) {
           const r = await gh.expect('GET', `/user/installations/${i.id}/repositories?per_page=100&page=${page}`, [200]);
           for (const repo of r.data.repositories ?? []) if (String(repo.name).startsWith(prefix)) out.add(String(repo.full_name).toLowerCase());
           if ((r.data.repositories ?? []).length < 100) break;
         }
-      }
-      return [...out];
+      });
+      return [...out].sort();
     },
     async canManage(space) {
       return splitSpace(space)[0] === login;
     },
     async members(space) {
       const [ow, re] = splitSpace(space);
-      const c = await gh.expect('GET', `/repos/${enc(ow)}/${enc(re)}/collaborators?affiliation=direct&per_page=100`, [200]);
+      const [c, inv] = await Promise.all([
+        gh.expect('GET', `/repos/${enc(ow)}/${enc(re)}/collaborators?affiliation=direct&per_page=100`, [200]),
+        ow === login ? gh.expect('GET', `/repos/${enc(ow)}/${enc(re)}/invitations?per_page=100`, [200]) : undefined,
+      ]);
       const active = (c.data as { login: string }[]).map((u) => toAddress(u.login));
       if (!active.includes(toAddress(ow))) active.push(toAddress(ow));
       const pending: Address[] = [];
-      if (ow === login) {
-        const inv = await gh.expect('GET', `/repos/${enc(ow)}/${enc(re)}/invitations?per_page=100`, [200]);
-        for (const i of inv.data as { invitee: { login: string } }[]) pending.push(toAddress(i.invitee.login));
-      }
+      for (const i of (inv?.data ?? []) as { invitee: { login: string } }[]) pending.push(toAddress(i.invitee.login));
       return { active, pending };
     },
     async grant(space, address): Promise<GrantResult> {
@@ -551,6 +807,17 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
   };
 
   const caps = new Set<Capability>(['owner-managed-spaces', 'pre-keys', 'inbox-payload']);
+  /** Directory reads under way, by owner. */
+  const dirReads = new Map<string, Promise<Bytes[]>>();
+  /** The synced store's last listing: which version each item had, and when. */
+  let itemsListed: { at: number; shas: Map<string, string>; asked: Set<string> } | undefined;
+  const ITEMS_LISTED_MS = 10_000;
+  /** The last log entry this browser wrote, by chat: the next one needs no look at it. */
+  const appended = new Map<string, number>();
+  /** Versions of drops read, for their delete. */
+  const dropVersions = new Map<string, string>();
+  /** How many entries our own directory had when last read, and when (see directory.append). */
+  let ownDir: { at: number; n: number } | undefined;
 
   return {
     name: 'github',
@@ -558,14 +825,31 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
     capabilities: caps,
     limits: { maxBlobBytes: 50 * 1024 * 1024, maxItemBytes: 1024 * 1024 },
     directory: {
-      async read(owner) {
+      read(owner) {
         const ow = userOf(owner);
-        return readAll(ow, dirRepo, await listDir(ow, dirRepo, 'dir', false));
+        // Several chats looking up the same person at once (after a reload, all of them) share
+        // one read. Entries are create-only files: one read before stays read.
+        let run = dirReads.get(ow);
+        if (!run) {
+          run = (async () => {
+            const entries = await listDir(ow, dirRepo, 'dir', false);
+            if (ow === login) ownDir = { at: now(), n: entries.filter((e) => e.type === 'file').length };
+            return readAll(ow, dirRepo, entries);
+          })().finally(() => dirReads.delete(ow));
+          dirReads.set(ow, run);
+        }
+        return run;
       },
       async append(index, entry) {
         await ensureOwnRepo(dirRepo, false, 'Public keys for an end-to-end encrypted chat app.');
-        const have = (await listDir(login, dirRepo, 'dir', false)).filter((e) => e.type === 'file');
-        if (have.length !== index) return 'conflict';
+        // The writer has just read the directory to make this entry: that count will do. (If
+        // another browser appended since, the create below fails, as a conflict should.)
+        const known = ownDir && now() - ownDir.at <= ITEMS_LISTED_MS ? ownDir.n : undefined;
+        ownDir = undefined;
+        if (known !== index) {
+          const have = (await listDir(login, dirRepo, 'dir', false)).filter((e) => e.type === 'file');
+          if (have.length !== index) return 'conflict';
+        }
         return putFile(login, dirRepo, `dir/${pad(index)}`, entry, null);
       },
     },
@@ -593,8 +877,23 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
         // it is empty (maybe no access: the listing below tells) or full (more shards follow).
         const first = Math.floor(from / 1000);
         const shard = String(first).padStart(5, '0');
+        const usable = (es: DirEntry[]) => es.length > 0 && !es.some((e) => Number(e.name) % 1000 === 999);
+        const v = await fresh(space, 'logGen');
+        const head = v.head;
+        if (head && v.log?.shard === shard && !v.relistLog) {
+          // Known from a listing plus the changes since: no listing, and entries read before
+          // (the last one is read again each time, to see that the log was not rewritten) cost nothing.
+          const known = [...v.log.entries.values()].sort(byName);
+          if (usable(known)) return readAll(ow, re, known.filter((e) => Number(e.name) >= from));
+        }
         const direct = (await listDir(ow, re, `log/${shard}`, false)).filter((e) => e.type === 'file' && /^\d{8}$/.test(e.name));
-        if (direct.length && !direct.some((e) => Number(e.name) % 1000 === 999)) {
+        if (usable(direct)) {
+          // Only if the view still starts where it did before the listing: a check that moved it
+          // meanwhile may know of an entry this listing was too early for.
+          if (head && v.head === head) {
+            v.log = { shard, entries: new Map(direct.map((e) => [e.name, { name: e.name, path: e.path, sha: e.sha, type: e.type }])) };
+            v.relistLog = false;
+          }
           return readAll(ow, re, direct.filter((e) => Number(e.name) >= from));
         }
         const shards = (await listDir(ow, re, 'log')).filter((d) => d.type === 'dir' && /^\d{5}$/.test(d.name) && Number(d.name) >= Math.floor(from / 1000));
@@ -609,11 +908,19 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
       async append(space, index, entry) {
         const [ow, re] = splitSpace(space);
         if (index > 0) {
-          // Appends must be contiguous: refuse to leave a gap.
-          const prev = await gh.call('GET', contents(ow, re, logPath(index - 1)));
-          if (prev.status === 404) return 'conflict';
+          // Appends must be contiguous: refuse to leave a gap. Usually the entry before is known
+          // (listed, named by a check, or written by us); otherwise ask.
+          const before = LOG_FILE.exec(logPath(index - 1))!;
+          const v = views.get(viewKey(ow, re));
+          const known = appended.get(viewKey(ow, re)) === index - 1 || (v?.head && v.log && v.log.shard === before[1] && v.log.entries.has(before[2]!));
+          if (!known) {
+            const prev = await gh.call('GET', contents(ow, re, logPath(index - 1)));
+            if (prev.status === 404) return 'conflict';
+          }
         }
-        return putFile(ow, re, logPath(index), entry, null);
+        const r = await putFile(ow, re, logPath(index), entry, null);
+        if (r === 'ok') appended.set(viewKey(ow, re), index);
+        return r;
       },
     },
     mailbox: {
@@ -677,27 +984,52 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
         const [ow, re] = splitSpace(space);
         const c = cursor ? (JSON.parse(cursor) as { d: string; s: string[] }) : undefined;
         const seen = new Set(c?.s ?? []);
+        // No cursor day lies past tomorrow: a member whose clock runs far ahead (or who made up a
+        // folder) must not move everyone's cursor away from the days mail is really posted in.
+        const horizon = day(now() + 86_400_000);
+        const cd = c && DAY.test(c.d) ? (c.d > horizon ? horizon : c.d) : undefined;
         // Posters bucket by their own clock: re-scan the previous day too, to tolerate skew.
-        const min = c && DAY.test(c.d) ? prevDay(c.d) : '';
+        const min = cd ? prevDay(cd) : '';
         const listed: { d: { name: string }; files: DirEntry[] }[] = [];
-        // Usually the days to look at are known (the cursor's day, the day before, up to tomorrow
-        // for a poster's clock running ahead): list those folders at once, a round trip fewer.
-        const span: string[] = [];
-        if (min) for (let d = day(now() + 86_400_000); d >= min && span.length <= MAIL_SPAN_DAYS; d = prevDay(d)) span.unshift(d);
-        if (span.length && span.length <= MAIL_SPAN_DAYS) {
-          const got = await inParallel(span, async (name) => ({ d: { name }, files: (await listDir(ow, re, `mail/${name}`, false)).filter((f) => f.type === 'file') }));
-          listed.push(...got.filter((x) => x.files.length));
-        }
-        // Nothing there (a quiet chat, or no access: the listing below tells), or a long gap.
-        if (!listed.length) {
-          const days = (await listDir(ow, re, 'mail')).filter((d) => d.type === 'dir' && DAY.test(d.name) && d.name >= min);
-          // The trees API, not a Contents listing: a busy day can pass GitHub's 1,000-entry cap.
-          // Junk any member wrote (a folder, a symlink) is not mail, and must not block it.
-          listed.push(...(await inParallel(days, async (d) => ({ d, files: (await listDir(ow, re, d.path, true, d.sha)).filter((f) => f.type === 'file') }))));
+        const v = await fresh(space, 'mailGen');
+        const head = v.head;
+        const rev = v.rev;
+        if (head && v.mail && !v.relistMail && v.mailFloor <= min) {
+          // Known from a listing plus the changes since: nothing to list.
+          for (const name of [...v.mail.keys()].sort()) {
+            const files = name >= min ? [...v.mail.get(name)!.values()].sort(byName) : [];
+            if (files.length) listed.push({ d: { name }, files });
+          }
+        } else {
+          // Usually the days to look at are known (the cursor's day, the day before, up to tomorrow
+          // for a poster's clock running ahead): list those folders at once, a round trip fewer.
+          const span: string[] = [];
+          if (min) for (let d = horizon; d >= min && span.length <= MAIL_SPAN_DAYS; d = prevDay(d)) span.unshift(d);
+          if (span.length && span.length <= MAIL_SPAN_DAYS) {
+            const got = await inParallel(span, async (name) => ({ d: { name }, files: (await listDir(ow, re, `mail/${name}`, false)).filter((f) => f.type === 'file') }));
+            listed.push(...got.filter((x) => x.files.length));
+          }
+          // Nothing there (a quiet chat, or no access: the listing below tells), or a long gap.
+          if (!listed.length) {
+            // (With a starting point, a check has just reached the repo: a missing folder is
+            // only a chat without mail yet, and needs no second look at the repo.)
+            const days = (await listDir(ow, re, 'mail', !head)).filter((d) => d.type === 'dir' && DAY.test(d.name) && d.name >= min);
+            // The trees API, not a Contents listing: a busy day can pass GitHub's 1,000-entry cap.
+            // Junk any member wrote (a folder, a symlink) is not mail, and must not block it.
+            listed.push(...(await inParallel(days, async (d) => ({ d, files: (await listDir(ow, re, d.path, true, d.sha)).filter((f) => f.type === 'file') }))));
+          }
+          // The view starts from this listing, if it still stands where it did before it: a
+          // check that moved it meanwhile may know of a file this listing was too early for.
+          if (head && v.head === head) {
+            v.mail = new Map(listed.map((x) => [x.d.name, new Map(x.files.map((f) => [f.name, { name: f.name, path: f.path, sha: f.sha, type: f.type }]))]));
+            v.mailFloor = min;
+            v.relistMail = false;
+          }
         }
         const items: MailboxItem[] = [];
         const keep: string[] = [];
-        const last = listed[listed.length - 1]?.d.name ?? c?.d ?? day(now());
+        let unread = false;
+        const last = [...listed].reverse().find((x) => x.d.name <= horizon)?.d.name ?? cd ?? day(now());
         for (const { d, files: entries } of listed) {
           const want = entries.filter((f) => !seen.has(f.name));
           // By blob sha from the listing: a path read can still 404 for a moment after the commit
@@ -708,9 +1040,12 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
             if (files[i]) items.push({ id: f.name, data: files[i]! });
             else missing.add(f.name);
           });
+          if (missing.size) unread = true;
           // Not readable yet: not seen, so the next list tries it again.
           if (d.name >= prevDay(last)) for (const f of entries) if (!missing.has(f.name)) keep.push(f.name);
         }
+        // Everything the checks up to `rev` found has been handed out (or is in the cursor).
+        if (!unread && v.readRev < rev) v.readRev = rev;
         return { items, cursor: JSON.stringify({ d: last, s: keep }) };
       },
     },
@@ -762,16 +1097,25 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
       async list(space, tag) {
         const [ow, re] = splitSpace(space);
         const out: MailboxItem[] = [];
-        for (const e of await listDir(ow, re, `drop/${seg(tag, 'recipient tag')}`, false)) {
-          if (e.type !== 'file') continue;
-          const f = await getFile(ow, re, e.path);
-          if (f) out.push({ id: e.name, data: f.data });
-        }
+        const entries = (await listDir(ow, re, `drop/${seg(tag, 'recipient tag')}`, false)).filter((e) => e.type === 'file');
+        const files = await inParallel(entries, (e) => getFile(ow, re, e.path));
+        entries.forEach((e, i) => {
+          const f = files[i];
+          if (!f) return;
+          out.push({ id: e.name, data: f.data });
+          // For the delete that follows a read: no second look for the file's version.
+          dropVersions.set(`${viewKey(ow, re)}/${e.path}`, f.version);
+        });
         return out;
       },
       async delete(space, tag, id) {
         const [ow, re] = splitSpace(space);
         const path = `drop/${seg(tag, 'recipient tag')}/${seg(id, 'drop id')}`;
+        const key = `${viewKey(ow, re)}/${path}`;
+        const known = dropVersions.get(key);
+        dropVersions.delete(key);
+        // A drop is written once under a random id: the version read is the version there.
+        if (known && (await deleteFile(ow, re, path, known)) === 'ok') return;
         const f = await getFile(ow, re, path);
         if (f) await deleteFile(ow, re, path, f.version);
       },
@@ -788,20 +1132,46 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
     },
     personal: {
       async list() {
-        return (await listDir(login, homeRepo, 'items', false)).filter((e) => e.type === 'file').map((e) => ({ id: e.name, version: e.sha }));
+        const items = (await listDir(login, homeRepo, 'items', false)).filter((e) => e.type === 'file').map((e) => ({ id: e.name, version: e.sha }));
+        itemsListed = { at: now(), shas: new Map(items.map((i) => [i.id, i.version])), asked: new Set() };
+        return items;
       },
       async get(id) {
-        return getFile(login, homeRepo, `items/${seg(id, 'item id')}`);
+        // The first get after a listing (a pull lists, then gets what changed) is a read as of
+        // that listing: the listed version, from the files kept by sha when we have it, so a
+        // reload re-reads only what did change. Any later get asks GitHub (a write reads the
+        // current version first, and must not build on an older one).
+        seg(id, 'item id');
+        const listed = itemsListed && now() - itemsListed.at <= ITEMS_LISTED_MS && !itemsListed.asked.has(id) ? itemsListed : undefined;
+        itemsListed?.asked.add(id);
+        const sha = listed?.shas.get(id);
+        // Not in the listing: no such item (as of then), without asking for a 404.
+        if (listed && !sha) return undefined;
+        const have = sha && (await stored(sha));
+        if (have) return { data: have, version: sha };
+        const f = await getFile(login, homeRepo, `items/${seg(id, 'item id')}`);
+        if (f) keep(f.version, f.data);
+        return f;
       },
       async put(id, data, expected) {
         seg(id, 'item id');
         await ensureOwnRepo(homeRepo, true, 'Encrypted settings for an end-to-end encrypted chat app.');
+        itemsListed?.asked.add(id);
         return putFile(login, homeRepo, `items/${id}`, data, expected);
       },
       async delete(id, expected) {
+        itemsListed?.asked.add(id);
         return deleteFile(login, homeRepo, `items/${seg(id, 'item id')}`, expected);
       },
     },
     channel,
+    changes: {
+      check,
+      relist(space) {
+        const [ow, re] = splitSpace(space);
+        const v = viewOf(ow, re);
+        v.relistMail = v.relistLog = true;
+      },
+    },
   };
 }
