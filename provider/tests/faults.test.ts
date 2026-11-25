@@ -366,3 +366,19 @@ describe('posts with ids chosen before the first try (keyhold retries)', () => {
     expect(await a.mailbox.post(s, bytes('late'), { id })).toBe(id);
   });
 });
+
+describe('mail that GitHub lists before it can serve it', () => {
+  it('is not marked seen: the next list delivers it', async () => {
+    const { a, s, gh } = await space();
+    const first = await a.mailbox.list(s);
+    await a.mailbox.post(s, bytes('late'));
+    // A replica behind the one that listed the file: both reads of it answer 404 for a moment.
+    gh.faults = { serverError: [{ match: '^GET .*/git/blobs/', times: 1, status: 404 }, { match: '^GET .*/contents/mail/\\d{8}/', times: 1, status: 404 }] };
+    const r1 = await a.mailbox.list(s, first.cursor);
+    expect(r1.items).toEqual([]);
+    gh.faults = undefined;
+    const r2 = await a.mailbox.list(s, r1.cursor);
+    expect(r2.items.map((i) => str(i.data))).toEqual(['late']);
+    expect((await a.mailbox.list(s, r2.cursor)).items).toEqual([]);
+  });
+});

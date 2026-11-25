@@ -307,6 +307,14 @@ const SPACE_SCAN_PENDING_MS = at(15_000);
 const INVITE_RETRY_MS = at(10_000);
 const INVITE_RETRY_MAX_MS = at(3 * 60_000);
 const JOINS_AT_ONCE = 3;
+/** A GitHub read that has not answered by then is given up (and retried by the next step). */
+const REQUEST_TIMEOUT_MS = 20_000;
+/** An answer slower than this is listed in Settings > Connection. */
+const SLOW_REQUEST_MS = 5_000;
+/** Writes can carry a picture over a slow link: more time, then the same. */
+const WRITE_TIMEOUT_MS = 90_000;
+/** Chats checked at once in a sync step: each check is a GitHub round trip, slow on a phone. */
+const CHECKS_AT_ONCE = 4;
 // Rotation itself is weekly (keyhold DEFAULT_PREKEYS); this is only how often to look.
 const PREKEY_CHECK_MS = at(10 * 60_000);
 /** A chat GitHub refuses us (maybe for a moment) is tried again after this, then less and less often. */
@@ -475,6 +483,31 @@ export class Session {
 
   // ---- GitHub access ----
 
+  /**
+   * Recent GitHub and Worker requests, for Settings > Connection: how many answered, and the
+   * last problems (failures, timeouts, slow answers). Paths only, never tokens or bodies.
+   */
+  readonly net = { since: Date.now(), ok: 0, failed: 0, slow: 0, totalMs: 0, problems: [] as { at: number; what: string; how: string; ms: number }[] };
+  private noteNet(url: string, method: string, ms: number, how?: string) {
+    const n = this.net;
+    if (how) n.failed++;
+    else {
+      n.ok++;
+      n.totalMs += ms;
+      if (ms >= SLOW_REQUEST_MS) n.slow++;
+    }
+    if (!how && ms < SLOW_REQUEST_MS) return;
+    let what = url;
+    try {
+      const u = new URL(url);
+      what = `${method} ${u.host}${u.pathname.split('/').slice(0, 5).join('/')}`;
+    } catch {
+      /* keep it as it is */
+    }
+    n.problems.unshift({ at: Date.now(), what, how: how ?? 'slow', ms });
+    n.problems.length = Math.min(n.problems.length, 20);
+  }
+
   /** fetch with the current (refreshed) token, no HTTP cache, and rate-limit tracking. */
   ghFetch = async (url: string, init: { method?: string; headers?: Record<string, string>; body?: string } = {}) => {
     const go = async (force: boolean) => {
@@ -482,13 +515,29 @@ export class Session {
       try {
         token = await (this.env.token ?? currentToken)(force);
       } catch (e) {
+        this.noteNet(CONFIG.worker + '/token', 'POST', 0, `sign-in refresh: ${(e as Error).message}`);
         if (e instanceof SignedOutError && !this.signedOut) {
           this.signedOut = true;
           this.bump();
         }
         throw e;
       }
-      return fetch(url, { ...init, headers: { ...(init.headers ?? {}), Authorization: `Bearer ${token}` }, cache: 'no-store' });
+      // A phone switching networks can leave a request hanging for minutes, and every chat's
+      // sync with it: give up and let the next step try again, like any dropped connection.
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), !init.method || init.method === 'GET' ? REQUEST_TIMEOUT_MS : WRITE_TIMEOUT_MS);
+      const t0 = Date.now();
+      try {
+        const r = await fetch(url, { ...init, headers: { ...(init.headers ?? {}), Authorization: `Bearer ${token}` }, cache: 'no-store', signal: ctl.signal });
+        this.noteNet(url, init.method ?? 'GET', Date.now() - t0, r.status >= 500 || r.status === 429 ? `HTTP ${r.status}` : undefined);
+        return r;
+      } catch (e) {
+        this.noteNet(url, init.method ?? 'GET', Date.now() - t0, ctl.signal.aborted ? 'timed out' : (e as Error).message || String(e));
+        if (ctl.signal.aborted) throw new TypeError('Failed to fetch (timed out)');
+        throw e;
+      } finally {
+        clearTimeout(t);
+      }
     };
     let r = await go(false);
     if (r.status === 401) r = await go(true);
@@ -880,6 +929,7 @@ export class Session {
     for (const g of this.chat.groups.keys()) if (this.groupErrors.has(g)) this.lastFullSync.delete(g);
     for (const l of this.lost.values()) l.next = 0;
     this.kick?.();
+    this.openKick?.();
   };
 
   /** Opened from the stored install check: make sure the install is still there. */
@@ -2389,6 +2439,7 @@ export class Session {
         this.lastCheck.delete(r.groupId);
       }
       this.kick?.();
+      this.openKick?.();
     }
     this.bump();
   }
@@ -2437,6 +2488,7 @@ export class Session {
   private async loop() {
     // A chat reopened after a stop (install came back) starts a new loop; an older one ends.
     const run = ++this.loopRun;
+    void this.openChatLoop(run);
     while (!this.stopped && run === this.loopRun) {
       const waiting = this.afterTick.splice(0);
       try {
@@ -2460,6 +2512,76 @@ export class Session {
     }
   }
 
+  /** Chat checks under way, so the two lanes never check one chat twice at once. */
+  private checking = new Map<string, Promise<void>>();
+
+  /** Is this chat's change check due? */
+  private groupDue(g: Group, now: number, hidden: boolean) {
+    if (this.checking.has(g.id)) return true; // under way: waiting for it is waiting for its result
+    const rec = this.records.get(g.id);
+    // Recently busy chats, and chats waiting for someone to join, are checked more often.
+    const warm = rec && (now - rec.lastTs < 2 * 60_000 || this.pending(g).length > 0);
+    const every = hidden ? HIDDEN_POLL_MS : this.onScreen(g.id) ? ACTIVE_POLL_MS : warm ? WARM_POLL_MS : IDLE_POLL_MS;
+    return now - (this.lastCheck.get(g.id) ?? 0) >= every;
+  }
+
+  /** Check one chat for changes, and sync it when there are some (or its fallback is due). */
+  private checkGroup(g: Group, now: number, hidden: boolean): Promise<void> {
+    const cur = this.checking.get(g.id);
+    if (cur) return cur;
+    const run = this.checkGroupNow(g, now, hidden).finally(() => this.checking.delete(g.id));
+    this.checking.set(g.id, run);
+    return run;
+  }
+
+  private async checkGroupNow(g: Group, now: number, hidden: boolean) {
+    try {
+      this.lastCheck.set(g.id, Date.now());
+      const rec = this.records.get(g.id);
+      const warm = rec && (now - rec.lastTs < 2 * 60_000 || this.pending(g).length > 0);
+      // GitHub's change check can lag up to a minute behind a push, so the open chat and busy
+      // chats also get a full sync every little while whatever it says.
+      const fallback = hidden ? Infinity : this.onScreen(g.id) ? FULL_SYNC_ACTIVE_MS : warm ? FULL_SYNC_WARM_MS : Infinity;
+      // A chat whose last sync failed gets a full one again (not more often than an open chat's),
+      // so its warning clears once GitHub answers, even if nothing new arrived meanwhile.
+      const retry = this.groupErrors.has(g.id) ? (hidden ? HIDDEN_POLL_MS : FULL_SYNC_ACTIVE_MS) : fallback;
+      const changed = await this.headChanged(g.space);
+      if (changed || now - (this.lastFullSync.get(g.id) ?? 0) >= retry) {
+        this.lastFullSync.set(g.id, Date.now());
+        await this.syncGroup(g);
+      }
+    } catch (e) {
+      this.groupErrors.set(g.id, this.noteError(e));
+    }
+  }
+
+  /**
+   * The chat on screen, on its own: checked every few seconds whatever the main step is busy
+   * with (other chats, invitations, the synced store), so new messages show up quickly.
+   */
+  private async openChatLoop(run: number) {
+    while (!this.stopped && run === this.loopRun) {
+      await new Promise<void>((resolve) => {
+        this.openKick = resolve;
+        setTimeout(resolve, LOOP_MS);
+      });
+      this.openKick = undefined;
+      if (!this.chat || this.stopped || run !== this.loopRun) continue;
+      const now = Date.now();
+      if (now < this.rateLimitedUntil || document.visibilityState === 'hidden') continue;
+      const open = [...this.chat.groups.values()].filter((g) => g.active && this.onScreen(g.id) && this.groupDue(g, now, false));
+      for (const g of open) await this.checkGroup(g, now, false);
+    }
+  }
+  private openKick?: () => void;
+
+  /** Check the chat on screen now, without waiting for its timer or for the main sync step. */
+  checkOpenChatNow() {
+    if (!this.chat) return;
+    for (const g of this.chat.groups.values()) if (this.onScreen(g.id)) this.lastCheck.delete(g.id);
+    this.openKick?.();
+  }
+
   private async tick() {
     if (!this.chat) return;
     const now = Date.now();
@@ -2476,6 +2598,7 @@ export class Session {
     }
     await this.resolveDuplicates().catch(() => undefined);
     await this.syncPersonal(now, hidden);
+    const due: Group[] = [];
     for (const g of [...this.chat.groups.values()]) {
       if (!g.active) {
         // Refused by GitHub, maybe only for a moment: check again with a growing wait (also after
@@ -2491,28 +2614,11 @@ export class Session {
         }
         continue;
       }
-      const rec = this.records.get(g.id);
-      // Recently busy chats, and chats waiting for someone to join, are checked more often.
-      const warm = rec && (now - rec.lastTs < 2 * 60_000 || this.pending(g).length > 0);
-      const every = hidden ? HIDDEN_POLL_MS : this.onScreen(g.id) ? ACTIVE_POLL_MS : warm ? WARM_POLL_MS : IDLE_POLL_MS;
-      if (now - (this.lastCheck.get(g.id) ?? 0) < every) continue;
-      this.lastCheck.set(g.id, Date.now());
-      // GitHub's change check can lag up to a minute behind a push, so the open chat and busy
-      // chats also get a full sync every little while whatever it says.
-      const fallback = hidden ? Infinity : this.onScreen(g.id) ? FULL_SYNC_ACTIVE_MS : warm ? FULL_SYNC_WARM_MS : Infinity;
-      // A chat whose last sync failed gets a full one again (not more often than an open chat's),
-      // so its warning clears once GitHub answers, even if nothing new arrived meanwhile.
-      const retry = this.groupErrors.has(g.id) ? (hidden ? HIDDEN_POLL_MS : FULL_SYNC_ACTIVE_MS) : fallback;
-      try {
-        const changed = await this.headChanged(g.space);
-        if (changed || now - (this.lastFullSync.get(g.id) ?? 0) >= retry) {
-          this.lastFullSync.set(g.id, Date.now());
-          await this.syncGroup(g);
-        }
-      } catch (e) {
-        this.groupErrors.set(g.id, this.noteError(e));
-      }
+      // The chat on screen also has its own lane (openChatLoop), so a busy step doesn't hold it up.
+      if (this.groupDue(g, now, hidden)) due.push(g);
     }
+    // Several at once: one at a time, a phone spent most of a step waiting on round trips.
+    await inParallel(due, (g) => this.checkGroup(g, now, hidden), CHECKS_AT_ONCE);
     // Keep this browser's pre-key published and fresh (accounts from before pre-keys get one
     // here). Only after a first full round, so invitations accepted elsewhere were joined first:
     // a retired key is pruned for good.
