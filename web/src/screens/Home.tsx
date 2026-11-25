@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { clampSide, saveSideWidth, SIDE_DEFAULT, SIDE_MAX, SIDE_MIN, sideWidth } from '../lib/prefs';
 import { loginFrom, type Convo, type PendingInvite, type Session } from '../lib/session';
-import { Avatar, ErrorFlash, go, Hint, Icon, Modal, timeLabel, useAction, useSession } from '../ui';
+import { Avatar, ErrorFlash, GroupAvatar, go, Hint, Icon, Modal, timeLabel, useAction, useSession } from '../ui';
 import { ChatMenu } from './ChatMenu';
 import { Contacts } from './Contacts';
 import { Conversation } from './Conversation';
 import { PeoplePicker } from './PeoplePicker';
 import { stepLine } from './Progress';
+import { PicturePicker } from './GroupPicture';
 
 export function Home({ session, route }: { session: Session; route: string }) {
   useSession(session);
@@ -156,7 +157,7 @@ function ChatRow({ session, c, active }: { session: Session; c: Convo; active: b
   return (
     <li className={`chat-row${active ? ' active' : ''}`}>
       <button className={`chat-item${active ? ' active' : ''}${c.unread ? ' unread' : ''}`} onClick={() => go(`/c/${encodeURIComponent(c.key)}`)}>
-        <Avatar name={c.title} login={c.peer ? loginFrom(c.peer) : undefined} square={!c.dm} size="lg" />
+        {c.dm ? <Avatar name={c.title} login={c.peer ? loginFrom(c.peer) : undefined} size="lg" /> : <GroupAvatar id={c.key} picture={c.avatar} size="lg" />}
         <span className="meta">
           <span className="name">
             <span>{c.title}</span>
@@ -218,7 +219,7 @@ function CatchUpRow({ session, inv }: { session: Session; inv: PendingInvite }) 
     : 'Could not add it yet';
   return (
     <div className="row invite-row catch-up" aria-busy={inv.status === 'joining' || inv.status === 'waiting'}>
-      <Avatar name={title} login={peer} square={!dm} size="lg" />
+      {r && !dm ? <GroupAvatar id={r.groupId} picture={r.avatar} size="lg" /> : <Avatar name={title} login={peer} square={!dm} size="lg" />}
       <div className="invite-text">
         <div className="invite-title">
           <span><strong>{title}</strong></span>
@@ -357,6 +358,7 @@ function NewDm({ session, onClose, onGroup }: { session: Session; onClose: () =>
 
 function NewGroup({ session, onClose }: { session: Session; onClose: () => void }) {
   const [name, setName] = useState('');
+  const [picture, setPicture] = useState('');
   const [people, setPeople] = useState<string[]>([]);
   const [query, setQuery] = useState('');
   const { busy, error, run, setError } = useAction();
@@ -367,16 +369,19 @@ function NewGroup({ session, onClose }: { session: Session; onClose: () => void 
         onSubmit={(e) => {
           e.preventDefault();
           void run(async () => {
-            const { group, failed } = await session.createGroup(name, [...people, ...query.split(/[\s,]+/)]);
+            const { group, failed } = await session.createGroup(name, [...people, ...query.split(/[\s,]+/)], undefined, picture || undefined);
             if (failed.length) setError(`Group created, but some invites failed: ${failed.join('; ')}`);
             else onClose();
             go(`/c/${encodeURIComponent(group.id)}`);
           });
         }}
       >
-        <div className="field">
-          <span className="field-label"><label htmlFor="g-name">Group name</label><Hint text="Encrypted. Only members see it, not GitHub." /></span>
-          <input id="g-name" className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Weekend hikers" autoFocus />
+        <div className="group-head">
+          <PicturePicker picture={picture || undefined} onChange={setPicture} disabled={busy} />
+          <div className="field">
+            <span className="field-label"><label htmlFor="g-name">Group name</label><Hint text="The name and picture are encrypted. Only members see them, not GitHub." /></span>
+            <input id="g-name" className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Weekend hikers" autoFocus />
+          </div>
         </div>
         <div className="field">
           <span className="field-label"><label htmlFor="g-people">Invite people</label><Hint text="Pick from your contacts, or type anyone's GitHub username and press Enter. You can add more later." /></span>

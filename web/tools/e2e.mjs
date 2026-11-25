@@ -216,12 +216,17 @@ try {
   await alice.page.getByLabel('Invite people').fill('carol');
   await alice.page.getByLabel('Invite people').press('Enter');
   await alice.page.locator('.chip', { hasText: 'carol' }).waitFor();
+  // a group picture, picked in the dialog (its file input sits in the picture picker)
+  await alice.page.locator('.modal .pic-picker input[type=file]').setInputFiles({ name: 'group.png', mimeType: 'image/png', buffer: PNG });
+  await alice.page.locator('.modal .pic-picker img').waitFor();
   await alice.page.screenshot({ path: `${SHOTS}/new-group-picker.png` });
   await alice.page.getByRole('button', { name: 'Create group' }).click();
   await alice.page.locator('.sys', { hasText: 'Invitation sent to @carol' }).waitFor({ timeout: 30000 });
   for (const p of [bob, carol]) await accept(p, 'alice', 70000);
   for (const p of [bob, carol]) await p.page.locator('.chat-item', { hasText: 'Weekend hikers' }).waitFor({ timeout: 70000 });
   check(true, 'bob and carol got the group');
+  await bob.page.locator('.chat-item', { hasText: 'Weekend hikers' }).locator('.group-avatar img').waitFor({ timeout: 30000 });
+  check(true, 'the group picture reached bob');
   await carol.page.locator('.chat-item', { hasText: 'Weekend hikers' }).click();
   await sendMsg(carol, 'carol here');
   await bob.page.locator('.chat-item', { hasText: 'Weekend hikers' }).click();
@@ -231,7 +236,7 @@ try {
   await bob.page.screenshot({ path: `${SHOTS}/group-bob.png` });
 
   // remove carol
-  await menu(alice, 'Members');
+  await menu(alice, 'Group info');
   await alice.page.locator('.member', { hasText: 'carol' }).getByRole('button', { name: 'Remove' }).click();
   await alice.page.locator('.sys', { hasText: '@carol left' }).waitFor({ timeout: 30000 }).catch(() => {});
   await carol.page.locator('.sys, .flash', { hasText: /You were removed|no longer available/ }).first().waitFor({ timeout: 45000 });

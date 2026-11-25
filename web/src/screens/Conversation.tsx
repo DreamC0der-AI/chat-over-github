@@ -2,7 +2,7 @@ import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Group } from 'keyhold/chat';
 import { describeError, loginFrom, type Convo, type MsgRecord, type PeerInfo, type Session } from '../lib/session';
 import { EARLIER_ELSEWHERE, endedText } from './Home';
-import { ask, Avatar, ErrorFlash, go, Hint, Icon, MenuItem, Notices, timeLabel, toast, useAction } from '../ui';
+import { ask, Avatar, ErrorFlash, GroupAvatar, go, Hint, Icon, MenuItem, Notices, timeLabel, toast, useAction } from '../ui';
 import { ChatMenu, CLOSE_ASK, deleteAsk, VerifyModal } from './ChatMenu';
 import { AttachmentView, DraftTray, isImage, Lightbox, PendingAttachment, saveBlob, toDrafts, type Draft, type Viewing } from './Attachments';
 import { EmojiRow, MsgPopup, useLongPress, type Anchor } from './MessageMenu';
@@ -135,7 +135,7 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
     <>
       <div className="convo-head">
         <a href="#/" className="btn icon ghost mobile-only" aria-label="Back to chats">{Icon.back()}</a>
-        <Avatar name={title} login={peerAddr ? loginFrom(peerAddr) : undefined} square={!dm} size="lg" />
+        {dm ? <Avatar name={title} login={peerAddr ? loginFrom(peerAddr) : undefined} size="lg" /> : <GroupAvatar id={convo.key} picture={convo.avatar} size="lg" />}
         <div className="who-text">
           <span className="convo-title-row">
             <strong className="convo-title">{title}</strong>

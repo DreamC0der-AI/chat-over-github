@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { type Convo, type Person, type Session } from '../lib/session';
-import { ask, Avatar, ErrorFlash, go, Icon, Modal, toast, useAction, useSession } from '../ui';
+import { ask, Avatar, ErrorFlash, GroupAvatar, go, Icon, Modal, toast, useAction, useSession } from '../ui';
 import { VerifyPanel } from './ChatMenu';
 
 /**
@@ -62,7 +62,7 @@ export function Contacts({ session, onNewGroup }: { session: Session; onNewGroup
                 return (
                   <li key={c.key}>
                     <button className="contact-item" onClick={() => go(`/c/${encodeURIComponent(c.key)}`)}>
-                      <Avatar name={c.title} square size="lg" />
+                      <GroupAvatar id={c.key} picture={c.avatar} size="lg" />
                       <span className="meta">
                         <span className="name">{c.title}{!c.live && <span className="label">{c.unreachable ? 'Can\u2019t reach' : 'Ended'}</span>}</span>
                         <span className="preview">{n ? `${n} ${n === 1 ? 'member' : 'members'}` : 'Not available'}</span>
