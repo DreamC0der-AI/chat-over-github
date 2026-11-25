@@ -1,7 +1,7 @@
 /**
- * GitHub App sign-in. Two ways in:
- *  - web flow: redirect to GitHub and back, then the Worker swaps the code (it holds the secret)
- *  - device flow: show a code to type at github.com/login/device (works without a callback URL)
+ * GitHub App sign-in: redirect to GitHub and back (web flow with PKCE), then the Worker swaps the
+ * code (it holds the secret). Device flow is turned off: a code someone else started could be used
+ * to phish a sign-in ("enter this code to join my chat").
  * GitHub App user tokens expire after 8 hours; the refresh token is swapped through the Worker.
  */
 import { CONFIG } from '../config';
@@ -119,36 +119,6 @@ export async function finishWebFlow(): Promise<AuthState | undefined> {
   sessionStorage.removeItem(PENDING);
   if (!pending || pending.state !== q.get('state')) throw new Error('Sign-in was interrupted. Please try again.');
   return fromTokenResponse(await workerPost('/oauth/token', { code, redirect_uri: redirectUri(), code_verifier: pending.verifier }));
-}
-
-// ---- device flow ----
-
-export interface DeviceCode {
-  device_code: string;
-  user_code: string;
-  verification_uri: string;
-  interval: number;
-  expires_in: number;
-}
-
-export async function startDeviceFlow(): Promise<DeviceCode> {
-  const r = (await workerPost('/oauth/device/code')) as unknown as DeviceCode & TokenResponse;
-  if (!r.device_code) throw new Error(r.error_description || r.error || 'Device sign-in is not available');
-  return r;
-}
-
-export async function pollDeviceFlow(code: DeviceCode, signal: AbortSignal): Promise<AuthState> {
-  let interval = (code.interval || 5) * 1000;
-  const end = Date.now() + code.expires_in * 1000;
-  while (!signal.aborted && Date.now() < end) {
-    await new Promise((r) => setTimeout(r, interval));
-    if (signal.aborted) break;
-    const t = await workerPost('/oauth/device/token', { device_code: code.device_code });
-    if (t.access_token) return fromTokenResponse(t);
-    if (t.error === 'slow_down') interval += 5000;
-    else if (t.error !== 'authorization_pending') throw new Error(t.error_description || t.error || 'Sign-in failed');
-  }
-  throw new Error('The code expired. Start again.');
 }
 
 // ---- mock (tests) ----

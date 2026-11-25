@@ -3,7 +3,8 @@
  *   npm run build:live && node scripts/live-github.mjs <loginA> <loginB>
  *
  * Signs both accounts in to the GitHub App with device flow (through the Worker), caching
- * tokens in ~/.keyhold-live (mode 600). Uses separate repo names (keyhold-live-*, ghchat-live-*)
+ * tokens in ~/.keyhold-live (mode 600). Device flow was turned off on 2026-11-25 (phishing risk):
+ * re-enable it on the App and restore the Worker's /oauth/device routes to sign in again. Uses separate repo names (keyhold-live-*, ghchat-live-*)
  * and deletes every repo it made at the end. Prints a JSON report.
  */
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
