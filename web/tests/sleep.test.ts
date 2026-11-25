@@ -25,6 +25,11 @@ describe('after sleep', () => {
       String(input).includes(g.space) ? Promise.reject(new TypeError('Failed to fetch')) : harnessFetch(input, init)) as typeof fetch;
     await alice.sync();
     expect(alice.s.groupErrors.get(g.id)).toBe('Offline. Retrying…');
+    // Just failed: a phone waking a tab always sees this, so it isn't shown yet.
+    expect(alice.s.chatWarning(g.id)).toBeUndefined();
+    const since = (alice.s as unknown as { errorSince: Map<string, number> }).errorSince;
+    since.set(g.id, Date.now() - 11_000);
+    expect(alice.s.chatWarning(g.id)).toBe('Offline. Retrying…'); // still failing after a while: shown
 
     globalThis.fetch = harnessFetch;
     // Nothing new in the chat, so GitHub's change check says "unchanged": the retry must not wait for news.
@@ -33,6 +38,7 @@ describe('after sleep', () => {
     s.onWake();
     await s.tick();
     expect(alice.s.groupErrors.has(g.id)).toBe(false);
+    expect(alice.s.chatWarning(g.id)).toBeUndefined();
   });
 });
 

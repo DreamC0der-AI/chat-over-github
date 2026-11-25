@@ -358,8 +358,12 @@ export function retryAfterMs(e: unknown): number | undefined {
   return undefined;
 }
 
+const OFFLINE = 'Offline. Retrying…';
+/** How long a dropped connection may last before the app says it is offline. */
+const OFFLINE_GRACE_MS = 10_000;
+
 export function describeError(e: unknown): string {
-  if (isNetworkError(e)) return 'Offline. Retrying…';
+  if (isNetworkError(e)) return OFFLINE;
   if (isRateLimit(e)) return 'GitHub rate limit reached. Wait a few minutes and try again.';
   return e instanceof Error ? e.message : String(e);
 }
@@ -383,6 +387,27 @@ export class Session {
   chat?: Chat;
   records = new Map<string, ChatRecord>();
   groupErrors = new Map<string, string>();
+  /** When each chat's current problem started: a dropped connection is shown only if it lasts. */
+  private errorSince = new Map<string, number>();
+  private setGroupError(id: string, message: string) {
+    if (!this.groupErrors.has(id)) this.errorSince.set(id, Date.now());
+    this.groupErrors.set(id, message);
+    // Shown once the grace is over, even if nothing else changes by then.
+    if (message === OFFLINE) setTimeout(() => this.bump(), OFFLINE_GRACE_MS + 50);
+  }
+  private clearGroupError(id: string) {
+    this.groupErrors.delete(id);
+    this.errorSince.delete(id);
+  }
+  /**
+   * The chat's problem to show, if any. A phone that wakes a tab finds its connections dropped:
+   * the first requests fail and the next ones work, so "Offline" waits a few seconds to be true.
+   */
+  chatWarning(id: string): string | undefined {
+    const e = this.groupErrors.get(id);
+    if (e === OFFLINE && Date.now() - (this.errorSince.get(id) ?? 0) < OFFLINE_GRACE_MS) return undefined;
+    return e;
+  }
   rateRemaining?: number;
   /** GitHub asked us to slow down: the timed sync steps wait until then (syncNow doesn't). */
   rateLimitedUntil = 0;
@@ -2080,10 +2105,10 @@ export class Session {
       await this.onEvents(g, r.events);
       // Saving new messages here failed (IndexedDB full?): keyhold keeps them and hands them over again.
       const stuck = r.events.find((e) => e.type === 'delivery-failed');
-      if (stuck) this.groupErrors.set(g.id, `New messages couldn't be saved in this browser (${stuck.waiting} waiting). Free up some storage space; nothing is lost.`);
-      else this.groupErrors.delete(g.id);
+      if (stuck) this.setGroupError(g.id, `New messages couldn't be saved in this browser (${stuck.waiting} waiting). Free up some storage space; nothing is lost.`);
+      else this.clearGroupError(g.id);
     } catch (e) {
-      this.groupErrors.set(g.id, this.noteError(e));
+      this.setGroupError(g.id, this.noteError(e));
     }
     // Refused by GitHub (maybe only for a moment): try again later, less and less often. Only a
     // signed close or a removal we can read ends the room; until then it is "can't reach".
@@ -2551,7 +2576,7 @@ export class Session {
         await this.syncGroup(g);
       }
     } catch (e) {
-      this.groupErrors.set(g.id, this.noteError(e));
+      this.setGroupError(g.id, this.noteError(e));
     }
   }
 
