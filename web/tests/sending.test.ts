@@ -87,3 +87,30 @@ describe('sending', () => {
     expect(bob.chat('alice')!.unread).toBe(unread);
   });
 });
+
+describe('the chat on screen', () => {
+  it('gets new messages while the rest of the sync step is stuck', async () => {
+    w = await world();
+    const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
+    await alice.setup();
+    await bob.setup();
+    await w.dm(alice, bob);
+    alice.s.setActive(alice.chat('bob')!.key);
+
+    // A slow phone: a read of alice's synced store hangs, and with it the rest of her sync step.
+    const held = w.hold((r) => r.login === 'alice' && r.url.includes('/chat-home/'));
+    const step = alice.s.syncNow();
+    await held.started;
+    await bob.s.send(bob.chat('alice')!.live!, 'are you there?');
+    // Not a sync step run by the test: the open chat's own lane, asked to check now.
+    alice.s.checkOpenChatNow();
+    const deadline = Date.now() + 5_000;
+    while (!(await alice.texts(alice.chat('bob'))).includes('are you there?')) {
+      if (Date.now() > deadline) throw new Error('the open chat waited for the stuck step');
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    held.release();
+    await step;
+    await w.checkConverged();
+  });
+});
