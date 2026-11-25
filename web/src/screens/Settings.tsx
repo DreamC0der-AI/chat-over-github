@@ -267,6 +267,26 @@ function SyncBox({ session }: { session: Session }) {
   );
 }
 
+/** The one-request check on trial: how often its answer matched the usual checks, and how long it took. */
+function TrialRows({ session }: { session: Session }) {
+  const t = session.trial;
+  if (!t.rounds && !t.failed) return null;
+  const per = (ms: number) => (t.rounds ? Math.round(ms / t.rounds) : 0);
+  return (
+    <>
+      <div className="box-row kv">
+        <span>One-request test, since {new Date(t.since).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
+        <span className="mono">{t.rounds} rounds · {t.failed} failed · {per(t.ms)} ms vs {per(t.checksMs)} ms</span>
+      </div>
+      <div className="box-row kv">
+        <span>Its answers</span>
+        <span className="mono">{t.same} same · {t.newer} newer · {t.older} older · {t.missing} missing</span>
+      </div>
+      {t.last && <div className="box-row small mono muted">{t.last}</div>}
+    </>
+  );
+}
+
 /** How this browser's requests to GitHub are going: for telling a bad network from an app bug. */
 function ConnectionBox({ session }: { session: Session }) {
   const [, tick] = useState(0);
@@ -282,6 +302,7 @@ function ConnectionBox({ session }: { session: Session }) {
     <section className="box">
       <div className="box-header"><h3>Connection</h3><Hint text="Requests this browser made to GitHub since the page opened. A screenshot of this helps find why messages are slow." /></div>
       <div className="box-row kv"><span>Last {mins} min</span><span className="mono">{n.ok} ok · {n.failed} failed · {n.slow} slow · avg {avg} ms</span></div>
+      <TrialRows session={session} />
       {n.problems.length === 0 ? (
         <div className="box-row muted">No problems</div>
       ) : (
