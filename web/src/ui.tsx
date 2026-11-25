@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, typ
 import { CONFIG } from './config';
 import type { Session } from './lib/session';
 import { useNewVersion } from './lib/update-check';
+import { avatarFailed, useAvatar } from './lib/avatars';
 
 export function useSession(s: Session) {
   useSyncExternalStore(s.subscribe, s.getVersion);
@@ -34,16 +35,13 @@ export function initials(name: string) {
   return ((parts[0]?.[0] ?? '?') + (parts[1]?.[0] ?? parts[0]?.[1] ?? '')).toUpperCase();
 }
 
-/** Logins whose avatar failed to load, so a remounted avatar goes straight to initials. */
-const failedAvatars = new Set<string>();
-
 export function Avatar({ name, login, square, size }: { name: string; login?: string; square?: boolean; size?: 'xs' | 'sm' | 'lg' | 'xl' }) {
   const [bg, fg] = tint(name);
-  const [failedNow, setFailed] = useState(false);
-  const failed = failedNow || (!!login && failedAvatars.has(login));
+  // A kept copy shows at once; a newer one replaces it only if the CDN says it changed.
+  const a = useAvatar(login);
   return (
     <span className={`avatar${square ? ' square' : ''}${size ? ' ' + size : ''}`} style={{ background: bg, color: fg }} aria-hidden="true">
-      {login && !failed ? <img src={`https://github.com/${encodeURIComponent(login)}.png?size=96`} alt="" onError={() => { failedAvatars.add(login); setFailed(true); }} referrerPolicy="no-referrer" /> : initials(name)}
+      {login && a && 'src' in a ? <img src={a.src} alt="" decoding="sync" onError={() => avatarFailed(login)} referrerPolicy="no-referrer" /> : a && 'failed' in a ? initials(name) : login ? null : initials(name)}
     </span>
   );
 }

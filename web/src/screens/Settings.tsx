@@ -4,6 +4,7 @@ import { signOut } from '../lib/auth';
 import { onTheme, saveSideWidth, setTheme, SIDE_DEFAULT, sideWidth, themeChoice, THEMES } from '../lib/prefs';
 import { loginFrom, type Session } from '../lib/session';
 import { ask, Avatar, ErrorFlash, Hint, Icon, Modal, useAction, useSession } from '../ui';
+import { forgetAvatars } from '../lib/avatars';
 
 type SectionId = 'appearance' | 'devices' | 'privacy' | 'storage' | 'account';
 const SECTIONS: { id: SectionId; name: string; icon: () => JSX.Element }[] = [
@@ -132,7 +133,7 @@ export function Settings({ session, route }: { session: Session; route: string }
                   <div className="box-header"><h3>Danger zone</h3></div>
                   <div className="box-row kv">
                     <span>Forget this browser <Hint text="Removes this browser's keys and messages. You'll need your recovery code to come back." /></span>
-                    <button className="btn danger" onClick={() => run(async () => { if (!(await ask({ title: 'Forget this browser?', body: 'Its keys and message history are deleted. You need your recovery code to use this account here again.', confirm: 'Forget this browser', danger: true }))) return; await session.forgetBrowser(); signOut(); location.hash = ''; location.reload(); })}>Forget</button>
+                    <button className="btn danger" onClick={() => run(async () => { if (!(await ask({ title: 'Forget this browser?', body: 'Its keys and message history are deleted. You need your recovery code to use this account here again.', confirm: 'Forget this browser', danger: true }))) return; await session.forgetBrowser(); forgetAvatars(); signOut(); location.hash = ''; location.reload(); })}>Forget</button>
                   </div>
                   <div className="box-row kv">
                     <span>Reset identity <Hint text="Start over with a brand-new identity. Contacts see a key change and your current chats stop working." /></span>
