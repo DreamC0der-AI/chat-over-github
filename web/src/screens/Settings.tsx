@@ -85,6 +85,7 @@ export function Settings({ session, route }: { session: Session; route: string }
                   )}
                 </section>
                 <SyncBox session={session} />
+                <ConnectionBox session={session} />
               </>
             )}
 
@@ -261,6 +262,35 @@ function SyncBox({ session }: { session: Session }) {
             {busy ? <span className="spinner" /> : 'Turn on sync'}
           </button>
         </div>
+      )}
+    </section>
+  );
+}
+
+/** How this browser's requests to GitHub are going: for telling a bad network from an app bug. */
+function ConnectionBox({ session }: { session: Session }) {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => tick((n) => n + 1), 2_000);
+    return () => clearInterval(t);
+  }, []);
+  const n = session.net;
+  const mins = Math.max(1, Math.round((Date.now() - n.since) / 60_000));
+  const avg = n.ok ? Math.round(n.totalMs / n.ok) : 0;
+  const time = (at: number) => new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return (
+    <section className="box">
+      <div className="box-header"><h3>Connection</h3><Hint text="Requests this browser made to GitHub since the page opened. A screenshot of this helps find why messages are slow." /></div>
+      <div className="box-row kv"><span>Last {mins} min</span><span className="mono">{n.ok} ok · {n.failed} failed · {n.slow} slow · avg {avg} ms</span></div>
+      {n.problems.length === 0 ? (
+        <div className="box-row muted">No problems</div>
+      ) : (
+        n.problems.map((p, i) => (
+          <div className="box-row small" key={i}>
+            <div className="mono">{time(p.at)} {p.how}{p.ms ? ` (${(p.ms / 1000).toFixed(1)} s)` : ''}</div>
+            <div className="mono muted" style={{ wordBreak: 'break-all' }}>{p.what}</div>
+          </div>
+        ))
       )}
     </section>
   );

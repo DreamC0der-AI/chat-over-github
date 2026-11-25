@@ -309,6 +309,8 @@ const INVITE_RETRY_MAX_MS = at(3 * 60_000);
 const JOINS_AT_ONCE = 3;
 /** A GitHub read that has not answered by then is given up (and retried by the next step). */
 const REQUEST_TIMEOUT_MS = 20_000;
+/** An answer slower than this is listed in Settings > Connection. */
+const SLOW_REQUEST_MS = 5_000;
 /** Writes can carry a picture over a slow link: more time, then the same. */
 const WRITE_TIMEOUT_MS = 90_000;
 /** Chats checked at once in a sync step: each check is a GitHub round trip, slow on a phone. */
@@ -481,6 +483,31 @@ export class Session {
 
   // ---- GitHub access ----
 
+  /**
+   * Recent GitHub and Worker requests, for Settings > Connection: how many answered, and the
+   * last problems (failures, timeouts, slow answers). Paths only, never tokens or bodies.
+   */
+  readonly net = { since: Date.now(), ok: 0, failed: 0, slow: 0, totalMs: 0, problems: [] as { at: number; what: string; how: string; ms: number }[] };
+  private noteNet(url: string, method: string, ms: number, how?: string) {
+    const n = this.net;
+    if (how) n.failed++;
+    else {
+      n.ok++;
+      n.totalMs += ms;
+      if (ms >= SLOW_REQUEST_MS) n.slow++;
+    }
+    if (!how && ms < SLOW_REQUEST_MS) return;
+    let what = url;
+    try {
+      const u = new URL(url);
+      what = `${method} ${u.host}${u.pathname.split('/').slice(0, 5).join('/')}`;
+    } catch {
+      /* keep it as it is */
+    }
+    n.problems.unshift({ at: Date.now(), what, how: how ?? 'slow', ms });
+    n.problems.length = Math.min(n.problems.length, 20);
+  }
+
   /** fetch with the current (refreshed) token, no HTTP cache, and rate-limit tracking. */
   ghFetch = async (url: string, init: { method?: string; headers?: Record<string, string>; body?: string } = {}) => {
     const go = async (force: boolean) => {
@@ -488,6 +515,7 @@ export class Session {
       try {
         token = await (this.env.token ?? currentToken)(force);
       } catch (e) {
+        this.noteNet(CONFIG.worker + '/token', 'POST', 0, `sign-in refresh: ${(e as Error).message}`);
         if (e instanceof SignedOutError && !this.signedOut) {
           this.signedOut = true;
           this.bump();
@@ -498,9 +526,13 @@ export class Session {
       // sync with it: give up and let the next step try again, like any dropped connection.
       const ctl = new AbortController();
       const t = setTimeout(() => ctl.abort(), !init.method || init.method === 'GET' ? REQUEST_TIMEOUT_MS : WRITE_TIMEOUT_MS);
+      const t0 = Date.now();
       try {
-        return await fetch(url, { ...init, headers: { ...(init.headers ?? {}), Authorization: `Bearer ${token}` }, cache: 'no-store', signal: ctl.signal });
+        const r = await fetch(url, { ...init, headers: { ...(init.headers ?? {}), Authorization: `Bearer ${token}` }, cache: 'no-store', signal: ctl.signal });
+        this.noteNet(url, init.method ?? 'GET', Date.now() - t0, r.status >= 500 || r.status === 429 ? `HTTP ${r.status}` : undefined);
+        return r;
       } catch (e) {
+        this.noteNet(url, init.method ?? 'GET', Date.now() - t0, ctl.signal.aborted ? 'timed out' : (e as Error).message || String(e));
         if (ctl.signal.aborted) throw new TypeError('Failed to fetch (timed out)');
         throw e;
       } finally {
