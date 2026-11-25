@@ -29,6 +29,39 @@ describe('two browsers of one account', () => {
   await w.checkConverged();
   });
 
+  it("a new browser catches up on several chats in one sync step and doesn't rewrite the synced chat list", async () => {
+    w = await world();
+    const [alice, bob, carol] = [await w.browser('alice'), await w.browser('bob'), await w.browser('carol')];
+    const code = await alice.setup();
+    await bob.setup();
+    await carol.setup();
+    await w.dm(alice, bob);
+    await w.dm(alice, carol);
+    for (const name of ['G1', 'G2', 'G3']) {
+      await alice.s.createGroup(name, ['bob']);
+      await w.until(() => !!bob.inviteFrom('alice'), `bob sees ${name}`);
+      await bob.s.acceptInvite(bob.inviteFrom('alice')!.key);
+      await w.until(() => !!bob.chat(name)?.live, `bob joined ${name}`);
+    }
+    for (const c of alice.chats()) await alice.s.send(c.live!, `hi ${c.title}`);
+    await w.rounds(2);
+
+    const alice2 = await w.browser('alice');
+    await alice2.restore(code);
+    const from = w.requests.length;
+    await alice2.sync();
+    expect(alice2.chats().filter((c) => c.live).length).toBe(5);
+    expect(alice2.invites()).toEqual([]);
+    // The chat list and read marks it pulled are already what the store says: no commit per chat
+    // (before, 11 writes here; what's left is this browser's own contact pins).
+    const puts = w.requests.slice(from).filter((r) => r.method === 'PUT' && r.url.includes('/chat-home/contents/items/'));
+    expect(puts.length).toBeLessThanOrEqual(1);
+
+    await bob.s.send(bob.chat('G2')!.live!, 'after the new browser');
+    await w.until(async () => (await alice2.texts(alice2.chat('G2'))).includes('after the new browser'), 'the new browser reads G2');
+    await w.checkConverged();
+  });
+
   it('messages sent back to back reach both browsers of the receiver, none undecryptable', async () => {
     w = await world();
     const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];

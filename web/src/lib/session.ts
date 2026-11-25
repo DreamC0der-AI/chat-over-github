@@ -2,7 +2,7 @@
  * One signed-in account in this browser: Keyhold chat over the GitHub provider, the local
  * stores, and a polling loop that keeps chats up to date without burning the rate limit.
  */
-import { githubProvider, toAddress, loginOf, retryAfterOf } from 'chat-over-github-provider';
+import { githubProvider, toAddress, loginOf, retryAfterOf, inParallel } from 'chat-over-github-provider';
 import type { FetchFn } from 'chat-over-github-provider';
 import { resolveFeatures } from 'keyhold/storage';
 import type { DeviceStorage, StorageProvider } from 'keyhold/storage';
@@ -217,6 +217,8 @@ export interface PendingInvite {
   attempts: number;
   nextTry: number;
   dismissed?: boolean;
+  /** This browser is joining it right now (others wait their turn: a few join at once). */
+  busy?: boolean;
   /**
    * The account is already in this chat (another of our browsers made or joined it): this browser
    * is only catching up, nobody invited us.
@@ -304,6 +306,7 @@ const SPACE_SCAN_MS = at(60_000);
 const SPACE_SCAN_PENDING_MS = at(15_000);
 const INVITE_RETRY_MS = at(10_000);
 const INVITE_RETRY_MAX_MS = at(3 * 60_000);
+const JOINS_AT_ONCE = 3;
 // Rotation itself is weekly (keyhold DEFAULT_PREKEYS); this is only how often to look.
 const PREKEY_CHECK_MS = at(10 * 60_000);
 /** A chat GitHub refuses us (maybe for a moment) is tried again after this, then less and less often. */
@@ -1020,11 +1023,25 @@ export class Session {
     for (const k of Object.keys(fields)) if (fields[k] === undefined && k !== 'endedLast') delete fields[k];
     if (fields.endedLast === undefined && !r.rejoinedAt) delete fields.endedLast;
     const snap = JSON.stringify(fields);
-    if (this.pushed.get(r.groupId) !== snap) void this.queueSet(r.groupId, snap, (p) => p.set('chats', r.groupId, fields, CHAT_RULES));
+    // What the synced store already says isn't written again: a new browser that just pulled the
+    // chat list would otherwise rewrite every chat, one GitHub commit each.
+    if (this.pushed.get(r.groupId) !== snap) {
+      void this.queueSet(r.groupId, snap, async (p) => {
+        const cur = await p.get('chats', r.groupId, false);
+        if (cur && Object.entries(fields).every(([k, v]) => JSON.stringify(cur[k]) === JSON.stringify(v))) return;
+        await p.set('chats', r.groupId, fields, CHAT_RULES);
+      });
+    }
     // Read up to here: other browsers clear their unread count.
     if (!r.unread) {
       const mark = `read:${r.lastTs}`;
-      if (this.pushed.get(`r/${r.groupId}`) !== mark) void this.queueSet(`r/${r.groupId}`, mark, (p) => p.set('readMarks', r.groupId, { at: r.lastTs }, { at: 'max' }));
+      if (this.pushed.get(`r/${r.groupId}`) !== mark) {
+        void this.queueSet(`r/${r.groupId}`, mark, async (p) => {
+          const cur = await p.get<{ at?: number }>('readMarks', r.groupId, false);
+          if (typeof cur?.at === 'number' && cur.at >= r.lastTs) return;
+          await p.set('readMarks', r.groupId, { at: r.lastTs }, { at: 'max' });
+        });
+      }
     }
   }
 
@@ -2154,6 +2171,7 @@ export class Session {
     }
     // A room GitHub refused us doesn't count as joined: being invited back is how access returns.
     have = new Set([...chat.groups.values()].filter((g) => g.active).map((g) => g.space));
+    const due: PendingInvite[] = [];
     for (const inv of [...this.invites.values()]) {
       if (inv.space && have.has(inv.space)) {
         this.invites.delete(inv.key);
@@ -2161,45 +2179,65 @@ export class Session {
       }
       if (!inv.space || inv.dismissed || inv.status === 'invited') continue;
       if (!force && now < inv.nextTry) continue;
-      inv.status = 'joining';
-      this.activities.stepFor(inv.key, JOIN_UNLOCK, inv.space);
-      this.bump();
-      try {
-        const g = await chat.join(inv.space);
-        if (g) {
-          const r = this.fill(g); // while the invitation (and its note) is still known
-          this.invites.delete(inv.key);
-          if (r.ended || r.purged || inv.rejoin) {
-            // Invited back: this join is newer than the end, on every browser of the account.
-            r.ended = undefined;
-            r.purged = undefined;
-            r.rejoinedAt = Date.now();
-            this.lost.delete(g.id);
-            await this.saveRecord(r);
-          }
-          this.activities.stepFor(inv.key, JOIN_LOAD);
-          const a = this.activities.forKey(inv.key);
-          if (a && !a.ended) a.link = `/c/${encodeURIComponent(this.convoKey(r))}`;
-          // Catching up on a chat the account was already in: its history stays in the other browsers.
-          // "Already" means it existed before this browser was added, not some fixed age.
-          if (inv.mine && !r.joinedAt && r.createdAt < (this.identity?.cert.issuedAt ?? Date.now())) {
-            r.joinedAt = Date.now();
-            await this.saveRecord(r);
-          }
-          await this.syncGroup(g);
-          continue;
-        }
-        // No ticket for our identity yet: we asked the inviter's app for one. It answers the
-        // next time it syncs, so try again soon, then back off.
-        inv.status = 'waiting';
-        inv.error = undefined;
-      } catch (e) {
-        inv.status = 'error';
-        inv.error = describeError(e);
-      }
-      inv.attempts++;
-      inv.nextTry = Date.now() + Math.min(INVITE_RETRY_MS * 2 ** Math.min(inv.attempts - 1, 5), INVITE_RETRY_MAX_MS);
+      due.push(inv);
     }
+    // Several chats at once: a new browser catching up on all of the account's chats did them one
+    // after another, minutes each on a phone. Each join is for its own repo and group.
+    await inParallel(due, async (inv) => {
+      inv.busy = true;
+      try {
+        await this.joinOne(inv);
+      } finally {
+        inv.busy = false;
+      }
+    }, JOINS_AT_ONCE);
+    this.bump();
+  }
+
+  /** Join the chat of one accepted invitation (or one the account is already in). */
+  private async joinOne(inv: PendingInvite) {
+    const chat = this.chat!;
+    const space = inv.space;
+    if (!space) return;
+    inv.status = 'joining';
+    this.activities.stepFor(inv.key, JOIN_UNLOCK, space);
+    this.bump();
+    try {
+      const g = await chat.join(space);
+      if (g) {
+        const r = this.fill(g); // while the invitation (and its note) is still known
+        this.invites.delete(inv.key);
+        if (r.ended || r.purged || inv.rejoin) {
+          // Invited back: this join is newer than the end, on every browser of the account.
+          r.ended = undefined;
+          r.purged = undefined;
+          r.rejoinedAt = Date.now();
+          this.lost.delete(g.id);
+          await this.saveRecord(r);
+        }
+        this.activities.stepFor(inv.key, JOIN_LOAD);
+        const a = this.activities.forKey(inv.key);
+        if (a && !a.ended) a.link = `/c/${encodeURIComponent(this.convoKey(r))}`;
+        // Catching up on a chat the account was already in: its history stays in the other browsers.
+        // "Already" means it existed before this browser was added, not some fixed age.
+        if (inv.mine && !r.joinedAt && r.createdAt < (this.identity?.cert.issuedAt ?? Date.now())) {
+          r.joinedAt = Date.now();
+          await this.saveRecord(r);
+        }
+        await this.syncGroup(g);
+        this.bump();
+        return;
+      }
+      // No ticket for our identity yet: we asked the inviter's app for one. It answers the
+      // next time it syncs, so try again soon, then back off.
+      inv.status = 'waiting';
+      inv.error = undefined;
+    } catch (e) {
+      inv.status = 'error';
+      inv.error = describeError(e);
+    }
+    inv.attempts++;
+    inv.nextTry = Date.now() + Math.min(INVITE_RETRY_MS * 2 ** Math.min(inv.attempts - 1, 5), INVITE_RETRY_MAX_MS);
     this.bump();
   }
 

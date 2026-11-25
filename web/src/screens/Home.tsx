@@ -209,8 +209,11 @@ function CatchUpRow({ session, inv }: { session: Session; inv: PendingInvite }) 
   const dm = r?.kind !== 'group';
   const peer = dm && r?.peer ? loginFrom(r.peer) : undefined;
   const title = peer ?? r?.lastName ?? (r?.kind === 'group' ? 'Untitled group' : 'Chat from another browser');
+  // A few chats are added at once; the rest wait their turn without a spinner each.
+  const queued = inv.status === 'joining' && !inv.busy;
   const text =
-    inv.status === 'joining' ? 'Adding to this browser…'
+    queued ? 'Waiting its turn'
+    : inv.status === 'joining' ? 'Adding to this browser…'
     : inv.status === 'waiting' ? 'Waiting for another member'
     : 'Could not add it yet';
   return (
@@ -222,7 +225,7 @@ function CatchUpRow({ session, inv }: { session: Session; inv: PendingInvite }) 
           {inv.status === 'waiting' && <Hint text="Another member's app has to let this browser in. That happens as soon as one of them has Chat over GitHub open." />}
         </div>
         <div className="small muted" title={inv.error}>
-          {inv.status !== 'error' && <span className="spinner" style={{ width: 10, height: 10, marginRight: 4 }} />}
+          {inv.status !== 'error' && !queued && <span className="spinner" style={{ width: 10, height: 10, marginRight: 4 }} />}
           {text}{inv.error ? `. ${inv.error}` : ''}
         </div>
         {(inv.status === 'waiting' || inv.status === 'error') && (

@@ -120,6 +120,23 @@ interface DirEntry {
   type: string;
 }
 
+/** How many GitHub reads one listing runs at once: well under GitHub's limit on concurrent requests. */
+export const READ_CONCURRENCY = 6;
+
+/** `fn` over every item, a few at a time; results in the items' order. */
+export async function inParallel<T, R>(items: T[], fn: (item: T) => Promise<R>, limit = READ_CONCURRENCY): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
 export function githubProvider(o: GitHubProviderOptions): StorageProvider & { client: GitHubClient } {
   const gh = new GitHubClient({ fetch: o.fetch, token: o.token, apiBase: o.apiBase, sleep: o.sleep });
   const login = o.login.toLowerCase();
@@ -386,14 +403,11 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
   }
 
   /** The files' bytes, skipping entries that aren't files or are gone. */
+  // A folder's files are read several at a time: one by one, a new browser catching up on a chat
+  // (every log entry, every mail) took minutes on a phone.
   const readAll = async (owner: string, repo: string, entries: DirEntry[]) => {
-    const out: Bytes[] = [];
-    for (const e of entries) {
-      if (e.type !== 'file') continue;
-      const f = await getFile(owner, repo, e.path);
-      if (f) out.push(f.data);
-    }
-    return out;
+    const files = await inParallel(entries.filter((e) => e.type === 'file'), (e) => getFile(owner, repo, e.path));
+    return files.filter((f) => !!f).map((f) => f.data);
   };
 
   // ---- Mailbox with day buckets -----------------------------------------------------------
@@ -648,14 +662,17 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
         const last = days[days.length - 1]?.name ?? c?.d ?? day(now());
         for (const d of days) {
           // The trees API, not a Contents listing: a busy day can pass GitHub's 1,000-entry cap.
+          const want: DirEntry[] = [];
           for (const f of await listDir(ow, re, d.path, true, d.sha)) {
             // Junk any member wrote (a folder, a symlink) is not mail, and must not block it.
             if (f.type !== 'file') continue;
             if (d.name >= prevDay(last)) keep.push(f.name);
-            if (seen.has(f.name)) continue;
-            const file = await getFile(ow, re, f.path);
-            if (file) items.push({ id: f.name, data: file.data });
+            if (!seen.has(f.name)) want.push(f);
           }
+          const files = await inParallel(want, (f) => getFile(ow, re, f.path));
+          want.forEach((f, i) => {
+            if (files[i]) items.push({ id: f.name, data: files[i]!.data });
+          });
         }
         return { items, cursor: JSON.stringify({ d: last, s: keep }) };
       },
