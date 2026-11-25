@@ -44,6 +44,7 @@ import { Db, idbDevice } from './idb';
 import { WorkGate } from './tab-lock';
 import { servedType } from './mime';
 import { ContactBook } from './contacts';
+import { safeAvatar } from './group-avatar';
 
 export type Phase = 'loading' | 'install' | 'new-identity' | 'restore' | 'ready' | 'error';
 
@@ -133,6 +134,8 @@ export interface ChatRecord {
   unread: number;
   hidden?: boolean;
   lastName?: string;
+  /** Group picture (a data URL) from the newest admin meta message, kept for when the group state is gone. '' = removed. */
+  avatar?: string;
   deviceCount?: number;
   /** The room's repo, kept so the room can still be shown after its group state is gone. */
   space?: string;
@@ -187,6 +190,8 @@ export interface Convo {
   /** The newest room that still has group state (live, or unavailable). */
   current?: Group;
   title: string;
+  /** Group picture an admin set (data URL), if any. */
+  avatar?: string;
   lastTs: number;
   lastText?: string;
   unread: number;
@@ -1321,9 +1326,11 @@ export class Session {
     const last = rooms.reduce((a, b) => (b.lastTs >= a.lastTs ? b : a));
     const peer = dm ? rooms.find((r) => r.peer)?.peer : undefined;
     const name = [...rooms].reverse().find((r) => r.lastName)?.lastName;
+    const avatar = dm ? undefined : (current?.avatar ?? [...rooms].reverse().find((r) => r.avatar !== undefined)?.avatar);
     return {
       key, dm, peer, rooms, live, current,
       title: dm ? (peer ? loginFrom(peer) : 'Direct message') : current?.name || name || 'Untitled group',
+      avatar: avatar || undefined,
       lastTs: last.lastTs,
       lastText: last.lastText,
       unread: rooms.reduce((n, r) => n + r.unread, 0),
@@ -1511,7 +1518,8 @@ export class Session {
     );
   }
 
-  async createGroup(name: string, inputs: string[], onStart?: (a: Activity) => void): Promise<{ group: Group; failed: string[] }> {
+  /** `avatar`: a picture from makeAvatar, sent encrypted with the name. */
+  async createGroup(name: string, inputs: string[], onStart?: (a: Activity) => void, avatar?: string): Promise<{ group: Group; failed: string[] }> {
     const logins = [...new Set(inputs.filter((s) => s.trim()).map((s) => this.normLogin(s)))];
     const title = name.trim() || 'new group';
     return this.activities.run(
@@ -1522,7 +1530,7 @@ export class Session {
         const [exists] = await Promise.all([Promise.all(logins.map((l) => this.userExists(l))), logins.length ? this.ensurePublished() : undefined]);
         const missing = logins.find((_, i) => !exists[i]);
         if (missing) throw new Error(`No GitHub user named ${missing}`);
-        const g = await this.chat!.createGroup('group', name.trim() || undefined);
+        const g = await this.chat!.createGroup('group', name.trim() || undefined, { avatar: safeAvatar(avatar) });
         t.space(g.space);
         t.link(`/c/${encodeURIComponent(g.id)}`);
         this.fill(g);
@@ -1754,6 +1762,19 @@ export class Session {
   async rename(g: Group, name: string) {
     await this.activities.run('Renaming the group', ['Saving the new name', 'Updating the chat'], async (t) => {
       await g.send({ t: 'meta', name }).catch((e) => {
+        this.dropUnsent(g, e);
+        throw e;
+      });
+      t.step('Updating the chat');
+      await this.syncGroup(g);
+    }, { key: this.convoKey(this.record(g.id)), space: g.space, anyCall: false });
+  }
+
+  /** Set (a data URL from makeAvatar) or remove ('') the group picture. Admins only, like the name. */
+  async setAvatar(g: Group, avatar: string) {
+    if (avatar && !safeAvatar(avatar)) throw new Error('This picture can\u2019t be used.');
+    await this.activities.run(avatar ? 'Changing the group picture' : 'Removing the group picture', ['Saving the picture', 'Updating the chat'], async (t) => {
+      await g.send({ t: 'meta', avatar }).catch((e) => {
         this.dropUnsent(g, e);
         throw e;
       });
@@ -2078,13 +2099,24 @@ export class Session {
         }
         break;
       }
-      case 'meta':
+      case 'meta': {
+        // keyhold takes names and pictures only from admins; the notes follow the same rule.
+        if (!g.policy.admins.includes(m.from.fingerprint)) break;
+        const who = mine ? 'You' : `@${loginFrom(m.from.address)}`;
+        if (typeof msg.avatar === 'string' && (msg.avatar ? safeAvatar(msg.avatar) : true) && msg.avatar !== r.avatar) {
+          r.avatar = msg.avatar;
+          await this.saveRecord(r);
+          // Only a picture-only message is someone changing it; with a name it is the group being
+          // made, or an admin repeating both for someone who just joined.
+          if (msg.name === undefined) await this.put({ ...base, id: `pic-${msg.id}`, kind: 'system', body: msg.avatar ? `${who} changed the group picture` : `${who} removed the group picture` });
+        }
         if (msg.name && msg.name !== r.lastName) {
           r.lastName = msg.name;
           await this.saveRecord(r);
           await this.put({ ...base, id: `meta-${msg.id}`, kind: 'system', body: mine ? `You named the group “${msg.name}”` : `@${loginFrom(m.from.address)} named the group “${msg.name}”` });
         }
         break;
+      }
       default:
         break;
     }
@@ -2142,8 +2174,10 @@ export class Session {
       // A commit everyone ignores: nothing the people in the chat can act on.
       else if (e.type === 'rejected') console.warn(`chat ${g.id}: ignored group change ${e.index} (${e.reason})`);
     }
-    if (shareName && g.active && !this.isDm(g) && g.name && g.policy.admins.includes(this.identity!.fingerprint)) {
-      await g.send({ t: 'meta', name: g.name }).catch((e) => this.dropUnsent(g, e));
+    // The picture goes with it (inside the same encrypted message: no extra request).
+    const avatar = safeAvatar(g.avatar);
+    if (shareName && g.active && !this.isDm(g) && (g.name || avatar) && g.policy.admins.includes(this.identity!.fingerprint)) {
+      await g.send({ t: 'meta', name: g.name || undefined, avatar }).catch((e) => this.dropUnsent(g, e));
     }
   }
 

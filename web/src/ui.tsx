@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, typ
 import { CONFIG } from './config';
 import type { Session } from './lib/session';
 import { useNewVersion } from './lib/update-check';
+import { groupPattern, safeAvatar } from './lib/group-avatar';
 import { avatarFailed, useAvatar } from './lib/avatars';
 
 export function useSession(s: Session) {
@@ -42,6 +43,17 @@ export function Avatar({ name, login, square, size }: { name: string; login?: st
   return (
     <span className={`avatar${square ? ' square' : ''}${size ? ' ' + size : ''}`} style={{ background: bg, color: fg }} aria-hidden="true">
       {login && a && 'src' in a ? <img src={a.src} alt="" decoding="sync" onError={() => avatarFailed(login)} referrerPolicy="no-referrer" /> : a && 'failed' in a ? initials(name) : login ? null : initials(name)}
+    </span>
+  );
+}
+
+/** A group's picture: the one an admin set, else the pattern every member draws from the group id. */
+export function GroupAvatar({ id, picture, size }: { id: string; picture?: string; size?: 'xs' | 'sm' | 'lg' | 'xl' }) {
+  const src = safeAvatar(picture);
+  const pat = src ? undefined : groupPattern(id);
+  return (
+    <span className={`avatar square group-avatar${size ? ' ' + size : ''}`} style={pat ? { background: `var(--t${pat.tint}-bg)`, color: `var(--t${pat.tint}-fg)` } : undefined} aria-hidden="true">
+      {src ? <img src={src} alt="" /> : <svg viewBox="0 0 10 10" width="100%" height="100%"><path d={pat!.d} fill="currentColor" /></svg>}
     </span>
   );
 }
@@ -94,6 +106,9 @@ export const Icon = {
   ),
   back: () => (
     <svg width="16" height="16" viewBox="0 0 24 24" {...P} aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
+  ),
+  camera: (s = 12) => (
+    <svg width={s} height={s} viewBox="0 0 24 24" {...P} strokeWidth={2.4} aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z" /><circle cx="12" cy="13" r="3.5" /></svg>
   ),
   close: () => (
     <svg width="16" height="16" viewBox="0 0 24 24" {...P} aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>

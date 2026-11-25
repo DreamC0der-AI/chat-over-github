@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { loginFrom, type Convo, type PeerInfo, type Session } from '../lib/session';
-import { ask, Avatar, ErrorFlash, go, Hint, Icon, Menu, MenuItem, Modal, toast, useAction } from '../ui';
+import { PicturePicker } from './GroupPicture';
+import { ask, Avatar, ErrorFlash, go, GroupAvatar, Hint, Icon, Menu, MenuItem, Modal, toast, useAction } from '../ui';
 
 export const CLOSE_ASK = { title: 'Close this chat?', body: 'It ends for everyone and its repo is deleted from GitHub. Everyone keeps the messages their app already has.', confirm: 'Close chat', danger: true };
 export const deleteAsk = (peer?: string) => ({ title: 'Delete this chat?', body: `Your copy of the messages is deleted from your browsers. ${peer ?? 'The other members'} keep${peer ? 's' : ''} their copy.`, confirm: 'Delete chat', danger: true });
@@ -25,7 +26,7 @@ export function ChatMenu({ session, convo, className }: { session: Session; conv
           const pick = (fn: () => void) => () => { close(); fn(); };
           return (
             <>
-              <MenuItem icon={dm ? Icon.info() : Icon.people()} onClick={pick(() => setInfo(true))}>{dm ? 'Chat info' : 'Members'}</MenuItem>
+              <MenuItem icon={dm ? Icon.info() : Icon.people()} onClick={pick(() => setInfo(true))}>{dm ? 'Chat info' : 'Group info'}</MenuItem>
               {dm && peer && <MenuItem icon={Icon.shield(true, 16)} onClick={pick(() => setVerify({ address: peer, fingerprint: (convo.live ?? convo.current)?.members().find((m) => m.address === peer && !m.pending)?.fingerprint }))}>Safety number</MenuItem>}
               <div className="menu-sep" role="separator" />
               <MenuItem icon={Icon.trash()} disabled={busy} onClick={pick(() => act(async () => {
@@ -57,7 +58,7 @@ export function ChatMenu({ session, convo, className }: { session: Session; conv
   );
 }
 
-/** Who is in the chat and where it is stored. Admins of a group rename, invite and remove here. */
+/** Who is in the chat and where it is stored. Admins of a group rename, change the picture, invite and remove here. */
 function ChatInfo({ session, convo, onClose, onVerify }: { session: Session; convo: Convo; onClose: () => void; onVerify: (address: string, fingerprint: string) => void }) {
   const dm = convo.dm;
   const live = convo.live;
@@ -69,14 +70,21 @@ function ChatInfo({ session, convo, onClose, onVerify }: { session: Session; con
   const [name, setName] = useState(group?.name ?? '');
   const { busy, doing, error, run } = useAction();
   return (
-    <Modal title={dm ? 'Chat info' : 'Members'} onClose={onClose}>
+    <Modal title={dm ? 'Chat info' : 'Group info'} onClose={onClose}>
       <ErrorFlash error={error} />
-      {!dm && iAmAdmin && live && (
-        <form className="inline-form" onSubmit={(e) => { e.preventDefault(); void run(() => session.rename(live, name.trim()), 'rename'); }}>
-          <label className="sr" htmlFor="group-name">Group name</label>
-          <input id="group-name" className="input" value={name} onChange={(e) => setName(e.target.value)} />
-          <button className="btn" disabled={busy || !name.trim() || name.trim() === live.name}>{doing === 'rename' ? <><span className="spinner" /> Renaming…</> : 'Rename'}</button>
-        </form>
+      {!dm && (
+        <div className="group-head">
+          {iAmAdmin && live
+            ? <PicturePicker groupId={convo.key} picture={convo.avatar} busy={doing === 'picture'} disabled={busy} onChange={(pic) => run(() => session.setAvatar(live, pic), 'picture')} />
+            : <GroupAvatar id={convo.key} picture={convo.avatar} size="xl" />}
+          {iAmAdmin && live ? (
+            <form className="inline-form" onSubmit={(e) => { e.preventDefault(); void run(() => session.rename(live, name.trim()), 'rename'); }}>
+              <label className="sr" htmlFor="group-name">Group name</label>
+              <input id="group-name" className="input" value={name} onChange={(e) => setName(e.target.value)} />
+              <button className="btn" disabled={busy || !name.trim() || name.trim() === live.name}>{doing === 'rename' ? <><span className="spinner" /> Renaming…</> : 'Rename'}</button>
+            </form>
+          ) : <span className="group-name">{convo.title}</span>}
+        </div>
       )}
       <div className="members">
         {members.map((m) => {
