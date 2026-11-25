@@ -603,12 +603,24 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
   async function writeBatch(space: SpaceRef, files: { path: string; data: Bytes }[]): Promise<void> {
     const [ow, re] = splitSpace(space);
     const repo = `/repos/${enc(ow)}/${enc(re)}`;
+    // One or two files: plain writes, a round trip each, where a commit built by hand takes four.
+    if (files.length <= 2) {
+      for (const f of files) {
+        if ((await putFile(ow, re, f.path, f.data, null)) !== 'ok') throw new KeyholdError('conflict', 'could not post');
+      }
+      return;
+    }
     const data = files.map((f) => f.data);
     const fail = async (what: string, status: number): Promise<never> => {
       if (status === 403 || status === 404) return denied(ow, re, what, status);
       throw new KeyholdError('config', `${what}: ${status}`);
     };
-    // The blobs go up side by side; they belong to no commit until the ref moves.
+    let branch = branches.get(repo);
+    const tip = () => Promise.all([gh.call('GET', `${repo}/commits/HEAD`), branch ? undefined : gh.call('GET', repo)]);
+    // The blobs go up side by side (they belong to no commit until the ref moves), and the
+    // branch's head is asked for meanwhile.
+    const first = tip();
+    first.catch(() => undefined);
     const blobs = await Promise.all(
       data.map(async (d) => {
         const r = await gh.call('POST', `${repo}/git/blobs`, { content: toB64(d), encoding: 'base64' }, undefined, true);
@@ -617,9 +629,8 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
       }),
     );
     const tree = files.map((f, i) => ({ path: f.path, mode: '100644', type: 'blob', sha: blobs[i] }));
-    let branch = branches.get(repo);
     for (let attempt = 0; attempt < 5; attempt++) {
-      const [head, info] = await Promise.all([gh.call('GET', `${repo}/commits/HEAD`), branch ? undefined : gh.call('GET', repo)]);
+      const [head, info] = await (attempt ? tip() : first);
       if (head.status !== 200) await fail('read head', head.status);
       if (info) {
         if (info.status !== 200) await fail('read repo', info.status);
@@ -680,13 +691,14 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
       // 422 can only be our own create landing behind a lost reply: the name is random.
       await gh.expect('POST', '/user/repos', [201, 422], { name, private: true, auto_init: true, description, has_issues: false, has_wiki: false, has_projects: false });
       const repo = repoPath(login, name);
-      await gh.call('PUT', `${repo}/topics`, { names: ['keyhold-chat'] });
       // Members get full write access (GitHub ignores permission 'push' on personal repos).
       // Best effort, as plans without rulesets on private repos refuse: keep the history from
       // being force-pushed away or the branch deleted, and keep Actions workflows from running.
       // The app itself only ever fast-forwards (Contents API, and writeBatch with force: false).
       const quietly = (p: Promise<unknown>) => p.catch(() => undefined);
+      // The three settings go out together: nothing reads them before the first invitation.
       await Promise.all([
+        gh.call('PUT', `${repo}/topics`, { names: ['keyhold-chat'] }),
         quietly(
           gh.call('POST', `${repo}/rulesets`, {
             name: 'protect history',
@@ -703,28 +715,29 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
     async listSpaces() {
       const out = new Set<string>();
       const inst = await gh.expect('GET', '/user/installations?per_page=100', [200]);
-      for (const i of inst.data.installations ?? []) {
+      // One installation per account we share a chat with: asked side by side.
+      await inParallel((inst.data.installations ?? []) as { id: number }[], async (i) => {
         for (let page = 1; page < 50; page++) {
           const r = await gh.expect('GET', `/user/installations/${i.id}/repositories?per_page=100&page=${page}`, [200]);
           for (const repo of r.data.repositories ?? []) if (String(repo.name).startsWith(prefix)) out.add(String(repo.full_name).toLowerCase());
           if ((r.data.repositories ?? []).length < 100) break;
         }
-      }
-      return [...out];
+      });
+      return [...out].sort();
     },
     async canManage(space) {
       return splitSpace(space)[0] === login;
     },
     async members(space) {
       const [ow, re] = splitSpace(space);
-      const c = await gh.expect('GET', `/repos/${enc(ow)}/${enc(re)}/collaborators?affiliation=direct&per_page=100`, [200]);
+      const [c, inv] = await Promise.all([
+        gh.expect('GET', `/repos/${enc(ow)}/${enc(re)}/collaborators?affiliation=direct&per_page=100`, [200]),
+        ow === login ? gh.expect('GET', `/repos/${enc(ow)}/${enc(re)}/invitations?per_page=100`, [200]) : undefined,
+      ]);
       const active = (c.data as { login: string }[]).map((u) => toAddress(u.login));
       if (!active.includes(toAddress(ow))) active.push(toAddress(ow));
       const pending: Address[] = [];
-      if (ow === login) {
-        const inv = await gh.expect('GET', `/repos/${enc(ow)}/${enc(re)}/invitations?per_page=100`, [200]);
-        for (const i of inv.data as { invitee: { login: string } }[]) pending.push(toAddress(i.invitee.login));
-      }
+      for (const i of (inv?.data ?? []) as { invitee: { login: string } }[]) pending.push(toAddress(i.invitee.login));
       return { active, pending };
     },
     async grant(space, address): Promise<GrantResult> {
@@ -797,8 +810,14 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
   /** Directory reads under way, by owner. */
   const dirReads = new Map<string, Promise<Bytes[]>>();
   /** The synced store's last listing: which version each item had, and when. */
-  let itemsListed: { at: number; shas: Map<string, string> } | undefined;
+  let itemsListed: { at: number; shas: Map<string, string>; asked: Set<string> } | undefined;
   const ITEMS_LISTED_MS = 10_000;
+  /** The last log entry this browser wrote, by chat: the next one needs no look at it. */
+  const appended = new Map<string, number>();
+  /** Versions of drops read, for their delete. */
+  const dropVersions = new Map<string, string>();
+  /** How many entries our own directory had when last read, and when (see directory.append). */
+  let ownDir: { at: number; n: number } | undefined;
 
   return {
     name: 'github',
@@ -812,15 +831,25 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
         // one read. Entries are create-only files: one read before stays read.
         let run = dirReads.get(ow);
         if (!run) {
-          run = (async () => readAll(ow, dirRepo, await listDir(ow, dirRepo, 'dir', false)))().finally(() => dirReads.delete(ow));
+          run = (async () => {
+            const entries = await listDir(ow, dirRepo, 'dir', false);
+            if (ow === login) ownDir = { at: now(), n: entries.filter((e) => e.type === 'file').length };
+            return readAll(ow, dirRepo, entries);
+          })().finally(() => dirReads.delete(ow));
           dirReads.set(ow, run);
         }
         return run;
       },
       async append(index, entry) {
         await ensureOwnRepo(dirRepo, false, 'Public keys for an end-to-end encrypted chat app.');
-        const have = (await listDir(login, dirRepo, 'dir', false)).filter((e) => e.type === 'file');
-        if (have.length !== index) return 'conflict';
+        // The writer has just read the directory to make this entry: that count will do. (If
+        // another browser appended since, the create below fails, as a conflict should.)
+        const known = ownDir && now() - ownDir.at <= ITEMS_LISTED_MS ? ownDir.n : undefined;
+        ownDir = undefined;
+        if (known !== index) {
+          const have = (await listDir(login, dirRepo, 'dir', false)).filter((e) => e.type === 'file');
+          if (have.length !== index) return 'conflict';
+        }
         return putFile(login, dirRepo, `dir/${pad(index)}`, entry, null);
       },
     },
@@ -879,11 +908,19 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
       async append(space, index, entry) {
         const [ow, re] = splitSpace(space);
         if (index > 0) {
-          // Appends must be contiguous: refuse to leave a gap.
-          const prev = await gh.call('GET', contents(ow, re, logPath(index - 1)));
-          if (prev.status === 404) return 'conflict';
+          // Appends must be contiguous: refuse to leave a gap. Usually the entry before is known
+          // (listed, named by a check, or written by us); otherwise ask.
+          const before = LOG_FILE.exec(logPath(index - 1))!;
+          const v = views.get(viewKey(ow, re));
+          const known = appended.get(viewKey(ow, re)) === index - 1 || (v?.head && v.log && v.log.shard === before[1] && v.log.entries.has(before[2]!));
+          if (!known) {
+            const prev = await gh.call('GET', contents(ow, re, logPath(index - 1)));
+            if (prev.status === 404) return 'conflict';
+          }
         }
-        return putFile(ow, re, logPath(index), entry, null);
+        const r = await putFile(ow, re, logPath(index), entry, null);
+        if (r === 'ok') appended.set(viewKey(ow, re), index);
+        return r;
       },
     },
     mailbox: {
@@ -974,7 +1011,9 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
           }
           // Nothing there (a quiet chat, or no access: the listing below tells), or a long gap.
           if (!listed.length) {
-            const days = (await listDir(ow, re, 'mail')).filter((d) => d.type === 'dir' && DAY.test(d.name) && d.name >= min);
+            // (With a starting point, a check has just reached the repo: a missing folder is
+            // only a chat without mail yet, and needs no second look at the repo.)
+            const days = (await listDir(ow, re, 'mail', !head)).filter((d) => d.type === 'dir' && DAY.test(d.name) && d.name >= min);
             // The trees API, not a Contents listing: a busy day can pass GitHub's 1,000-entry cap.
             // Junk any member wrote (a folder, a symlink) is not mail, and must not block it.
             listed.push(...(await inParallel(days, async (d) => ({ d, files: (await listDir(ow, re, d.path, true, d.sha)).filter((f) => f.type === 'file') }))));
@@ -1058,16 +1097,25 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
       async list(space, tag) {
         const [ow, re] = splitSpace(space);
         const out: MailboxItem[] = [];
-        for (const e of await listDir(ow, re, `drop/${seg(tag, 'recipient tag')}`, false)) {
-          if (e.type !== 'file') continue;
-          const f = await getFile(ow, re, e.path);
-          if (f) out.push({ id: e.name, data: f.data });
-        }
+        const entries = (await listDir(ow, re, `drop/${seg(tag, 'recipient tag')}`, false)).filter((e) => e.type === 'file');
+        const files = await inParallel(entries, (e) => getFile(ow, re, e.path));
+        entries.forEach((e, i) => {
+          const f = files[i];
+          if (!f) return;
+          out.push({ id: e.name, data: f.data });
+          // For the delete that follows a read: no second look for the file's version.
+          dropVersions.set(`${viewKey(ow, re)}/${e.path}`, f.version);
+        });
         return out;
       },
       async delete(space, tag, id) {
         const [ow, re] = splitSpace(space);
         const path = `drop/${seg(tag, 'recipient tag')}/${seg(id, 'drop id')}`;
+        const key = `${viewKey(ow, re)}/${path}`;
+        const known = dropVersions.get(key);
+        dropVersions.delete(key);
+        // A drop is written once under a random id: the version read is the version there.
+        if (known && (await deleteFile(ow, re, path, known)) === 'ok') return;
         const f = await getFile(ow, re, path);
         if (f) await deleteFile(ow, re, path, f.version);
       },
@@ -1085,7 +1133,7 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
     personal: {
       async list() {
         const items = (await listDir(login, homeRepo, 'items', false)).filter((e) => e.type === 'file').map((e) => ({ id: e.name, version: e.sha }));
-        itemsListed = { at: now(), shas: new Map(items.map((i) => [i.id, i.version])) };
+        itemsListed = { at: now(), shas: new Map(items.map((i) => [i.id, i.version])), asked: new Set() };
         return items;
       },
       async get(id) {
@@ -1093,8 +1141,12 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
         // that listing: the listed version, from the files kept by sha when we have it, so a
         // reload re-reads only what did change. Any later get asks GitHub (a write reads the
         // current version first, and must not build on an older one).
-        const sha = itemsListed && now() - itemsListed.at <= ITEMS_LISTED_MS ? itemsListed.shas.get(seg(id, 'item id')) : undefined;
-        itemsListed?.shas.delete(id);
+        seg(id, 'item id');
+        const listed = itemsListed && now() - itemsListed.at <= ITEMS_LISTED_MS && !itemsListed.asked.has(id) ? itemsListed : undefined;
+        itemsListed?.asked.add(id);
+        const sha = listed?.shas.get(id);
+        // Not in the listing: no such item (as of then), without asking for a 404.
+        if (listed && !sha) return undefined;
         const have = sha && (await stored(sha));
         if (have) return { data: have, version: sha };
         const f = await getFile(login, homeRepo, `items/${seg(id, 'item id')}`);
@@ -1104,11 +1156,11 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
       async put(id, data, expected) {
         seg(id, 'item id');
         await ensureOwnRepo(homeRepo, true, 'Encrypted settings for an end-to-end encrypted chat app.');
-        itemsListed?.shas.delete(id);
+        itemsListed?.asked.add(id);
         return putFile(login, homeRepo, `items/${id}`, data, expected);
       },
       async delete(id, expected) {
-        itemsListed?.shas.delete(id);
+        itemsListed?.asked.add(id);
         return deleteFile(login, homeRepo, `items/${seg(id, 'item id')}`, expected);
       },
     },

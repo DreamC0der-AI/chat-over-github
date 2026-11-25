@@ -255,3 +255,123 @@ describe('files kept across reloads', () => {
     expect(gh.log.slice(from).filter((l) => l.endsWith('/contents/dir')).length).toBe(1);
   });
 });
+
+describe('steps that need no question', () => {
+  const tidy = (log: string[], from: number) => log.slice(from).map((l) => l.replace(/\/repos\/[^/]+\/[^/]+\//, '/').replace(/compare\/.*/, 'compare'));
+
+  it('a log entry right after the one we know is written without asking for the one before', async () => {
+    const { a, b, s, gh } = await space();
+    expect(await a.orderedLog.append(s, 0, bytes('e0'))).toBe('ok');
+    await a.orderedLog.read(s, 0);
+    let from = gh.log.length;
+    expect(await a.orderedLog.append(s, 1, bytes('e1'))).toBe('ok');
+    expect(tidy(gh.log, from)).toEqual(['PUT /contents/log/00000/00000001']);
+    // Our own write is known too.
+    from = gh.log.length;
+    expect(await a.orderedLog.append(s, 2, bytes('e2'))).toBe('ok');
+    expect(tidy(gh.log, from)).toEqual(['PUT /contents/log/00000/00000002']);
+    // A gap is still refused: the entry before is not known, so it is asked for.
+    expect(await a.orderedLog.append(s, 5, bytes('e5'))).toBe('conflict');
+    // Someone else took the place first: the create fails, as before.
+    expect(await b.orderedLog.append(s, 3, bytes('theirs'))).toBe('ok');
+    expect(await a.orderedLog.append(s, 3, bytes('mine'))).toBe('conflict');
+    expect((await a.orderedLog.read(s, 0)).map(str)).toEqual(['e0', 'e1', 'e2', 'theirs']);
+  });
+
+  it('a log entry on top of one we wrote ourselves needs no look either, even in a chat never read', async () => {
+    const { a, s, gh } = await space();
+    expect(await a.orderedLog.append(s, 0, bytes('e0'))).toBe('ok');
+    const from = gh.log.length;
+    expect(await a.orderedLog.append(s, 1, bytes('e1'))).toBe('ok');
+    expect(tidy(gh.log, from)).toEqual(['PUT /contents/log/00000/00000001']);
+  });
+
+  it('two files at once go as two plain writes; more as one commit', async () => {
+    const { a, b, s, gh } = await space();
+    const cur = (await b.mailbox.list(s)).cursor;
+    let from = gh.log.length;
+    await a.mailbox.postMany!(s, [bytes('m1'), bytes('m2')]);
+    expect(tidy(gh.log, from).map((l) => l.replace(/mail\/.*/, 'mail'))).toEqual(['PUT /contents/mail', 'PUT /contents/mail']);
+    from = gh.log.length;
+    await a.mailbox.postMany!(s, [bytes('m3'), bytes('m4'), bytes('m5')]);
+    const made = tidy(gh.log, from);
+    expect(made.filter((l) => l.startsWith('PUT'))).toEqual([]);
+    expect(made.filter((l) => l === 'POST /git/commits')).toHaveLength(1);
+    expect((await b.mailbox.list(s, cur)).items.map((i) => str(i.data))).toEqual(['m1', 'm2', 'm3', 'm4', 'm5']);
+  });
+
+  it('a browser that knows nothing of the log still checks the entry before', async () => {
+    const { a, b, s } = await space();
+    expect(await a.orderedLog.append(s, 0, bytes('e0'))).toBe('ok');
+    expect(await b.orderedLog.append(s, 2, bytes('gap'))).toBe('conflict');
+    expect(await b.orderedLog.append(s, 1, bytes('e1'))).toBe('ok');
+  });
+
+  it('a drop that was read is deleted without a second read; one never read is looked up', async () => {
+    const { a, b, s, gh } = await space();
+    const id = await b.dropBox.put(s, 'tag1', bytes('welcome'));
+    const other = await b.dropBox.put(s, 'tag1', bytes('second'));
+    expect((await a.dropBox.list(s, 'tag1')).map((d) => str(d.data)).sort()).toEqual(['second', 'welcome']);
+    let from = gh.log.length;
+    await a.dropBox.delete(s, 'tag1', id);
+    expect(tidy(gh.log, from)).toEqual([`DELETE /contents/drop/tag1/${id}`]);
+    // Deleted twice (a retry after a lost reply): nothing breaks.
+    await a.dropBox.delete(s, 'tag1', id);
+    // A browser that never read it finds the version first.
+    from = gh.log.length;
+    await b.dropBox.delete(s, 'tag1', other);
+    expect(tidy(gh.log, from)).toEqual([`GET /contents/drop/tag1/${other}`, `DELETE /contents/drop/tag1/${other}`]);
+    expect(await a.dropBox.list(s, 'tag1')).toEqual([]);
+  });
+
+  it('an item the listing did not show is not asked for; a write to it still sees what is there', async () => {
+    const { w, a, gh } = await space();
+    const b = w.session('alice');
+    await a.personal.put('one', bytes('v1'), null);
+    await a.personal.list();
+    let from = gh.log.length;
+    expect(await a.personal.get('nope')).toBeUndefined();
+    expect(tidy(gh.log, from)).toEqual([]);
+    // The other browser makes it a moment later: the second look asks GitHub and finds it.
+    await b.personal.put('nope', bytes('theirs'), null);
+    from = gh.log.length;
+    expect(str((await a.personal.get('nope'))!.data)).toBe('theirs');
+    expect(tidy(gh.log, from)).toEqual(['GET /contents/items/nope']);
+    // And a create on top of one made elsewhere since the listing is refused, not overwritten.
+    await a.personal.list();
+    await b.personal.put('late', bytes('theirs'), null);
+    expect(await a.personal.get('late')).toBeUndefined();
+    expect(await a.personal.put('late', bytes('mine'), null)).toBe('conflict');
+    expect(str((await a.personal.get('late'))!.data)).toBe('theirs');
+  });
+
+  it('the directory is appended to without listing it twice; another browser in between is a conflict', async () => {
+    const { w, a, gh } = await space();
+    const b = w.session('alice');
+    await a.directory.append(0, bytes('d0'));
+    expect((await a.directory.read(w.address('alice'))).map(str)).toEqual(['d0']);
+    let from = gh.log.length;
+    expect(await a.directory.append(1, bytes('d1'))).toBe('ok');
+    expect(tidy(gh.log, from).filter((l) => l === 'GET /contents/dir')).toEqual([]);
+    // The count is used once: the next append lists for itself.
+    from = gh.log.length;
+    expect(await a.directory.append(2, bytes('d2'))).toBe('ok');
+    expect(tidy(gh.log, from).filter((l) => l === 'GET /contents/dir')).toEqual(['GET /contents/dir']);
+    // Both browsers read three entries, both append the fourth: one wins.
+    await a.directory.read(w.address('alice'));
+    await b.directory.read(w.address('alice'));
+    expect(await b.directory.append(3, bytes('b3'))).toBe('ok');
+    expect(await a.directory.append(3, bytes('a3'))).toBe('conflict');
+    expect((await a.directory.read(w.address('alice'))).map(str)).toEqual(['d0', 'd1', 'd2', 'b3']);
+  });
+
+  it('a chat without mail costs no second look at the repo; a chat we lost still says so', async () => {
+    const { w, a, s, gh } = await space();
+    const from = gh.log.length;
+    expect((await a.mailbox.list(s)).items).toEqual([]);
+    expect(tidy(gh.log, from)).toEqual(['GET /commits', 'GET /contents/mail']);
+    // Bob was never let in: the listing must fail, not come back empty.
+    const bob = w.session('bob');
+    await expect(bob.mailbox.list(s)).rejects.toThrow();
+  });
+});
