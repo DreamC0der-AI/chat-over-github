@@ -541,11 +541,9 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
   const branches = new Map<string, string>();
 
   /** Mail ids for a batch: same time stamp, then a counter, so they sort in the order given. */
-  const batchIds = (t: number, n: number) => Array.from({ length: n }, (_, i) => `${t.toString(36)}-${i.toString(16).padStart(2, '0')}${toHex(randomBytes(9))}`);
-
   /**
    * Mail ids for `mailbox.newId`: the time, a counter within that millisecond, then randomness,
-   * so ids made one after another sort in that order (like batchIds).
+   * so ids made one after another sort in that order, even across two bursts in one millisecond.
    */
   let lastIdTime = 0;
   let idSeq = 0;
@@ -964,7 +962,7 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
           if (!files.length) return ids;
         } else {
           const t = now();
-          ids = batchIds(t, data.length);
+          ids = data.map(() => nextId());
           files = data.map((d, i) => ({ path: `mail/${day(t)}/${ids[i]}`, data: d }));
         }
         try {
