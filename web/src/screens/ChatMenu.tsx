@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { loginFrom, type Convo, type PeerInfo, type Session } from '../lib/session';
 import { ask, Avatar, ErrorFlash, go, Hint, Icon, Menu, MenuItem, Modal, toast, useAction } from '../ui';
 
@@ -147,8 +147,19 @@ export function VerifyPanel({ session, address, fingerprint }: { session: Sessio
   const { busy, error, run } = useAction();
   const login = loginFrom(address);
   const v = session.getVersion();
+  // Checked against the directory once when shown; after that the cached answer, which a change
+  // (a verified mark, a key accepted, news from another browser) clears. Refreshing on every
+  // update kept restarting the check on a busy phone, so the number never showed.
+  const checked = useRef<string>();
   useEffect(() => {
-    void session.peer(address, true, fingerprint).then(setP);
+    const key = `${address}|${fingerprint ?? ''}`;
+    const refresh = checked.current !== key;
+    checked.current = key;
+    if (refresh && !fingerprint) {
+      void session.knownPeer(address).then((k) => k && setP((cur) => cur ?? k));
+    }
+    // Not dropped when an update comes first: a later check might never finish before the next one.
+    void session.peer(address, refresh, fingerprint).then(setP);
   }, [address, fingerprint, v]);
   if (!p) return <span className="spinner" />;
   if (p.status === 'none') return <p>{login} hasn't created an identity yet.</p>;

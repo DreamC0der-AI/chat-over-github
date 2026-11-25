@@ -2741,6 +2741,25 @@ export class Session {
     return p;
   }
 
+  /**
+   * What this account already trusts for them, with no network: the remembered key and its safety
+   * number. Shown at once while the directory is checked (seconds on a busy phone).
+   */
+  async knownPeer(address: string): Promise<PeerInfo | undefined> {
+    const fp = this.contacts.pinned(address);
+    if (!fp || !this.identity) return undefined;
+    const conflict = this.contacts.conflict(address);
+    return {
+      address,
+      status: conflict ? 'key-changed' : 'ok',
+      fingerprint: fp,
+      safety: await safetyNumber(this.identity.fingerprint, fp),
+      verified: !conflict && this.contacts.verified(address),
+      firstSeen: this.contacts.firstSeen(address),
+      ...(conflict ? { otherBrowser: true } : {}),
+    };
+  }
+
   private async lookupPeer(address: string, inChat?: string): Promise<PeerInfo> {
     try {
       const r = await this.registry.lookup(address);

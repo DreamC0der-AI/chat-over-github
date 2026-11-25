@@ -141,4 +141,18 @@ describe('synced contacts', () => {
     expect(people[0]!.groups.map((g) => g.title)).toEqual(['Hikers']);
     expect(people[1]!.dm).toBeUndefined();
   });
+  it('the safety number of a known contact shows without asking GitHub, the same as after the check', async () => {
+    w = await world();
+    const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
+    await alice.setup();
+    await bob.setup();
+    await w.dm(alice, bob);
+    await alice.s.peer('github:bob', true);
+    const before = w.requests.length;
+    const known = await alice.s.knownPeer('github:bob');
+    expect(w.requests.length).toBe(before);
+    const checked = await alice.s.peer('github:bob', true);
+    expect(known).toMatchObject({ status: 'ok', fingerprint: checked.fingerprint, safety: checked.safety });
+    expect(await alice.s.knownPeer('github:carol')).toBeUndefined(); // never seen: wait for the check
+  });
 });
