@@ -86,4 +86,41 @@ describe('groups', () => {
     await reinvite(alice, bob);
     await w.checkConverged();
   });
+  it('a browser left on its own branch of the group comes back, and the key changes stop', async () => {
+    w = await world();
+    const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
+    for (const b of [alice, bob]) await b.setup();
+    await alice.s.createGroup('Split', ['bob']);
+    await w.until(() => !!bob.inviteFrom('alice'), 'bob sees the invitation');
+    await bob.s.acceptInvite(bob.inviteFrom('alice')!.key);
+    await w.until(() => !!bob.chat('Split')?.live, 'bob joined');
+
+    // An older app on bob's side rejected alice's key change once and answered with its own.
+    const gb = bob.chat('Split')!.live! as unknown as { meta: { needsHeal: boolean }; applyEntry: (e: { kind: string }, out: { events: unknown[] }) => Promise<void> };
+    const orig = gb.applyEntry.bind(gb);
+    let once = false;
+    gb.applyEntry = async (e, out) => {
+      if (!once && e.kind === 'commit') {
+        once = true;
+        gb.meta.needsHeal = true;
+        return;
+      }
+      return orig(e, out);
+    };
+    await alice.chat('Split')!.live!.rotate();
+    await w.rounds(3);
+    await alice.chat('Split')!.live!.rotate(); // any later change on alice's side brings bob back
+    await w.rounds(3);
+
+    const space = alice.chat('Split')!.live!.space;
+    const logLen = async () => (await alice.chat('Split')!.live!.chat.provider.orderedLog.read(space, 0)).length;
+    const settled = await logLen();
+    await w.rounds(3);
+    expect(await logLen()).toBe(settled);
+
+    await bob.s.send(bob.chat('Split')!.live!, 'bob is back');
+    await w.until(async () => (await alice.texts(alice.chat('Split'))).includes('bob is back'), 'alice reads bob');
+    await alice.s.send(alice.chat('Split')!.live!, 'welcome back');
+    await w.until(async () => (await bob.texts(bob.chat('Split'))).includes('welcome back'), 'bob reads alice');
+  });
 });
