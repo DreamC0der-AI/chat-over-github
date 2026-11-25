@@ -203,6 +203,9 @@ export class MockGitHub {
   /** Test hook: compare answers as it did when first asked (a copy that lags behind). */
   staleCompare = false;
   private staleAnswers = new Map<string, unknown>();
+  /** Test hook: GraphQL answers with each repo's head as it was when first asked. */
+  staleGraphql = false;
+  private staleHeads = new Map<string, number>();
   private reqHeaders: Record<string, string> = {};
 
   /** Commits made with the Git Data API keep the id it gave them: head number <-> that id. */
@@ -304,6 +307,26 @@ export class MockGitHub {
       this.repos.set(full, { owner: user, name: body.name.toLowerCase(), private: !!body.private, collaborators: new Set(), invitations: new Map(), files: new Map(), topics: [], description: body.description ?? '', head: 1, changes: new Map(), rewritten: 0, rules: new Set(), actionsEnabled: true });
       if (body.auto_init) this.repos.get(full)!.files.set('README.md', { sha: sha(Buffer.from('')), content: Buffer.from('') });
       return resp(201, { full_name: full, name: body.name, private: !!body.private });
+    }
+    if (method === 'POST' && path === '/graphql') {
+      // Only what the app asks: the head commit of several repos, each under an alias.
+      if (!user) return resp(401, {});
+      const data: Record<string, unknown> = {};
+      const errors: unknown[] = [];
+      const asked = String(body?.query ?? '').matchAll(/(\w+):\s*repository\(owner:\s*("(?:[^"\\]|\\.)*"),\s*name:\s*("(?:[^"\\]|\\.)*")\)/g);
+      for (const a of asked) {
+        const full = `${JSON.parse(a[2]!)}/${JSON.parse(a[3]!)}`.toLowerCase();
+        const r = this.repos.get(full);
+        if (!r || !this.canRead(r, user)) {
+          data[a[1]!] = null;
+          errors.push({ type: 'NOT_FOUND', path: [a[1]], message: `Could not resolve to a Repository with the name '${full}'.` });
+          continue;
+        }
+        if (this.staleGraphql && !this.staleHeads.has(full)) this.staleHeads.set(full, r.head);
+        const n = this.staleGraphql ? this.staleHeads.get(full)! : r.head;
+        data[a[1]!] = { defaultBranchRef: { target: { oid: this.commitId(r, n) } } };
+      }
+      return resp(200, errors.length ? { data, errors } : { data });
     }
     if ((m = path.match(/^\/repos\/([^/]+)\/([^/]+)$/)) && method === 'GET') {
       const r = this.repos.get(`${m[1]}/${m[2]}`.toLowerCase());

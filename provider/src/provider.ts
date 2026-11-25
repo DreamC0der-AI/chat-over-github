@@ -192,6 +192,13 @@ export interface ChangeWatch {
   check(space: SpaceRef): Promise<boolean>;
   /** The next mailbox list and log read of this repo list its folders again. */
   relist(space: SpaceRef): void;
+  /** The newest commit the checks know of in this repo, if any. No request. */
+  head(space: SpaceRef): string | undefined;
+  /**
+   * The newest commit of each of these repos, asked for in one request (GraphQL): its id, or
+   * null for a repo that can't be seen. Throws when the answer as a whole can't be used.
+   */
+  heads(spaces: SpaceRef[]): Promise<Map<SpaceRef, string | null>>;
 }
 
 /** `fn` over every item, a few at a time; results in the items' order. */
@@ -1171,6 +1178,27 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
         const [ow, re] = splitSpace(space);
         const v = viewOf(ow, re);
         v.relistMail = v.relistLog = true;
+      },
+      head(space) {
+        const [ow, re] = splitSpace(space);
+        return views.get(viewKey(ow, re))?.head;
+      },
+      async heads(spaces) {
+        const out = new Map<SpaceRef, string | null>();
+        if (!spaces.length) return out;
+        // Names go in as JSON strings, which GraphQL reads the same way.
+        const parts = spaces.map((sp, i) => {
+          const [ow, re] = splitSpace(sp);
+          return `r${i}: repository(owner: ${JSON.stringify(ow)}, name: ${JSON.stringify(re)}) { defaultBranchRef { target { oid } } }`;
+        });
+        const r = await gh.call('POST', '/graphql', { query: `query { ${parts.join(' ')} }` });
+        const data = r.status === 200 ? (r.data as { data?: Record<string, unknown> } | undefined)?.data : undefined;
+        if (!data || typeof data !== 'object') throw new KeyholdError('config', `heads: ${r.status}`);
+        spaces.forEach((sp, i) => {
+          const oid = (data[`r${i}`] as { defaultBranchRef?: { target?: { oid?: unknown } } } | null | undefined)?.defaultBranchRef?.target?.oid;
+          out.set(sp, typeof oid === 'string' && oid ? oid : null);
+        });
+        return out;
       },
     },
   };
