@@ -209,6 +209,15 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
    * reads it with the trees API straight away; without it, a Contents listing that hit GitHub's
    * 1,000-entry cap is read again with the trees API.
    */
+  /** A mail file's bytes, by the blob sha its listing gave; undefined while GitHub can't serve it yet. */
+  async function readMail(owner: string, repo: string, f: DirEntry): Promise<Versioned['data'] | undefined> {
+    const b = await gh.call('GET', `${repoPath(owner, repo)}/git/blobs/${enc(f.sha)}`);
+    if (b.status === 200 && typeof b.data?.content === 'string') return fromB64(b.data.content);
+    if (b.status === 403) return denied(owner, repo, `read ${f.path}`, b.status);
+    if (b.status !== 404) throw new KeyholdError('config', `read ${f.path}: ${b.status}`);
+    return (await getFile(owner, repo, f.path))?.data;
+  }
+
   async function listDir(owner: string, repo: string, path: string, mustExist = true, sha?: string): Promise<DirEntry[]> {
     if (sha) {
       const t = await listTree(owner, repo, path, sha);
@@ -660,19 +669,24 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
         const items: MailboxItem[] = [];
         const keep: string[] = [];
         const last = days[days.length - 1]?.name ?? c?.d ?? day(now());
+        const listed: { d: DirEntry; files: DirEntry[] }[] = [];
         for (const d of days) {
           // The trees API, not a Contents listing: a busy day can pass GitHub's 1,000-entry cap.
-          const want: DirEntry[] = [];
-          for (const f of await listDir(ow, re, d.path, true, d.sha)) {
-            // Junk any member wrote (a folder, a symlink) is not mail, and must not block it.
-            if (f.type !== 'file') continue;
-            if (d.name >= prevDay(last)) keep.push(f.name);
-            if (!seen.has(f.name)) want.push(f);
-          }
-          const files = await inParallel(want, (f) => getFile(ow, re, f.path));
+          // Junk any member wrote (a folder, a symlink) is not mail, and must not block it.
+          listed.push({ d, files: (await listDir(ow, re, d.path, true, d.sha)).filter((f) => f.type === 'file') });
+        }
+        for (const { d, files: entries } of listed) {
+          const want = entries.filter((f) => !seen.has(f.name));
+          // By blob sha from the listing: a path read can still 404 for a moment after the commit
+          // that listed it (GitHub replicas), and a file marked seen then was lost for good.
+          const files = await inParallel(want, (f) => readMail(ow, re, f));
+          const missing = new Set<string>();
           want.forEach((f, i) => {
-            if (files[i]) items.push({ id: f.name, data: files[i]!.data });
+            if (files[i]) items.push({ id: f.name, data: files[i]! });
+            else missing.add(f.name);
           });
+          // Not readable yet: not seen, so the next list tries it again.
+          if (d.name >= prevDay(last)) for (const f of entries) if (!missing.has(f.name)) keep.push(f.name);
         }
         return { items, cursor: JSON.stringify({ d: last, s: keep }) };
       },

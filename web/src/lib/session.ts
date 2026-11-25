@@ -307,6 +307,10 @@ const SPACE_SCAN_PENDING_MS = at(15_000);
 const INVITE_RETRY_MS = at(10_000);
 const INVITE_RETRY_MAX_MS = at(3 * 60_000);
 const JOINS_AT_ONCE = 3;
+/** A GitHub read that has not answered by then is given up (and retried by the next step). */
+const REQUEST_TIMEOUT_MS = 20_000;
+/** Writes can carry a picture over a slow link: more time, then the same. */
+const WRITE_TIMEOUT_MS = 90_000;
 /** Chats checked at once in a sync step: each check is a GitHub round trip, slow on a phone. */
 const CHECKS_AT_ONCE = 4;
 // Rotation itself is weekly (keyhold DEFAULT_PREKEYS); this is only how often to look.
@@ -490,7 +494,18 @@ export class Session {
         }
         throw e;
       }
-      return fetch(url, { ...init, headers: { ...(init.headers ?? {}), Authorization: `Bearer ${token}` }, cache: 'no-store' });
+      // A phone switching networks can leave a request hanging for minutes, and every chat's
+      // sync with it: give up and let the next step try again, like any dropped connection.
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), !init.method || init.method === 'GET' ? REQUEST_TIMEOUT_MS : WRITE_TIMEOUT_MS);
+      try {
+        return await fetch(url, { ...init, headers: { ...(init.headers ?? {}), Authorization: `Bearer ${token}` }, cache: 'no-store', signal: ctl.signal });
+      } catch (e) {
+        if (ctl.signal.aborted) throw new TypeError('Failed to fetch (timed out)');
+        throw e;
+      } finally {
+        clearTimeout(t);
+      }
     };
     let r = await go(false);
     if (r.status === 401) r = await go(true);
