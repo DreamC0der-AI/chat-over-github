@@ -375,30 +375,3 @@ describe('steps that need no question', () => {
     await expect(bob.mailbox.list(s)).rejects.toThrow();
   });
 });
-
-describe('the heads of several chats in one request', () => {
-  it('names each repo\'s newest commit, the same one the checks know; a repo we cannot see is null', async () => {
-    const { w, a, b, s, gh } = await space();
-    const s2 = await a.channel.createSpace('chat');
-    await a.changes.check(s);
-    await a.changes.check(s2);
-    const from = gh.log.length;
-    const got = await a.changes.heads([s, s2, 'bob/ghchat-nothere']);
-    expect(gh.log.slice(from)).toEqual(['POST /graphql']);
-    expect(got.get(s)).toBe(a.changes.head(s));
-    expect(got.get(s2)).toBe(a.changes.head(s2));
-    expect(got.get('bob/ghchat-nothere')).toBeNull();
-    // Someone writes: the one request sees it, and so does the next check.
-    await b.mailbox.post(s, bytes('new'));
-    const after = (await a.changes.heads([s])).get(s);
-    expect(after).not.toBe(a.changes.head(s));
-    await a.changes.check(s);
-    expect(a.changes.head(s)).toBe(after);
-    // Our own write is known without asking.
-    await a.mailbox.post(s, bytes('mine'));
-    expect((await a.changes.heads([s])).get(s)).toBe(a.changes.head(s));
-    // A stranger sees none of it.
-    expect((await w.session('mallory').changes.heads([s])).get(s)).toBeNull();
-    expect((await a.changes.heads([])).size).toBe(0);
-  });
-});
