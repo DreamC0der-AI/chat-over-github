@@ -4,7 +4,7 @@ End-to-end encrypted 1:1 and group chat in the browser, with GitHub as the only 
 
 ## What it does
 
-- Sign in with the GitHub App (web flow with PKCE, or device flow with a one-time code). Tokens refresh through the Worker.
+- Sign in with the GitHub App (web flow with PKCE; device flow is off). Tokens refresh through the Worker.
 - Checks the app is installed on the account ("Only select repositories").
 - Identity setup: a root key made in the browser, a device key certified by it, public keys in `<login>/keyhold-id`, the root key backed up to `<login>/keyhold-home` sealed with a recovery code. Another browser joins with the recovery code.
 - Chats list, DMs and groups (`ghchat-<random>` private repos), invites through the Worker inbox, accept and join automatically.

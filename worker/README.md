@@ -2,7 +2,7 @@
 
 The app's only backend. It does two jobs:
 
-- **Token exchange.** It adds the GitHub App client secret to OAuth code and refresh-token exchanges. It also proxies device flow, because browsers can't call github.com's login endpoints directly (they send no CORS headers).
+- **Token exchange.** It adds the GitHub App client secret to OAuth code and refresh-token exchanges.
 - **Invite inbox.** Bob's app registers a GitHub repo invitation here, and Alice's app picks it up and accepts it through the GitHub API. Entries expire after 7 days, the same as GitHub invitations. Each user's inbox is one SQLite-backed Durable Object (class `Inbox`, named by GitHub user id). Open app tabs keep a hibernating WebSocket to it and get new entries pushed, so an idle tab costs nothing and nobody polls.
 
 ## API
@@ -12,8 +12,6 @@ All inbox calls send the user's GitHub user access token as `Authorization: Bear
 | Call | Body / query | Result |
 | --- | --- | --- |
 | `POST /oauth/token` | `{code, redirect_uri?, code_verifier?}` or `{refresh_token, retry_key?}` | GitHub's token response. A refresh asked again with the same `refresh_token` and `retry_key` (16-128 base64url chars the app keeps until it has saved the new tokens) within 10 minutes gets the same answer; without `retry_key` (old apps) only within 60 seconds. |
-| `POST /oauth/device/code` | none | GitHub's device-code response |
-| `POST /oauth/device/token` | `{device_code}` | GitHub's token response |
 | `GET /inbox` (WebSocket) | subprotocols above; Origin must be in `ALLOWED_ORIGINS` | first `{type:"snapshot", invites, closures}`, then `{type:"invite", invite}`, `{type:"invite-removed", id}`, `{type:"closure", closure}`, `{type:"closure-removed", id}`. Send `ping` to get `pong` (answered without waking the object). |
 | `POST /invites` | `{invite_id, repo}` (repo = name of the caller's own repo) | `201 {invitee_id, expires_at}`; `404` if no such invitation on the caller's repo; `410` if expired |
 | `GET /invites` | none | `{invites: [{id, from, from_id, created_at, expires_at}]}` for the caller |
@@ -37,7 +35,7 @@ It stores only invitation ID, inviter login and id, and timestamps, under the in
 
 The Worker also serves the chat web app from `public/` (Workers static assets). Files there are served first; every other path reaches the Worker code above. Build it with `npm run build` in the repo root, which writes `web/` straight into `public/` (not committed). Because the app and the API share an origin, the browser needs no CORS for the Worker. `public/_headers` sets a strict Content-Security-Policy.
 
-The GitHub App's callback URL must be `https://chat-over-github.akagishigerutokyo.workers.dev/` for the "Sign in with GitHub" button. Device-flow sign-in works without it.
+The GitHub App's callback URL must be `https://chat-over-github.akagishigerutokyo.workers.dev/` for the "Sign in with GitHub" button.
 
 ## Deploy
 

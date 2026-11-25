@@ -1,30 +1,15 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { CONFIG } from '../config';
-import { mockSignIn, pollDeviceFlow, startDeviceFlow, startWebFlow, type AuthState, type DeviceCode } from '../lib/auth';
+import { mockSignIn, startWebFlow, type AuthState } from '../lib/auth';
 import { ErrorFlash, Hint, Icon, useAction } from '../ui';
 
 export function SignIn({ onSignedIn, initialError }: { onSignedIn: (a: AuthState) => void; initialError?: string }) {
   const { busy, error, run, setError } = useAction();
-  const [device, setDevice] = useState<DeviceCode>();
   const [mockLogin, setMockLogin] = useState('');
-  const abort = useRef<AbortController>();
 
   useEffect(() => {
     if (initialError) setError(initialError);
-    return () => abort.current?.abort();
   }, []);
-
-  const deviceFlow = () =>
-    run(async () => {
-      const code = await startDeviceFlow();
-      setDevice(code);
-      abort.current = new AbortController();
-      try {
-        onSignedIn(await pollDeviceFlow(code, abort.current.signal));
-      } finally {
-        setDevice(undefined);
-      }
-    });
 
   return (
     <div className="page">
@@ -50,24 +35,10 @@ export function SignIn({ onSignedIn, initialError }: { onSignedIn: (a: AuthState
                 </label>
                 <button className="btn primary block" disabled={busy || !mockLogin}>Sign in (test GitHub)</button>
               </form>
-            ) : device ? (
-              <div className="stack">
-                <p>
-                  Open <a href={device.verification_uri} target="_blank" rel="noreferrer">{device.verification_uri.replace('https://', '')}</a> and enter this code:
-                </p>
-                <div className="code-box" aria-live="polite">{device.user_code}</div>
-                <div className="row muted small"><span className="spinner" /> Waiting for GitHub…</div>
-                <button className="btn" onClick={() => abort.current?.abort()}>Cancel</button>
-              </div>
             ) : (
-              <>
-                <button className="btn primary block" disabled={busy} onClick={() => run(startWebFlow)}>
-                  Sign in with GitHub
-                </button>
-                <button className="btn block" disabled={busy} onClick={deviceFlow}>
-                  Use a one-time code instead
-                </button>
-              </>
+              <button className="btn primary block" disabled={busy} onClick={() => run(startWebFlow)}>
+                Sign in with GitHub
+              </button>
             )}
           </div>
         </div>

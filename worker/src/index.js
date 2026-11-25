@@ -1,8 +1,6 @@
 // Chat over GitHub: the only backend.
 //
 //   POST   /oauth/token          exchange an OAuth code or refresh token (needs the client secret)
-//   POST   /oauth/device/code    device-flow proxy (browsers can't call github.com directly: no CORS)
-//   POST   /oauth/device/token   device-flow polling proxy
 //   GET    /inbox                WebSocket: the caller's inbox pushes invitations and closure notices
 //   POST   /invites              inviter registers a GitHub repo invitation for the invitee
 //   GET    /invites              invitee lists pending invitations addressed to them
@@ -89,8 +87,6 @@ async function route(request, env) {
 
   if (m === "POST" && path.startsWith("/oauth/")) await rateLimit(env.OAUTH_LIMIT, `ip:${request.headers.get("CF-Connecting-IP") || "unknown"}`);
   if (m === "POST" && path === "/oauth/token") return oauthToken(request, env);
-  if (m === "POST" && path === "/oauth/device/code") return deviceCode(request, env);
-  if (m === "POST" && path === "/oauth/device/token") return deviceToken(request, env);
   if (m === "POST" && path === "/invites") return createInvite(request, env);
   if (m === "GET" && path === "/invites") return listInvites(request, env);
   const del = path.match(/^\/invites\/(\d+)$/);
@@ -183,20 +179,6 @@ async function unseal(key, buf) {
 
 function jsonText(text, status) {
   return new Response(text, { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
-}
-
-async function deviceCode(request, env) {
-  return ghLogin("/login/device/code", { client_id: env.GITHUB_CLIENT_ID });
-}
-
-async function deviceToken(request, env) {
-  const body = await readJson(request);
-  if (typeof body.device_code !== "string") throw new HttpError(400, "device_code required");
-  return ghLogin("/login/oauth/access_token", {
-    client_id: env.GITHUB_CLIENT_ID,
-    device_code: body.device_code,
-    grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-  });
 }
 
 async function ghLogin(path, params) {

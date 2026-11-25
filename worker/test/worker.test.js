@@ -239,15 +239,14 @@ test("pending entries from the old KV inbox are copied once, expired ones are no
   s.ws.close();
 });
 
-test("token exchange adds the secret; device flow doesn't", async () => {
+test("token exchange adds the secret; device flow is gone", async () => {
   await call("POST", "/oauth/token", null, { code: "abc" });
   assert.deepEqual(lastLogin, { path: "/login/oauth/access_token", body: { client_id: "cid", client_secret: "sec", code: "abc" } });
   await call("POST", "/oauth/token", null, { refresh_token: "r1" });
   assert.equal(lastLogin.body.grant_type, "refresh_token");
-  await call("POST", "/oauth/device/code", null, {});
-  assert.deepEqual(lastLogin.body, { client_id: "cid" });
-  await call("POST", "/oauth/device/token", null, { device_code: "d" });
-  assert.equal(lastLogin.body.client_secret, undefined);
+  // Device flow is off (phishing risk): no proxy for it.
+  assert.equal((await call("POST", "/oauth/device/code", null, {})).status, 404);
+  assert.equal((await call("POST", "/oauth/device/token", null, { device_code: "d" })).status, 404);
   assert.equal((await call("POST", "/oauth/token", null, {})).status, 400);
 });
 
