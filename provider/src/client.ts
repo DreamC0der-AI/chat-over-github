@@ -101,9 +101,7 @@ export class GitHubClient {
           data = text;
         }
       }
-      // (GraphQL has an allowance of its own: a refusal there is only an answer, and says
-      // nothing about the requests the app depends on.)
-      if ((res.status === 403 || res.status === 429) && path !== '/graphql') {
+      if (res.status === 403 || res.status === 429) {
         const wait = this.rateLimit(res.status, res.headers, data);
         if (wait !== undefined) {
           this.rateLimitedUntil = this.now() + wait * 1000;

@@ -326,9 +326,6 @@ const SLOW_REQUEST_MS = 5_000;
 const WRITE_TIMEOUT_MS = 90_000;
 /** Chats checked at once in a sync step: each check is a GitHub round trip, slow on a phone. */
 const CHECKS_AT_ONCE = 4;
-/** How often the one-request check is tried next to the usual ones (see `trial`). */
-const TRIAL_EVERY_MS = at(30_000);
-const TRIAL_KEY = 'headsTrial';
 // Rotation itself is weekly (keyhold DEFAULT_PREKEYS); this is only how often to look.
 const PREKEY_CHECK_MS = at(10 * 60_000);
 /** A chat GitHub refuses us (maybe for a moment) is tried again after this, then less and less often. */
@@ -581,9 +578,6 @@ export class Session {
     let r = await go(false);
     if (r.status === 401) r = await go(true);
     const left = r.headers.get('x-ratelimit-remaining');
-    // GraphQL has an allowance of its own, and only the one-request trial uses it: its numbers
-    // say nothing about the app's requests, and a refusal there must not slow the app down.
-    if (url === `${CONFIG.api}/graphql`) return r;
     if (left !== null && url.startsWith(CONFIG.api)) this.rateRemaining = Number(left);
     if (r.status === 429 || (r.status === 403 && (left === '0' || r.headers.get('retry-after') !== null))) {
       const after = Number(r.headers.get('retry-after'));
@@ -642,58 +636,6 @@ export class Session {
     this.bump();
   }
 
-  /**
-   * The one-request check, on trial (Settings > Connection). Every half minute, right after
-   * chats were checked the usual way, the newest commit of each is also asked for in one GraphQL
-   * request, and the two answers are compared. Nothing acts on its answer yet: the numbers are
-   * for deciding whether it can replace the per-chat checks.
-   */
-  readonly trial = { since: Date.now(), rounds: 0, failed: 0, ms: 0, checksMs: 0, same: 0, newer: 0, older: 0, missing: 0, last: '' };
-  private lastTrial = 0;
-  /** The heads the usual checks have had, per chat repo, oldest first. */
-  private trialHeads = new Map<string, string[]>();
-  private async tryHeads(checked: Group[], checksMs: number) {
-    const now = Date.now();
-    if (now - this.lastTrial < TRIAL_EVERY_MS || now < this.rateLimitedUntil) return;
-    this.lastTrial = now;
-    const known = new Map<string, string>();
-    for (const g of checked) {
-      const head = this.provider.changes.head(g.space);
-      if (!head) continue;
-      known.set(g.space, head);
-      const past = this.trialHeads.get(g.space) ?? [];
-      if (past[past.length - 1] !== head) past.push(head);
-      if (past.length > 30) past.shift();
-      this.trialHeads.set(g.space, past);
-    }
-    if (!known.size) return;
-    const t = this.trial;
-    const stamp = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    try {
-      const t0 = Date.now();
-      const got = await this.provider.changes.heads([...known.keys()]);
-      t.rounds++;
-      t.ms += Date.now() - t0;
-      t.checksMs += checksMs;
-      for (const [space, head] of known) {
-        const oid = got.get(space);
-        if (oid === head) t.same++;
-        else if (!oid) {
-          t.missing++;
-          t.last = `${stamp()} not found`;
-        } else if (this.trialHeads.get(space)!.includes(oid)) {
-          // A commit the checks had before their current one: the one request lags behind.
-          t.older++;
-          t.last = `${stamp()} older answer`;
-        } else t.newer++; // Something landed in between (or the usual check is the one behind).
-      }
-    } catch (e) {
-      t.failed++;
-      t.last = `${stamp()} ${describeError(e)}`;
-    }
-    await this.db.put('kv', { ...t }, TRIAL_KEY).catch(() => undefined);
-  }
-
   /** The kept files are only a cache: when there are too many, start over. */
   private async pruneBlobs() {
     try {
@@ -725,7 +667,6 @@ export class Session {
       },
     }), this.activities) as typeof this.provider;
     void this.pruneBlobs();
-    void this.db.get<Partial<Session['trial']>>('kv', TRIAL_KEY).then((saved) => saved && typeof saved.since === 'number' && Object.assign(this.trial, saved), () => undefined);
     this.contacts = new ContactBook(this.db, loginFrom, (a) => {
       this.peers.delete(a);
       this.bump();
@@ -2591,7 +2532,6 @@ export class Session {
     this.lastCheck.clear();
     this.lastFullSync.clear();
     this.lastSpaceScan = 0;
-    this.lastTrial = 0;
     for (const inv of this.invites.values()) inv.nextTry = 0;
     for (const l of this.lost.values()) l.next = 0;
     // Asked for now: a rate-limit pause only holds back the timed steps.
@@ -2740,10 +2680,7 @@ export class Session {
       if (this.groupDue(g, now, hidden)) due.push(g);
     }
     // Several at once: one at a time, a phone spent most of a step waiting on round trips.
-    const checksFrom = Date.now();
     await inParallel(due, (g) => this.checkGroup(g, now, hidden), CHECKS_AT_ONCE);
-    // Not waited for: it is only a measurement.
-    if (due.length && !hidden) void this.tryHeads(due, Date.now() - checksFrom);
     // Keep this browser's pre-key published and fresh (accounts from before pre-keys get one
     // here). Only after a first full round, so invitations accepted elsewhere were joined first:
     // a retired key is pruned for good.
