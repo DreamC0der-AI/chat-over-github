@@ -306,6 +306,12 @@ const SPACE_SCAN_MS = at(60_000);
 const SPACE_SCAN_PENDING_MS = at(15_000);
 const INVITE_RETRY_MS = at(10_000);
 const INVITE_RETRY_MAX_MS = at(3 * 60_000);
+/**
+ * A send skips its own sync when the chat was synced less than this long ago. Longer than the
+ * gap between two syncs of the chat on screen (FULL_SYNC_ACTIVE_MS plus a poll and a slow
+ * request), so a send from an open chat nearly always goes straight out.
+ */
+const SEND_FRESH_MS = 20_000;
 const JOINS_AT_ONCE = 3;
 /** A GitHub read that has not answered by then is given up (and retried by the next step). */
 const REQUEST_TIMEOUT_MS = 20_000;
@@ -886,6 +892,9 @@ export class Session {
       registry: this.registry,
       features: resolveFeatures(this.provider, { historyBackup: false, preKeys: true }),
       onMessage: (g, m) => this.onMessage(g, m),
+      // A chat on screen is synced every few seconds: a send right after one goes straight out
+      // (one request instead of three in a row; keyhold re-sends what turns out to be late).
+      sendFreshMs: SEND_FRESH_MS,
       // Read the clock on each call (keyhold's default keeps the function it found at load).
       now: () => Date.now(),
     });
@@ -1786,7 +1795,9 @@ export class Session {
       return;
     }
     this.markSent(g.id, item, sent.id);
-    void this.syncGroup(g);
+    // No sync right behind the send: the next message typed would wait for it (three requests in
+    // a row). The chat's regular check follows in a few seconds, and sees our write as a change.
+    this.lastCheck.set(g.id, Date.now());
   }
 
   /** The real message is stored by now; the screen drops this bubble as soon as it shows that one. */
