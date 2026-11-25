@@ -26,7 +26,10 @@ describe('fault injection in the mock', () => {
       const { a, s, gh } = await space();
       gh.faults = { seed: 42, serverError: { match: '^GET .*/contents/mail', probability: 0.5, status: 503 } };
       let outcome = '';
-      for (let i = 0; i < 20; i++) outcome += await a.mailbox.list(s).then(() => 'ok ', () => 'fail ');
+      for (let i = 0; i < 20; i++) {
+        a.changes.relist(s); // or the mailbox answers from what it knows, without the listing
+        outcome += await a.mailbox.list(s).then(() => 'ok ', () => 'fail ');
+      }
       return `${outcome}/ ${gh.faultLog.length}`;
     };
     const first = await run();
@@ -65,7 +68,7 @@ describe('C3: rate limits are not lost access', () => {
     const g = await bob.chat.startDm(alice.address);
     const [ga] = await alice.chat.acceptInvites();
     await g.send({ t: 'text', body: 'hi' });
-    w.gh.faults = { secondaryLimit: { match: '^GET .*/contents/mail(/\\d{8})?$' } };
+    w.gh.faults = { secondaryLimit: { match: '^GET .*/(contents/mail(/\\d{8})?|compare/.*)$' } };
     await expect(ga!.sync()).rejects.toMatchObject({ code: 'too_many_attempts' });
     expect(meta(ga!).accessLost).toBeFalsy();
     w.gh.faults = undefined;
@@ -369,9 +372,10 @@ describe('posts with ids chosen before the first try (keyhold retries)', () => {
 
 describe('mail that GitHub lists before it can serve it', () => {
   it('is not marked seen: the next list delivers it', async () => {
-    const { a, s, gh } = await space();
+    const { w, a, s, gh } = await space();
     const first = await a.mailbox.list(s);
-    await a.mailbox.post(s, bytes('late'));
+    // Posted from another browser: this one has to fetch the bytes.
+    await w.session('alice').mailbox.post(s, bytes('late'));
     // A replica behind the one that listed the file: both reads of it answer 404 for a moment.
     gh.faults = { serverError: [{ match: '^GET .*/git/blobs/', times: 1, status: 404 }, { match: '^GET .*/contents/mail/\\d{8}/', times: 1, status: 404 }] };
     const r1 = await a.mailbox.list(s, first.cursor);

@@ -46,6 +46,44 @@ describe('reloading the app', () => {
     expect(again.s.blocked.has('github:carol')).toBe(true);
   });
 
+  it('downloads again only what changed: no settings, keys or log entries it already has', async () => {
+    w = await world();
+    const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
+    const code = await alice.setup();
+    await bob.setup();
+    await w.dm(alice, bob);
+    await alice.s.block('github:carol');
+    await bob.s.send(bob.chat('alice')!.live!, 'hello');
+    await w.until(async () => (await alice.texts(alice.chat('bob'))).includes('hello'), 'alice got it');
+    await w.rounds(3);
+    /** Single files read since `from`: synced-store items, directory entries, log entries. */
+    const fileReads = (from: number) =>
+      w.requests.slice(from).filter((r) => r.method === 'GET' && /\/contents\/(items\/[^/]+|dir\/[^/]+|log\/\d{5}\/\d{8})$/.test(r.url.replace(/\?.*$/, ''))).map((r) => r.url.replace(/^.*\/contents\//, '').replace(/\/[^/]+$/, ''));
+
+    let from = w.requests.length;
+    let again = await w.reopen(alice);
+    await w.rounds(2);
+    // (One read stays: the synced store's index, asked for by name before anything is listed.)
+    expect(fileReads(from)).toEqual(['items']);
+    expect(again.s.blocked.has('github:carol')).toBe(true);
+
+    // Another browser of hers changes a setting and adds a device: only those are read.
+    const other = await w.browser('alice');
+    await other.restore(code);
+    await other.s.block('github:dave');
+    await w.rounds(3);
+    from = w.requests.length;
+    again = await w.reopen(again);
+    await w.rounds(2);
+    const reads = fileReads(from);
+    expect(again.s.blocked.has('github:dave')).toBe(true);
+    // The index, the changed setting, and at most the new device's directory entry.
+    expect(reads.filter((r) => r === 'items').length).toBeLessThanOrEqual(3);
+    expect(reads.filter((r) => r === 'dir').length).toBeLessThanOrEqual(1);
+    expect(reads.filter((r) => r === 'log')).toEqual([]);
+    await w.checkConverged();
+  });
+
   it('goes to the install screen when the app was uninstalled since the last visit', async () => {
     w = await world();
     const newbie = await w.browser('newbie');

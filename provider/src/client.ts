@@ -67,7 +67,7 @@ export class GitHubClient {
    * caller makes safe to repeat), a rejected fetch is retried too: the write may have landed, so
    * the caller must accept "already done" on the retry.
    */
-  async call(method: string, path: string, body?: unknown, accept = 'application/vnd.github+json', retryNetwork = false): Promise<{ status: number; data: any }> {
+  async call(method: string, path: string, body?: unknown, accept = 'application/vnd.github+json', retryNetwork = false, headers?: Record<string, string>): Promise<{ status: number; data: any; etag?: string }> {
     for (let attempt = 0; ; attempt++) {
       this.requests++;
       let res: Awaited<ReturnType<FetchFn>>;
@@ -80,6 +80,7 @@ export class GitHubClient {
             'X-GitHub-Api-Version': '2022-11-28',
             ...(this.o.userAgent ? { 'User-Agent': this.o.userAgent } : {}),
             ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+            ...(headers ?? {}),
           },
           body: body === undefined ? undefined : JSON.stringify(body),
         });
@@ -111,7 +112,7 @@ export class GitHubClient {
         await this.backoff(attempt);
         continue;
       }
-      return { status: res.status, data };
+      return { status: res.status, data, etag: res.headers.get('etag') ?? undefined };
     }
   }
 

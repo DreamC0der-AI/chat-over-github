@@ -113,6 +113,51 @@ describe('the chat on screen', () => {
     await step;
     await w.checkConverged();
   });
+
+  it('learns of a new message with one request, fetches only that message, and knows its own sends', async () => {
+    w = await world();
+    const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
+    await alice.setup();
+    await bob.setup();
+    await w.dm(alice, bob);
+    await w.rounds(2);
+    // bob has the chat open. (alice changed the chat's key a moment ago by adding him, so her
+    // own sends still sync first; his go straight out.)
+    bob.s.setActive(bob.chat('alice')!.key);
+    await bob.sync();
+    /** What went to the chat's repo since `from`, as "METHOD what". */
+    const toChat = (from: number) =>
+      w.requests
+        .slice(from)
+        .filter((r) => r.url.includes('/ghchat-'))
+        .map((r) => `${r.method} ${/\/(compare|git\/blobs|contents\/mail|contents\/log|commits)\b/.exec(r.url)?.[1] ?? r.url}`);
+    const settle = async (cond: () => boolean | Promise<boolean>, what: string) => {
+      const deadline = Date.now() + 5_000;
+      while (!(await cond())) {
+        if (Date.now() > deadline) throw new Error(`still not true: ${what}`);
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    };
+
+    await alice.s.send(alice.chat('bob')!.live!, 'ping');
+    let from = w.requests.length;
+    // The open chat's own check, not a sync round run by the test (those list the folders).
+    bob.s.checkOpenChatNow();
+    await settle(async () => (await bob.texts(bob.chat('alice'))).includes('ping'), 'bob got ping');
+    expect(toChat(from)).toEqual(['GET compare', 'GET git/blobs']);
+
+    // His own send: one write. The check after it sees nothing new and reads nothing.
+    from = w.requests.length;
+    await bob.s.send(bob.chat('alice')!.live!, 'pong');
+    expect(toChat(from)).toEqual(['PUT contents/mail']);
+    bob.s.checkOpenChatNow();
+    await settle(() => toChat(from).length > 1, 'the check ran');
+    await new Promise((r) => setTimeout(r, 100));
+    expect(toChat(from)).toEqual(['PUT contents/mail', 'GET compare']);
+
+    await w.until(async () => (await alice.texts(alice.chat('bob'))).includes('pong'), 'alice got pong');
+    await w.checkConverged();
+  });
 });
 
 describe('a send right after a sync', () => {

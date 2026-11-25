@@ -111,8 +111,8 @@ describe('taking over from another tab', () => {
     const locks = new FakeLocks();
     expect((await runTab(alice.s, locks, false)).held).toBe(true);
 
-    // Tab 1's send reads the mailbox first (held here), then encrypts, saves, and posts (held too).
-    const pull = holdNext((m, u) => m === 'GET' && u.includes('/contents/mail'));
+    // Tab 1's send asks what is new first (held here), then encrypts, saves, and posts (held too).
+    const pull = holdNext((m, u) => m === 'GET' && (u.includes('/contents/mail') || u.includes('/compare/')));
     const sending = alice.s.send(alice.chat('bob')!.live!, 'from tab 1');
     await pull.arrived;
     const tab2 = useHere(alice, locks);
@@ -185,7 +185,7 @@ describe('taking over from another tab', () => {
     await bob.setup();
     await w.dm(alice, bob);
     const before = alice.s.chat;
-    const pull = holdNext((m, u) => m === 'GET' && u.includes('/contents/mail'));
+    const pull = holdNext((m, u) => m === 'GET' && (u.includes('/contents/mail') || u.includes('/compare/')));
     const sending = alice.s.send(alice.chat('bob')!.live!, 'first');
     await pull.arrived;
     void alice.s.stop(); // the install check failed, say

@@ -47,6 +47,11 @@ interface File {
   sha: string;
   content: Buffer;
 }
+interface Change {
+  filename: string;
+  status: 'added' | 'modified' | 'removed';
+  sha: string;
+}
 interface Repo {
   owner: string;
   name: string;
@@ -58,6 +63,10 @@ interface Repo {
   description: string;
   /** Head commit id; every write moves it, so a stale Git Data API commit can't fast-forward. */
   head: number;
+  /** What each commit changed, by the head number it made (for GET compare). */
+  changes: Map<number, Change[]>;
+  /** History before this head number was rewritten away: comparing from there fails. */
+  rewritten: number;
   /** Rulesets: rule types in force on the default branch. */
   rules: Set<string>;
   actionsEnabled: boolean;
@@ -186,6 +195,48 @@ export class MockGitHub {
     const b = Buffer.from(content);
     r.files.set(path, { sha: sha(b), content: b });
     r.head++;
+    r.rewritten = r.head;
+  }
+
+  /** Test hook: more commits than one compare answer carries have landed since `head`. */
+  compareOverflow = false;
+  /** Test hook: compare answers as it did when first asked (a copy that lags behind). */
+  staleCompare = false;
+  private staleAnswers = new Map<string, unknown>();
+  private reqHeaders: Record<string, string> = {};
+
+  /** Commits made with the Git Data API keep the id it gave them: head number <-> that id. */
+  private pushed = new Map<string, string>();
+  private commitId = (r: Repo, n: number) => this.pushed.get(`${r.owner}/${r.name}@${n}`) ?? `c-${r.owner}/${r.name}@${n}`;
+  /** The head number a commit id stands for in this repo; NaN when it is not one of its commits. */
+  private commitNo(r: Repo, id: string) {
+    for (const [k, v] of this.pushed) if (v === id) return k.startsWith(`${r.owner}/${r.name}@`) ? Number(k.slice(k.lastIndexOf('@') + 1)) : NaN;
+    const at = id.match(/^c-(.+)@(\d+)$/);
+    return at && at[1] === `${r.owner}/${r.name}` ? Number(at[2]) : NaN;
+  }
+  /** GET compare/{base}...HEAD: the commits after `n` and the files they changed, with an ETag. */
+  private compare(r: Repo, n: number) {
+    const files = new Map<string, Change>();
+    for (let i = n + 1; i <= r.head; i++) {
+      for (const c of r.changes.get(i) ?? []) {
+        const was = files.get(c.filename);
+        if (c.status === 'removed') {
+          if (was?.status === 'added') files.delete(c.filename);
+          else files.set(c.filename, c);
+        } else files.set(c.filename, { ...c, status: was ? (was.status === 'added' ? 'added' : 'modified') : c.status });
+      }
+    }
+    const commits = [];
+    for (let i = n + 1; i <= r.head; i++) commits.push({ sha: this.commitId(r, i) });
+    const total = commits.length + (this.compareOverflow ? 1 : 0);
+    const body = { status: total ? 'ahead' : 'identical', ahead_by: total, behind_by: 0, total_commits: total, commits, files: [...files.values()] };
+    return { etag: `"cmp-${n}-${r.head}"`, body };
+  }
+  /** One more commit on the branch: what it changed, and its ids as a write answers them. */
+  private commit(r: Repo, changes: Change[]) {
+    r.head++;
+    r.changes.set(r.head, changes);
+    return { sha: this.commitId(r, r.head), parents: [{ sha: this.commitId(r, r.head - 1) }] };
   }
 
   fetch = async (url: string, init: Init = {}) => {
@@ -194,6 +245,8 @@ export class MockGitHub {
     const user = this.who(init);
     this.log.push(`${method} ${u.pathname}`);
     const body = init.body ? JSON.parse(init.body) : undefined;
+    this.reqHeaders = {};
+    for (const [k, v] of Object.entries(init.headers ?? {})) this.reqHeaders[k.toLowerCase()] = v;
     if (user) {
       const left = this.budget.get(user);
       if (left !== undefined) {
@@ -248,7 +301,7 @@ export class MockGitHub {
       if (!user) return resp(401, {});
       const full = `${user}/${body.name}`.toLowerCase();
       if (this.repos.has(full)) return resp(422, { message: 'name already exists on this account' });
-      this.repos.set(full, { owner: user, name: body.name.toLowerCase(), private: !!body.private, collaborators: new Set(), invitations: new Map(), files: new Map(), topics: [], description: body.description ?? '', head: 1, rules: new Set(), actionsEnabled: true });
+      this.repos.set(full, { owner: user, name: body.name.toLowerCase(), private: !!body.private, collaborators: new Set(), invitations: new Map(), files: new Map(), topics: [], description: body.description ?? '', head: 1, changes: new Map(), rewritten: 0, rules: new Set(), actionsEnabled: true });
       if (body.auto_init) this.repos.get(full)!.files.set('README.md', { sha: sha(Buffer.from('')), content: Buffer.from('') });
       return resp(201, { full_name: full, name: body.name, private: !!body.private });
     }
@@ -340,16 +393,15 @@ export class MockGitHub {
         if (!cur && body.sha) return resp(422, { message: 'sha given for a new file' });
         const content = Buffer.from(body.content, 'base64');
         r.files.set(path, { sha: sha(content), content });
-        r.head++;
-        return resp(cur ? 200 : 201, { content: { sha: sha(content) } });
+        const commit = this.commit(r, [{ filename: path, status: cur ? 'modified' : 'added', sha: sha(content) }]);
+        return resp(cur ? 200 : 201, { content: { sha: sha(content) }, commit });
       }
       if (method === 'DELETE') {
         const cur = r.files.get(path);
         if (!cur) return resp(404, {});
         if (body.sha !== cur.sha) return resp(409, { message: 'sha mismatch' });
         r.files.delete(path);
-        r.head++;
-        return resp(200, {});
+        return resp(200, { content: null, commit: this.commit(r, [{ filename: path, status: 'removed', sha: cur.sha }]) });
       }
     }
     if ((m = rest.match(/^git\/blobs\/([0-9a-f]+)$/)) && method === 'GET') {
@@ -387,8 +439,22 @@ export class MockGitHub {
       if (r.rules.has('deletion')) return resp(422, { message: 'Repository rule violations found: Cannot delete this branch' });
       return resp(204, undefined);
     }
+    if (rest === 'commits' && method === 'GET') {
+      const etag = `"h-${this.commitId(r, r.head)}"`;
+      if (this.reqHeaders['if-none-match'] === etag) return resp(304, undefined, { etag });
+      return resp(200, [{ sha: this.commitId(r, r.head) }], { etag });
+    }
+    if ((m = rest.match(/^compare\/(.+)\.\.\.HEAD$/)) && method === 'GET') {
+      const n = this.commitNo(r, m[1]!);
+      if (!(n >= r.rewritten && n <= r.head)) return resp(404, { message: 'Not Found' });
+      const stale = this.staleCompare ? this.staleAnswers.get(m[1]!) : undefined;
+      const answer = (stale ?? this.compare(r, n)) as { etag: string; body: unknown };
+      if (this.staleCompare) this.staleAnswers.set(m[1]!, answer);
+      if (this.reqHeaders['if-none-match'] === answer.etag) return resp(304, undefined, { etag: answer.etag });
+      return resp(200, answer.body, { etag: answer.etag });
+    }
     if (rest === 'commits/HEAD' && method === 'GET') {
-      return resp(200, { sha: `c-${r.owner}/${r.name}@${r.head}`, commit: { tree: { sha: `t-${r.owner}/${r.name}@${r.head}` } } });
+      return resp(200, { sha: this.commitId(r, r.head), commit: { tree: { sha: `t-${r.owner}/${r.name}@${r.head}` } } });
     }
     if (rest.startsWith('git/') && method !== 'GET' && !this.canWrite(r, user)) return resp(r.private ? 404 : 403, { message: 'no write access' });
     if (this.gitDataDown && rest.startsWith('git/') && method !== 'GET') return resp(500, { message: 'mock: down' });
@@ -419,16 +485,21 @@ export class MockGitHub {
       const c = this.git.commits.get(body.sha);
       if (!c) return resp(422, { message: 'Object does not exist' });
       const t = this.git.trees.get(c.tree)!;
-      const headId = `c-${r.owner}/${r.name}@${r.head}`;
+      const headId = this.commitId(r, r.head);
       const ff = c.parent === headId && t.base === `t-${r.owner}/${r.name}@${r.head}`;
       if (!ff && body.force && r.rules.has('non_fast_forward')) return resp(422, { message: 'Repository rule violations found: Cannot force-push to this branch' });
       // A forced update (no ruleset) is applied as an overlay: enough to show it went through.
       if (!ff && !body.force) return resp(422, { message: 'Update is not a fast forward' });
+      const changes: Change[] = [];
       for (const e of t.entries) {
         const content = this.git.blobs.get(e.sha) ?? [...r.files.values()].find((f) => f.sha === e.sha)!.content;
+        changes.push({ filename: e.path, status: r.files.has(e.path) ? 'modified' : 'added', sha: e.sha });
         r.files.set(e.path, { sha: e.sha, content });
       }
+      // The commit keeps the id the Git Data API gave it, as on GitHub.
       r.head++;
+      r.changes.set(r.head, changes);
+      this.pushed.set(`${r.owner}/${r.name}@${r.head}`, body.sha);
       return resp(200, { object: { sha: body.sha } });
     }
     if (rest === 'topics' && method === 'PUT') {

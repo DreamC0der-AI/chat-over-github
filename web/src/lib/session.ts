@@ -3,7 +3,7 @@
  * stores, and a polling loop that keeps chats up to date without burning the rate limit.
  */
 import { githubProvider, toAddress, loginOf, retryAfterOf, inParallel } from 'chat-over-github-provider';
-import type { FetchFn } from 'chat-over-github-provider';
+import type { ChangeWatch, FetchFn } from 'chat-over-github-provider';
 import { resolveFeatures } from 'keyhold/storage';
 import type { DeviceStorage, StorageProvider } from 'keyhold/storage';
 import {
@@ -301,6 +301,8 @@ const PERSONAL_FLUSH_MS = at(2_000);
 const PERSONAL_PULL_MS = at(8_000);
 const PERSONAL_FULL_PULL_MS = at(30_000);
 const FULL_SYNC_ACTIVE_MS = at(12_000);
+/** A quiet chat's folders are listed in full this often (its change check runs far more often). */
+const FULL_SYNC_IDLE_MS = at(10 * 60_000);
 const FULL_SYNC_WARM_MS = at(30_000);
 const SPACE_SCAN_MS = at(60_000);
 const SPACE_SCAN_PENDING_MS = at(15_000);
@@ -313,6 +315,9 @@ const INVITE_RETRY_MAX_MS = at(3 * 60_000);
  */
 const SEND_FRESH_MS = 20_000;
 const JOINS_AT_ONCE = 3;
+/** Files kept across reloads by content hash (see blobStore), and how many before starting over. */
+const BLOB_PREFIX = 'blob:';
+const BLOBS_KEPT_MAX = 1500;
 /** A GitHub read that has not answered by then is given up (and retried by the next step). */
 const REQUEST_TIMEOUT_MS = 20_000;
 /** An answer slower than this is listed in Settings > Connection. */
@@ -385,7 +390,7 @@ export class Session {
   homeNotSelected = false;
   db!: Db;
   device!: DeviceStorage;
-  provider!: StorageProvider & { client: { requests: number } };
+  provider!: StorageProvider & { client: { requests: number }; changes: ChangeWatch };
   registry!: IdentityRegistry;
   /** Trusted keys and verified marks for the people this account talks to (synced). */
   contacts!: ContactBook;
@@ -631,6 +636,16 @@ export class Session {
     this.bump();
   }
 
+  /** The kept files are only a cache: when there are too many, start over. */
+  private async pruneBlobs() {
+    try {
+      const keys = await this.db.keys('kv', BLOB_PREFIX);
+      if (keys.length > BLOBS_KEPT_MAX) for (const k of keys) await this.db.del('kv', k);
+    } catch {
+      /* the next start tries again */
+    }
+  }
+
   /** The provider needs the install: before it, GitHub hides every repo from the app. */
   private async makeProvider() {
     if (this.provider) return;
@@ -644,7 +659,14 @@ export class Session {
       homeRepo: this.homeRepo,
       chatPrefix: CONFIG.chatPrefix,
       description: `End-to-end encrypted chat data. Only the members' chat app can read it. Open it at ${location.origin}`,
+      // Log entries, directory entries and synced-store items, kept by content hash so a reload
+      // downloads only what changed. Ciphertext or signed public data, as on GitHub.
+      blobStore: {
+        get: (sha) => this.db.get<Uint8Array>('kv', BLOB_PREFIX + sha),
+        put: (sha, data) => this.db.put('kv', data, BLOB_PREFIX + sha),
+      },
     }), this.activities) as typeof this.provider;
+    void this.pruneBlobs();
     this.contacts = new ContactBook(this.db, loginFrom, (a) => {
       this.peers.delete(a);
       this.bump();
@@ -2575,17 +2597,21 @@ export class Session {
       this.lastCheck.set(g.id, Date.now());
       const rec = this.records.get(g.id);
       const warm = rec && (now - rec.lastTs < 2 * 60_000 || this.pending(g).length > 0);
-      // GitHub's change check can lag up to a minute behind a push, so the open chat and busy
-      // chats also get a full sync every little while whatever it says.
-      const fallback = hidden ? Infinity : this.onScreen(g.id) ? FULL_SYNC_ACTIVE_MS : warm ? FULL_SYNC_WARM_MS : Infinity;
+      // The check asks GitHub which files were added since the last look (one request). Its
+      // answer can lag behind a push, and a list of changes is easier to get wrong than a
+      // listing, so the chat's folders are also listed in full every little while: often for
+      // the open chat and busy chats, now and then for the rest.
+      const fallback = hidden ? Infinity : this.onScreen(g.id) ? FULL_SYNC_ACTIVE_MS : warm ? FULL_SYNC_WARM_MS : FULL_SYNC_IDLE_MS;
       // A chat whose last sync failed gets a full one again (not more often than an open chat's),
       // so its warning clears once GitHub answers, even if nothing new arrived meanwhile.
       const retry = this.groupErrors.has(g.id) ? (hidden ? HIDDEN_POLL_MS : FULL_SYNC_ACTIVE_MS) : fallback;
-      const changed = await this.headChanged(g.space);
-      if (changed || now - (this.lastFullSync.get(g.id) ?? 0) >= retry) {
+      const full = now - (this.lastFullSync.get(g.id) ?? 0) >= retry;
+      const changed = await this.provider.changes.check(g.space);
+      if (full) {
         this.lastFullSync.set(g.id, Date.now());
-        await this.syncGroup(g);
+        this.provider.changes.relist(g.space);
       }
+      if (changed || full) await this.syncGroup(g);
     } catch (e) {
       this.setGroupError(g.id, this.noteError(e));
     }

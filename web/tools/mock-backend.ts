@@ -1,12 +1,11 @@
 /**
  * The in-memory GitHub + Worker backend the tests run against: keyhold's GitHub mock plus the
- * few endpoints the web app adds (/user, /users/:login, commits ETag, repo delete, own
+ * few endpoints the web app adds (/user, /users/:login, repo delete, own
  * installation, closure notices). Used over HTTP by tools/mock-server.ts (browser checks) and
  * directly as a fetch function by the no-browser scenarios (tests/).
  *   const b = mockBackend(); await b.fetch('http://x/gh/user', { headers: { Authorization: 'Bearer tok-alice' } })
  * Paths start with /gh/ (GitHub API) or /worker/ (the Worker); anything else is null.
  */
-import { createHash } from 'node:crypto';
 import { MockGitHub } from '../../provider/tests/github-mock.ts';
 
 export interface MockReply { status: number; body: string; headers: Record<string, string> }
@@ -43,16 +42,6 @@ export function mockBackend() {
         if (m) {
           const l = m[1]!.toLowerCase();
           return gh.users.has(l) ? json(200, { login: m[1], id: gh.users.get(l)!.id, type: 'User' }) : json(404, { message: 'Not Found' });
-        }
-        m = path.match(/^\/repos\/([^/]+)\/([^/]+)\/commits$/);
-        if (m && method === 'GET') {
-          const r = gh.repos.get(`${m[1]}/${m[2]}`.toLowerCase());
-          if (!r || !gh.canRead(r, user)) return json(404, { message: 'Not Found' });
-          const h = createHash('sha1');
-          for (const [p, f] of [...r.files].sort()) h.update(`${p}:${f.sha};`);
-          const etag = `"${h.digest('hex')}"`;
-          if (req.headers['if-none-match'] === etag) return send(304, '', { ETag: etag });
-          return json(200, [{ sha: etag }], { ETag: etag });
         }
         m = path.match(/^\/repos\/([^/]+)\/([^/]+)$/);
         if (m && method === 'DELETE') {
@@ -93,7 +82,8 @@ export function mockBackend() {
         closures.set(user, (closures.get(user) ?? []).filter((c) => c.id !== cm[1]));
         return json(200, { ok: true });
       }
-      const r = await gh.fetch((isGh ? gh.api : gh.worker) + rest, { method, headers: auth ? { Authorization: auth } : {}, body });
+      const inm = req.headers['if-none-match'];
+      const r = await gh.fetch((isGh ? gh.api : gh.worker) + rest, { method, headers: { ...(auth ? { Authorization: auth } : {}), ...(inm ? { 'If-None-Match': inm } : {}) }, body });
       const text = await r.text();
       return send(r.status, text, { ...r.rawHeaders, ...(text ? { 'Content-Type': 'application/json' } : {}) });
     }
