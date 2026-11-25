@@ -124,7 +124,7 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
   const busyLabel = session.chatBusy.get(convo.key);
   const act = session.activities.forKey(convo.key);
   const step = act && !act.ended ? stepLine(act) : undefined;
-  const err = group ? session.groupErrors.get(group.id) : undefined;
+  const err = group ? session.chatWarning(group.id) : undefined;
   const joined = !!live && live.members().length > 1;
   const peerLeft = !!live && dm && !!liveRec?.peerLeft && !joined;
   const last = convo.rooms[convo.rooms.length - 1]!;

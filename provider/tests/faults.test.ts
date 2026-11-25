@@ -65,7 +65,7 @@ describe('C3: rate limits are not lost access', () => {
     const g = await bob.chat.startDm(alice.address);
     const [ga] = await alice.chat.acceptInvites();
     await g.send({ t: 'text', body: 'hi' });
-    w.gh.faults = { secondaryLimit: { match: '^GET .*/contents/mail$' } };
+    w.gh.faults = { secondaryLimit: { match: '^GET .*/contents/mail(/\\d{8})?$' } };
     await expect(ga!.sync()).rejects.toMatchObject({ code: 'too_many_attempts' });
     expect(meta(ga!).accessLost).toBeFalsy();
     w.gh.faults = undefined;

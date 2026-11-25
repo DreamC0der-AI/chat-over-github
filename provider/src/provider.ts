@@ -121,7 +121,9 @@ interface DirEntry {
 }
 
 /** How many GitHub reads one listing runs at once: well under GitHub's limit on concurrent requests. */
-export const READ_CONCURRENCY = 6;
+export /** Days of mail listed directly from a cursor (see mailbox.list); a longer gap lists the folder. */
+const MAIL_SPAN_DAYS = 8;
+const READ_CONCURRENCY = 6;
 
 /** `fn` over every item, a few at a time; results in the items' order. */
 export async function inParallel<T, R>(items: T[], fn: (item: T) => Promise<R>, limit = READ_CONCURRENCY): Promise<R[]> {
@@ -583,6 +585,14 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
       // log/{shard}/{index}: a GitHub folder listing stops at 1,000 entries, so 1,000 per shard.
       async read(space, from) {
         const [ow, re] = splitSpace(space);
+        // Most reads are the tail of one shard: list it directly, one round trip fewer. Not when
+        // it is empty (maybe no access: the listing below tells) or full (more shards follow).
+        const first = Math.floor(from / 1000);
+        const shard = String(first).padStart(5, '0');
+        const direct = (await listDir(ow, re, `log/${shard}`, false)).filter((e) => e.type === 'file' && /^\d{8}$/.test(e.name));
+        if (direct.length && !direct.some((e) => Number(e.name) % 1000 === 999)) {
+          return readAll(ow, re, direct.filter((e) => Number(e.name) >= from));
+        }
         const shards = (await listDir(ow, re, 'log')).filter((d) => d.type === 'dir' && /^\d{5}$/.test(d.name) && Number(d.name) >= Math.floor(from / 1000));
         const out: Bytes[] = [];
         for (const sh of shards) {
@@ -665,16 +675,25 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
         const seen = new Set(c?.s ?? []);
         // Posters bucket by their own clock: re-scan the previous day too, to tolerate skew.
         const min = c && DAY.test(c.d) ? prevDay(c.d) : '';
-        const days = (await listDir(ow, re, 'mail')).filter((d) => d.type === 'dir' && DAY.test(d.name) && d.name >= min);
-        const items: MailboxItem[] = [];
-        const keep: string[] = [];
-        const last = days[days.length - 1]?.name ?? c?.d ?? day(now());
-        const listed: { d: DirEntry; files: DirEntry[] }[] = [];
-        for (const d of days) {
+        const listed: { d: { name: string }; files: DirEntry[] }[] = [];
+        // Usually the days to look at are known (the cursor's day, the day before, up to tomorrow
+        // for a poster's clock running ahead): list those folders at once, a round trip fewer.
+        const span: string[] = [];
+        if (min) for (let d = day(now() + 86_400_000); d >= min && span.length <= MAIL_SPAN_DAYS; d = prevDay(d)) span.unshift(d);
+        if (span.length && span.length <= MAIL_SPAN_DAYS) {
+          const got = await inParallel(span, async (name) => ({ d: { name }, files: (await listDir(ow, re, `mail/${name}`, false)).filter((f) => f.type === 'file') }));
+          listed.push(...got.filter((x) => x.files.length));
+        }
+        // Nothing there (a quiet chat, or no access: the listing below tells), or a long gap.
+        if (!listed.length) {
+          const days = (await listDir(ow, re, 'mail')).filter((d) => d.type === 'dir' && DAY.test(d.name) && d.name >= min);
           // The trees API, not a Contents listing: a busy day can pass GitHub's 1,000-entry cap.
           // Junk any member wrote (a folder, a symlink) is not mail, and must not block it.
-          listed.push({ d, files: (await listDir(ow, re, d.path, true, d.sha)).filter((f) => f.type === 'file') });
+          listed.push(...(await inParallel(days, async (d) => ({ d, files: (await listDir(ow, re, d.path, true, d.sha)).filter((f) => f.type === 'file') }))));
         }
+        const items: MailboxItem[] = [];
+        const keep: string[] = [];
+        const last = listed[listed.length - 1]?.d.name ?? c?.d ?? day(now());
         for (const { d, files: entries } of listed) {
           const want = entries.filter((f) => !seen.has(f.name));
           // By blob sha from the listing: a path read can still 404 for a moment after the commit
