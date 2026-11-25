@@ -233,10 +233,10 @@ try {
   // remove carol
   await menu(alice, 'Members');
   await alice.page.locator('.member', { hasText: 'carol' }).getByRole('button', { name: 'Remove' }).click();
-  await alice.page.locator('.sys', { hasText: '@carol left' }).waitFor({ timeout: 30000 }).catch(() => {});
-  await carol.page.locator('.sys, .flash', { hasText: /You were removed|no longer available/ }).first().waitFor({ timeout: 45000 });
+  await alice.page.locator('.sys', { hasText: 'You removed @carol' }).waitFor({ timeout: 30000 });
+  await carol.page.locator('.sys, .flash', { hasText: /@alice removed you/ }).first().waitFor({ timeout: 45000 });
   await carol.page.screenshot({ path: `${SHOTS}/carol-removed.png` });
-  check(true, 'carol removed and told');
+  check(true, 'carol removed and told who did it');
   await alice.page.screenshot({ path: `${SHOTS}/group-alice-panel.png` });
   await closeDialog(alice);
 

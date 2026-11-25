@@ -187,7 +187,7 @@ export function endedText(session: Session, e: NonNullable<import('../lib/sessio
     case 'closed': return me ? `You closed ${what}` : `${who} closed ${what}`;
     case 'moved': return 'Continued in a newer chat';
     case 'quit': return `You left ${what}`;
-    case 'removed': return `You were removed from ${what}`;
+    case 'removed': return e.by ? `${who} removed you` : `You were removed from ${what}`;
   }
 }
 

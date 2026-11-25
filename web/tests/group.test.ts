@@ -21,9 +21,14 @@ describe('groups', () => {
 
     const g = alice.chat('Weekend hikers')!.live!;
     await alice.s.removeMember(g, g.members().find((m) => m.address === 'github:carol')!.fingerprint);
-    await w.until(async () => (await alice.notes(alice.chat('Weekend hikers'))).some((n) => n.includes('@carol left')), 'alice sees carol left');
-    // She can't read the repo any more, so her app can only tell it's unavailable ("no longer available").
-    await w.until(() => !!carol.chat('Weekend hikers') && !carol.chat('Weekend hikers')!.live, 'carol can no longer send there');
+    // A removal reads as one, naming who did it, never as a leave.
+    await w.until(async () => (await alice.notes(alice.chat('Weekend hikers'))).includes('You removed @carol'), 'alice sees she removed carol');
+    await w.until(async () => (await bob.notes(bob.chat('Weekend hikers'))).includes('@alice removed @carol'), 'bob sees alice removed carol');
+    expect((await bob.notes(bob.chat('Weekend hikers'))).some((n) => n.includes('left'))).toBe(false);
+    // She can't read the repo any more; the notice through the Worker tells her app who removed her.
+    await w.until(() => carol.chat('Weekend hikers')?.rooms.at(-1)?.ended?.how === 'removed', 'carol sees she was removed');
+    expect(carol.chat('Weekend hikers')!.rooms.at(-1)!.ended!.by).toBe('github:alice');
+    expect(carol.chat('Weekend hikers')!.live).toBeUndefined();
     expect(await carol.texts(carol.chat('Weekend hikers'))).toContain('carol here'); // she keeps her copy
 
     await bob.s.send(bob.chat('Weekend hikers')!.live!, 'after carol');
@@ -70,9 +75,12 @@ describe('groups', () => {
     const { alice, carol } = await hikers();
     const g = alice.chat('Hikers')!.live!;
     await alice.s.removeMember(g, g.members().find((m) => m.address === 'github:carol')!.fingerprint);
-    await w.until(() => !carol.chat('Hikers')?.live, 'carol is out');
+    await w.until(() => carol.chat('Hikers')?.rooms.at(-1)?.ended?.how === 'removed', 'carol is out');
     await w.rounds(2);
     await reinvite(alice, carol);
+    // The removal notice (kept 7 days) doesn't end the room she is back in.
+    await w.rounds(3);
+    expect(carol.chat('Hikers')!.live).toBeDefined();
     await w.checkConverged();
   });
 

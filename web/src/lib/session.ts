@@ -1622,6 +1622,15 @@ export class Session {
       await g.remove(fp);
       if (who) r.invited = r.invited.filter((a) => a !== who.address);
       await this.saveRecord(r);
+      // Their access to the repo goes with the removal, so their app can't read it there: tell it
+      // through the Worker, or it could only say the chat is unavailable.
+      if (who && who.address !== this.address) {
+        await this.ghFetch(`${CONFIG.worker}/closures`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: loginFrom(who.address), tag: await this.removalTag(g.id) }),
+        }).catch(() => undefined);
+      }
       t.step('Updating the chat');
       await this.syncGroup(g);
     }, { key: this.convoKey(r), space: g.space });
@@ -1630,6 +1639,11 @@ export class Session {
   /** Tag for closure notices: the members' apps can match it, the Worker can't link it to a repo. */
   private async closureTag(groupId: string) {
     return toHex(await sha256(new TextEncoder().encode(`keyhold-chat-web/v1/closure:${groupId}`))).slice(0, 32);
+  }
+
+  /** Tag for "you were removed" notices, sent the same way as closure notices. */
+  private async removalTag(groupId: string) {
+    return toHex(await sha256(new TextEncoder().encode(`keyhold-chat-web/v1/removal:${groupId}`))).slice(0, 32);
   }
 
   /**
@@ -2106,12 +2120,13 @@ export class Session {
       } else if (e.type === 'left' && e.pending) {
         await this.systemNote(g.id, `${who} didn’t join`);
       } else if (e.type === 'left') {
-        await this.systemNote(g.id, `${who} left`);
+        // Removed by an admin (maybe us), or left on their own.
+        await this.systemNote(g.id, !e.by ? `${who} left` : e.by.address === this.address ? `You removed ${who}` : `@${loginFrom(e.by.address)} removed ${who}`);
         if (this.isDm(g) && e.address !== this.address && !g.members().some((m) => m.address !== this.address)) {
           r.peerLeft = true;
           await this.saveRecord(r);
         }
-      } else if (e.type === 'removed') this.toEnd.set(g.id, { how: 'removed', at: Date.now() });
+      } else if (e.type === 'removed') this.toEnd.set(g.id, { how: 'removed', ...(e.by ? { by: e.by.address } : {}), at: Date.now() });
       else if (e.type === 'access-lost') {
         // Our own repo gone means we closed it (on another device, or on github.com). Someone
         // else's is only unavailable: it may come back, so nothing is deleted and it is retried.
@@ -2732,10 +2747,24 @@ export class Session {
     }
     if (!closures.length) return;
     const tags = new Map<string, ChatRecord>();
-    for (const rec of this.records.values()) if (!rec.ended) tags.set(await this.closureTag(rec.groupId), rec);
+    const removals = new Map<string, ChatRecord>();
+    for (const rec of this.records.values()) {
+      if (rec.ended) continue;
+      tags.set(await this.closureTag(rec.groupId), rec);
+      removals.set(await this.removalTag(rec.groupId), rec);
+    }
     for (const n of closures) {
       const from = toAddress(n.from.toLowerCase());
       const at = Date.parse(n.at) || Date.now();
+      const removal = removals.get(n.tag);
+      if (removal) {
+        // Believe it only from an admin of the group as this browser last knew it, only while the
+        // room is closed to us (a room we can still read tells us itself), and not from before a rejoin.
+        const g = this.chat!.groups.get(removal.groupId);
+        const admin = !!g && g.members().some((m) => m.address === from && m.admin);
+        if (admin && (!g!.active || this.isUnreachable(g)) && at > (removal.rejoinedAt ?? 0)) await this.endRoom(removal.groupId, { how: 'removed', by: from, at });
+        continue;
+      }
       const rec = tags.get(n.tag);
       // Believe it only from the room's owner.
       if (rec && rec.space?.split('/')[0]?.toLowerCase() === n.from.toLowerCase()) await this.endRoom(rec.groupId, { how: 'closed', by: from, at });
