@@ -120,9 +120,13 @@ interface DirEntry {
   type: string;
 }
 
+/**
+ * Days of mail listed directly from a cursor (see mailbox.list): the last day with mail, the day
+ * before it, today and tomorrow when the chat had mail yesterday or today. A longer gap lists
+ * the folder first, so a chat that has been quiet for days doesn't cost a request per day.
+ */
+const MAIL_SPAN_DAYS = 4;
 /** How many GitHub reads one listing runs at once: well under GitHub's limit on concurrent requests. */
-export /** Days of mail listed directly from a cursor (see mailbox.list); a longer gap lists the folder. */
-const MAIL_SPAN_DAYS = 8;
 const READ_CONCURRENCY = 6;
 
 /** `fn` over every item, a few at a time; results in the items' order. */

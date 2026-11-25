@@ -114,3 +114,42 @@ describe('the chat on screen', () => {
     await w.checkConverged();
   });
 });
+
+describe('a send right after a sync', () => {
+  it('is one write and no reads; a browser that joined unseen still gets the message, once everywhere', async () => {
+    w = await world();
+    const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
+    const code = await alice.setup();
+    await bob.setup();
+    await w.dm(alice, bob);
+    await w.rounds(2);
+
+    // bob's app synced this chat a moment ago: the send goes straight out.
+    await bob.sync();
+    let from = w.requests.length;
+    await bob.s.send(bob.chat('alice')!.live!, 'quick');
+    const made = w.requests.slice(from).filter((r) => r.url.includes('/gh/'));
+    expect(made.map((r) => r.method)).toEqual(['PUT']);
+    expect(made[0]!.url).toContain('/contents/mail/');
+    await w.until(async () => (await alice.texts(alice.chat('bob'))).includes('quick'), 'alice got it');
+
+    // alice opens a second browser; bob sends before his app has seen it join.
+    await bob.sync();
+    const alice2 = await w.browser('alice');
+    await alice2.restore(code);
+    for (let i = 0; i < 6 && !alice2.chat('bob')?.live; i++) for (const b of [alice, alice2]) await b.sync();
+    expect(alice2.chat('bob')?.live).toBeTruthy();
+    from = w.requests.length;
+    await bob.s.send(bob.chat('alice')!.live!, 'for the new browser too');
+    expect(w.requests.slice(from).filter((r) => r.url.includes('/gh/')).map((r) => r.method)).toEqual(['PUT']);
+    // His next sync sees the join and sends it again for the newcomer; nobody sees it twice.
+    await w.until(async () => (await alice2.texts(alice2.chat('bob'))).includes('for the new browser too'), 'the new browser got it');
+    await w.rounds(2);
+    for (const b of [alice, alice2, bob]) {
+      const who = b === bob ? 'alice' : 'bob';
+      expect(await count(b, who, 'for the new browser too')).toBe(1);
+      expect(await b.notes(b.chat(who))).not.toContain('A message could not be decrypted.');
+    }
+    await w.checkConverged();
+  });
+});
