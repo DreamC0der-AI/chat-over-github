@@ -1063,7 +1063,9 @@ export class Session {
       }
     }
     if (this.personal) return;
-    this.personal = await PersonalData.open(this.provider.personal, key, this.identity!.deviceId);
+    // With a copy of each record in this browser: GitHub can't roll one back or delete it
+    // unnoticed (the trusted keys of contacts above all); what this browser knew is written back.
+    this.personal = await PersonalData.open(this.provider.personal, key, this.identity!.deviceId, Date.now, { local: this.device.keystore });
     // Everything this browser knows goes up once (only what changed since it last did).
     for (const r of this.records.values()) this.push(r);
     for (const a of this.blocked) await this.syncBlock(a, true);
@@ -2158,6 +2160,12 @@ export class Session {
           r.peerLeft = true;
           await this.saveRecord(r);
         }
+      } else if (e.type === 'retracted') {
+        // Sent to us after we were already removed (the sender hadn't synced yet): not ours to keep.
+        for (const id of e.ids) await this.db.del('messages', [g.id, id]);
+        const last = await this.db.lastMessage<MsgRecord>(g.id, (x) => x.kind !== 'system');
+        r.lastText = last ? previewText(last) : '';
+        await this.saveRecord(r);
       } else if (e.type === 'removed') this.toEnd.set(g.id, { how: 'removed', ...(e.by ? { by: e.by.address } : {}), at: Date.now() });
       else if (e.type === 'access-lost') {
         // Our own repo gone means we closed it (on another device, or on github.com). Someone
