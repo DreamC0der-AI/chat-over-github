@@ -38,6 +38,70 @@ describe('groups', () => {
   await w.checkConverged();
   });
 
+  it('a decline takes the invitee out of the encryption at once, and a re-invite starts after it', async () => {
+    w = await world();
+    const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
+    for (const b of [alice, bob]) await b.setup();
+    await w.rounds(3); // pre-keys published: the invite adds bob's device at once
+    await alice.s.createGroup('Test Group 6', ['bob']);
+    await w.until(() => !!bob.inviteFrom('alice'), 'bob sees the invitation');
+    expect(alice.chat('Test Group 6')!.live!.members().find((m) => m.address === 'github:bob')?.pending).toBe(true);
+    await bob.s.declineInvite(bob.inviteFrom('alice')!.key);
+    // His app tells alice's, which checks GitHub and takes his devices out (no 10-minute wait).
+    await w.until(async () => (await alice.notes(alice.chat('Test Group 6'))).includes('@bob didn’t join'), 'alice takes bob out');
+    const g = () => alice.chat('Test Group 6')!.live!;
+    expect(g().members().map((m) => m.address)).toEqual(['github:alice']);
+    await alice.s.send(g(), 'Ok');
+    await alice.s.invite(g(), 'bob');
+    await w.until(() => !!bob.inviteFrom('alice'), 'bob sees the second invitation');
+    await bob.s.acceptInvite(bob.inviteFrom('alice')!.key);
+    await w.until(() => !!bob.chat('Test Group 6')?.live, 'bob joined');
+    await alice.s.send(g(), 'welcome');
+    await w.until(async () => (await bob.texts(bob.chat('Test Group 6'))).includes('welcome'), 'bob reads what came after');
+    expect(await bob.texts(bob.chat('Test Group 6'))).not.toContain('Ok');
+  });
+
+  it('a re-invite right after a decline, before the inviter noticed it, still hides the gap', async () => {
+    w = await world();
+    const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
+    for (const b of [alice, bob]) await b.setup();
+    await w.rounds(3); // pre-keys published: the invite adds bob's device at once
+    await alice.s.createGroup('Test Group 6', ['bob']);
+    await w.until(() => !!bob.inviteFrom('alice'), 'bob sees the invitation');
+    const g = alice.chat('Test Group 6')!.live!;
+    await bob.s.declineInvite(bob.inviteFrom('alice')!.key);
+    // Alice's app hasn't looked at its notices yet: bob's pre-key devices are still in the group.
+    await alice.s.send(g, 'Ok');
+    await alice.s.invite(g, 'bob');
+    await w.until(() => !!bob.inviteFrom('alice'), 'bob sees the second invitation');
+    await bob.s.acceptInvite(bob.inviteFrom('alice')!.key);
+    await w.until(() => !!bob.chat('Test Group 6')?.live, 'bob joined');
+    await alice.s.send(alice.chat('Test Group 6')!.live!, 'welcome');
+    await w.until(async () => (await bob.texts(bob.chat('Test Group 6'))).includes('welcome'), 'bob reads what came after');
+    expect(await bob.texts(bob.chat('Test Group 6'))).not.toContain('Ok');
+    await w.checkConverged();
+  });
+
+  it('a re-invite right after a decline, before the inviter noticed it, still hides the gap (no pre-key: he joins by himself)', async () => {
+    w = await world();
+    const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
+    for (const b of [alice, bob]) await b.setup();
+    await alice.s.createGroup('Test Group 6', ['bob']);
+    await w.until(() => !!bob.inviteFrom('alice'), 'bob sees the invitation');
+    const g = alice.chat('Test Group 6')!.live!;
+    await bob.s.declineInvite(bob.inviteFrom('alice')!.key);
+    // Alice's app hasn't looked at its notices yet: bob's pre-key devices are still in the group.
+    await alice.s.send(g, 'Ok');
+    await alice.s.invite(g, 'bob');
+    await w.until(() => !!bob.inviteFrom('alice'), 'bob sees the second invitation');
+    await bob.s.acceptInvite(bob.inviteFrom('alice')!.key);
+    await w.until(() => !!bob.chat('Test Group 6')?.live, 'bob joined');
+    await alice.s.send(alice.chat('Test Group 6')!.live!, 'welcome');
+    await w.until(async () => (await bob.texts(bob.chat('Test Group 6'))).includes('welcome'), 'bob reads what came after');
+    expect(await bob.texts(bob.chat('Test Group 6'))).not.toContain('Ok');
+    await w.checkConverged();
+  });
+
   it('a group with only its creator can be written in, and someone invited later joins cleanly', async () => {
     w = await world();
     const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
