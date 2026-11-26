@@ -2420,6 +2420,9 @@ export class Session {
         if (a && !a.ended) a.link = `/c/${encodeURIComponent(this.convoKey(r))}`;
         // Catching up on a chat the account was already in: its history stays in the other browsers.
         // "Already" means it existed before this browser was added, not some fixed age.
+        // The chat's age comes from the synced chat list: on a new browser, wait for its first read
+        // (a join can finish first, and the record then only knows "now").
+        if (inv.mine && !r.joinedAt) await this.syncStarting;
         if (inv.mine && !r.joinedAt && r.createdAt < (this.identity?.cert.issuedAt ?? Date.now())) {
           r.joinedAt = Date.now();
           await this.saveRecord(r);
