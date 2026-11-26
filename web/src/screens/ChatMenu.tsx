@@ -117,7 +117,7 @@ function ChatInfo({ session, convo, onClose, onVerify }: { session: Session; con
           <div className="member" key={a}>
             <Avatar name={loginFrom(a)} login={loginFrom(a)} />
             <div className="member-text"><strong>{loginFrom(a)}</strong><div className="small muted">Invited</div></div>
-            {!dm && iAmAdmin && live && (
+            {live && (dm ? session.isOwner(live) : iAmAdmin) && (
               <button className="btn" disabled={busy} onClick={() => run(() => session.invite(live, [loginFrom(a)]), `resend:${a}`)}>
                 {doing === `resend:${a}` ? <><span className="spinner" /> Sending…</> : 'Resend'}
               </button>

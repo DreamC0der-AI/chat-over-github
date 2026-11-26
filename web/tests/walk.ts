@@ -5,7 +5,8 @@
  * each step, `check()` asserts, on every browser of every person:
  *
  *  - members read every message sent while they were in the group, and invitees read what was
- *    sent while their invitation was open once they accept it;
+ *    sent while their invitation was open once they accept it (if they were added with a
+ *    pre-key: without one, nothing from before the join can reach them);
  *  - nobody reads a message sent while they were out (never invited, declined, removed, left),
  *    not even after a later invitation;
  *  - the member list each member's browser shows matches the model, and the chat is live for
@@ -180,14 +181,20 @@ export class Walk {
     const declined = new Set([...this.state].filter(([, x]) => x === 'declined').map(([p]) => p));
     const ifAccepts = new Map<string, number>();
     this.settleLeaves();
+    // An invitee is owed what goes out while they are in the sender's group (added with a pre-key).
+    // Without a pre-key (none published yet) they join only on accept, and MLS has no history from
+    // before a join, so what went out before that is not theirs to read (nor forbidden).
+    const g = this.group(from);
+    const inTree = new Set(g.members().map((m) => m.address.replace('github:', '')));
     for (const [p, s] of this.state) {
       if (s === 'leaving') continue;
       if (s === 'member') must.add(p);
-      else if (s === 'invited') ifAccepts.set(p, this.invitation.get(p)!);
-      else never.add(p);
+      else if (s === 'invited') {
+        if (inTree.has(p)) ifAccepts.set(p, this.invitation.get(p)!);
+      } else never.add(p);
     }
     const at = Date.now();
-    await this.b(from).s.send(this.group(from), text);
+    await this.b(from).s.send(g, text);
     this.sent.push({ text, from, must, never, declined, ifAccepts, at });
     return text;
   }

@@ -1,9 +1,9 @@
 // Random membership walkthroughs: a seeded random chain of invite, accept, decline, remove, leave,
 // re-invite, another browser, rename and picture, with messages between, checked after every step
 // against the model in tests/walk.ts. A failure prints the seed and the steps so far; rerun one
-// seed with WALK_SEED=<n>. Not part of the default run while the walks still find open bugs (see
-// the bugs list in the PR that added them): run with `npm run test:walk -w web`, or more and
-// longer walks with WALK_SEEDS=50 WALK_STEPS=60 npx vitest run tests/walk-random.test.ts
+// seed with WALK_SEED=<n>. Not part of the default run (about 1.5 s a walk): run with
+// `npm run test:walk -w web`, or more and longer walks with
+// WALK_SEEDS=100 WALK_STEPS=60 npx vitest run tests/walk-random.test.ts (all passed 2026-11-26).
 import { afterEach, describe, it } from 'vitest';
 import { world, type World } from './harness';
 import { cast, Walk } from './walk';

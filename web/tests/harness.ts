@@ -186,7 +186,9 @@ export async function world(live?: LiveOptions): Promise<World> {
     };
     const del = b.s.deleteHistory.bind(b.s);
     b.s.deleteHistory = async (key) => {
-      b.cleared.set(key, Date.now());
+      // Delete chat syncs to the account's other browsers: none of them owes what came before.
+      const at = Date.now();
+      for (const o of all) if (o.login === b.login) o.cleared.set(key, at);
       await del(key);
     };
   };

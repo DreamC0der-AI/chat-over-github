@@ -1538,7 +1538,7 @@ export class Session {
     const address = toAddress(login);
     if (this.blocked.has(address)) throw new Error(`You blocked ${login}. Unblock them in Account and devices first.`);
     let existing = this.liveDm(address);
-    if (existing) return existing.key;
+    if (existing) return this.askAgain(existing, login);
     return this.activities.run(
       `Starting a chat with @${login}`,
       ['Checking for a chat you already have', `Finding @${login} on GitHub`, ...NEW_ROOM, `Inviting @${login}`],
@@ -1546,7 +1546,7 @@ export class Session {
         // Another of my devices may have started it already: join my own rooms first.
         await this.checkInvites(true);
         existing = this.liveDm(address);
-        if (existing) return existing.key;
+        if (existing) return this.askAgain(existing, login);
         t.step(`Finding @${login} on GitHub`);
         await this.ensurePublished();
         if (!(await this.userExists(login))) throw new Error(`No GitHub user named ${login}`);
@@ -1572,6 +1572,18 @@ export class Session {
       },
       { key: `dm:${address}`, onStart },
     );
+  }
+
+  /**
+   * Opening a DM whose invitation they turned down (or that expired) asks them again: their app
+   * took them out of the encryption when they declined, so nothing is waiting for them any more.
+   */
+  private async askAgain(c: Convo, login: string): Promise<string> {
+    const g = c.live!;
+    const address = toAddress(login);
+    const asked = this.isOwner(g) && !g.members().some((m) => m.address === address);
+    if (asked) await this.invite(g, login);
+    return c.key;
   }
 
   /** `avatar`: a picture from makeAvatar, sent encrypted with the name. */
@@ -2324,6 +2336,7 @@ export class Session {
     const now = Date.now();
     const known = () => new Set([...chat.groups.values()].map((g) => g.space));
     let notices: Awaited<ReturnType<typeof p.inviteInbox.list>> = [];
+    let listed = true;
     const live = this.inbox?.live ? this.inbox : undefined;
     if (live) {
       notices = [...live.invites.values()]
@@ -2333,8 +2346,16 @@ export class Session {
       try {
         notices = await p.inviteInbox.list();
       } catch (e) {
+        listed = false;
         this.lastPollError = this.noteError(e);
       }
+    }
+    // A card whose notice left the inbox was answered on another of our browsers (accepted or
+    // declined there) or expired: nothing is left to answer here. An accepted one here is kept
+    // until its repo shows up.
+    if (listed) {
+      const ids = new Set(notices.map((n) => n.id));
+      for (const [k, v] of this.invites) if (k.startsWith('notice:') && v.status === 'invited' && !v.busy && !ids.has(v.noticeId!)) this.invites.delete(k);
     }
     let have = known();
     // The inbox names who invited us but not the repo (the Worker keeps no repo names), so a
