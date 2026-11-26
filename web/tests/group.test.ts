@@ -38,6 +38,27 @@ describe('groups', () => {
   await w.checkConverged();
   });
 
+  it('a group with only its creator can be written in, and someone invited later joins cleanly', async () => {
+    w = await world();
+    const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
+    for (const b of [alice, bob]) await b.setup();
+    const { failed } = await alice.s.createGroup('Just me', []);
+    expect(failed).toEqual([]);
+    await w.until(() => !!alice.chat('Just me')?.live, 'alice has the group');
+    await alice.s.send(alice.chat('Just me')!.live!, 'note to self');
+    await w.until(async () => (await alice.texts(alice.chat('Just me'))).includes('note to self') && !!alice.s.sending.get(alice.chat('Just me')!.live!.id)?.every((p) => p.sentId), 'her message went out');
+
+    await alice.s.invite(alice.chat('Just me')!.live!, 'bob');
+    await w.until(() => !!bob.inviteFrom('alice'), 'bob sees the invitation');
+    await bob.s.acceptInvite(bob.inviteFrom('alice')!.key);
+    await w.until(() => !!bob.chat('Just me')?.live, 'bob joined');
+    await alice.s.send(alice.chat('Just me')!.live!, 'hi bob');
+    await w.until(async () => (await bob.texts(bob.chat('Just me'))).includes('hi bob'), 'bob reads what came after he joined');
+    // Nothing of what she wrote alone shows to bob as broken (a message sent just before an
+    // invite may reach him: keyhold re-sends quick sends that raced an epoch change).
+    await w.checkConverged();
+  });
+
   async function hikers() {
     w = await world();
     const [alice, bob, carol] = [await w.browser('alice'), await w.browser('bob'), await w.browser('carol')];

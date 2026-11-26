@@ -126,6 +126,8 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
   const step = act && !act.ended ? stepLine(act) : undefined;
   const err = group ? session.chatWarning(group.id) : undefined;
   const joined = !!live && live.members().length > 1;
+  // A group can be written in alone: people invited later join from then on. A DM waits for the other person.
+  const canWrite = !!live && (!dm || joined);
   const peerLeft = !!live && dm && !!liveRec?.peerLeft && !joined;
   const last = convo.rooms[convo.rooms.length - 1]!;
   const space = group?.space ?? last.space;
@@ -234,7 +236,7 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
         </div>
       </div>
       {live ? (
-        <Composer session={session} group={live} disabledReason={busyLabel ?? (peerLeft ? `${title} left this chat` : !joined ? (dm ? 'Waiting for the other person to join…' : 'Waiting for someone to join…') : undefined)} error={err} />
+        <Composer session={session} group={live} disabledReason={busyLabel ?? (peerLeft ? `${title} left this chat` : !canWrite ? 'Waiting for the other person to join…' : undefined)} error={err} />
       ) : (
         <div className="composer ended">This chat has ended</div>
       )}
