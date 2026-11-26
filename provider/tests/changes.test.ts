@@ -110,6 +110,35 @@ describe('the change check, when GitHub answers something else', () => {
     expect((await a.mailbox.list(s, r.cursor)).items.map((i) => str(i.data))).toEqual(['two']);
   });
 
+  it('a log listing a commit behind the head never leaves a gap in what is read', async () => {
+    const { a, b, s, gh } = await space();
+    expect(await b.orderedLog.append(s, 0, bytes('e0'))).toBe('ok');
+    expect(await b.orderedLog.append(s, 1, bytes('e1'))).toBe('ok');
+    // a's first listing of the shard comes from a GitHub copy that doesn't have e1 yet, though the
+    // head a read just before already does.
+    gh.faults = { laggingListing: { match: 'GET .*contents/log/' } };
+    await a.changes.check(s);
+    expect((await a.orderedLog.read(s, 0)).map(str)).toEqual(['e0']);
+    gh.faults = undefined;
+    expect(await b.orderedLog.append(s, 2, bytes('e2'))).toBe('ok');
+    await a.changes.check(s);
+    // The changes since name only e2: what a knows has a hole, so it lists again.
+    expect((await a.orderedLog.read(s, 0)).map(str)).toEqual(['e0', 'e1', 'e2']);
+  });
+
+  it('an append refused because the view was behind lists the log on the next read', async () => {
+    const { a, b, s, gh } = await space();
+    expect(await b.orderedLog.append(s, 0, bytes('e0'))).toBe('ok');
+    expect(await b.orderedLog.append(s, 1, bytes('e1'))).toBe('ok');
+    gh.faults = { laggingListing: { match: 'GET .*contents/log/' } };
+    await a.changes.check(s);
+    expect((await a.orderedLog.read(s, 0)).map(str)).toEqual(['e0']);
+    gh.faults = undefined;
+    // a thinks index 1 is free: GitHub says no, and the next read is a fresh listing.
+    expect(await a.orderedLog.append(s, 1, bytes('mine'))).toBe('conflict');
+    expect((await a.orderedLog.read(s, 0)).map(str)).toEqual(['e0', 'e1']);
+  });
+
   it('history rewritten under the starting point: listed again', async () => {
     const { a, b, s, gh } = await space();
     const cur = (await a.mailbox.list(s)).cursor;

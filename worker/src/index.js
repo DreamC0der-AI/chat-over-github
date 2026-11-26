@@ -25,8 +25,8 @@
 // Open app tabs hold a hibernating WebSocket to their inbox, so an idle tab costs nothing and
 // new entries arrive at once instead of by polling.
 //
-// Until 2026-11-17 the inbox lived in Workers KV (binding INVITES). Each inbox copies its old
-// KV entries once, the first time it is used. Those entries expire within 7 days.
+// Until 2026-11-17 the inbox lived in Workers KV (binding INVITES); everything left there expired
+// by 2026-11-24, so nothing is copied from it any more.
 //
 // The same KV namespace keeps each token refresh's answer for 10 minutes ("rt:" keys), sealed
 // with the refresh token that asked for it plus a random retry key the app sends with it and
@@ -35,8 +35,9 @@
 // out; asking again with the same refresh token and retry key now gets the same answer. Someone
 // who only has the old (spent) refresh token gets nothing: the lookup key and the seal both need
 // the retry key, which never leaves the app's storage except in that one request. The key is a
-// hash, so the Worker can't read the value at rest. Apps from before the retry key (no
-// retry_key field) still get a cached answer, but only for 60 seconds.
+// hash, so the Worker can't read the value at rest. A refresh without a retry key (apps from
+// before it) is passed to GitHub and nothing is kept: anyone holding just the spent refresh token
+// must not be able to collect the new tokens.
 // Nothing is logged.
 //
 // Abuse limits (all within the free plan): request bodies over 16 KB are refused (413); each
@@ -55,6 +56,8 @@ const MAX_BODY_BYTES = 16 * 1024; // the largest real body is an invite with an 
 // Per inbox and kind (invites, closures): entries from one sender, and entries in all.
 const CAP_PER_SENDER = 50;
 const CAP_TOTAL = 500;
+/** How long one socket may stay open before the app must show a current token again. */
+const SOCKET_LIFE_MS = 3600 * 1000;
 let GH_API = GH_API_DEFAULT;
 let GH_WEB = GH_WEB_DEFAULT;
 
@@ -118,11 +121,10 @@ async function oauthToken(request, env) {
 }
 
 const REFRESH_RETRY_TTL_S = 600;
-/** Apps that send no retry key (from before it existed): a short window, for the transition only. */
-const REFRESH_RETRY_TTL_LEGACY_S = 60; // KV's shortest expiry
 
 async function refreshToken(rt, retryKey, params, env) {
-  const kv = env.INVITES;
+  // No retry key: no kept answer (see the header).
+  const kv = retryKey ? env.INVITES : undefined;
   const { id, key } = await refreshSeal(rt, retryKey);
   if (kv) {
     const sealed = await kv.get(`rt:${id}`, "arrayBuffer").catch(() => null);
@@ -142,8 +144,7 @@ async function refreshToken(rt, retryKey, params, env) {
     try {
       ok = !!JSON.parse(text).access_token;
     } catch {}
-    const ttl = retryKey ? REFRESH_RETRY_TTL_S : REFRESH_RETRY_TTL_LEGACY_S;
-    if (ok) await kv.put(`rt:${id}`, await seal(key, text), { expirationTtl: ttl }).catch(() => undefined);
+    if (ok) await kv.put(`rt:${id}`, await seal(key, text), { expirationTtl: REFRESH_RETRY_TTL_S }).catch(() => undefined);
   }
   return jsonText(text, res.status);
 }
@@ -308,13 +309,16 @@ async function deleteClosure(request, env, id) {
 
 /**
  * One user's inbox. Every method takes the owner's user id (the object is named by it), which
- * the first call stores and uses to copy the user's old KV entries once.
+ * the first call stores.
  *
  * Pushed to open sockets, as JSON text:
  *   {type:"snapshot", invites:[...], closures:[...]}   right after connecting
  *   {type:"invite", invite} / {type:"invite-removed", id}
  *   {type:"closure", closure} / {type:"closure-removed", id}
  * The socket answers the text "ping" with "pong" without waking the object.
+ * A socket is closed (code 4001) an hour after it opened: the token it was opened with is only
+ * checked then, so the app reconnects with its current one. Nobody whose token stopped working
+ * keeps getting pushes for long.
  */
 export class Inbox extends DurableObject {
   constructor(ctx, env) {
@@ -388,6 +392,9 @@ export class Inbox extends DurableObject {
     await this.open(userId);
     const [client, server] = Object.values(new WebSocketPair());
     this.ctx.acceptWebSocket(server);
+    const until = Date.now() + SOCKET_LIFE_MS;
+    server.serializeAttachment({ until });
+    await this.wakeAt(until);
     server.send(JSON.stringify({ type: "snapshot", invites: this.rows("invites"), closures: this.rows("closures") }));
     const protocol = request.headers.get("X-Inbox-Protocol");
     return new Response(null, { status: 101, webSocket: client, headers: protocol ? { "Sec-WebSocket-Protocol": protocol } : {} });
@@ -418,9 +425,20 @@ export class Inbox extends DurableObject {
       this.sql.exec(`DELETE FROM ${table} WHERE expires <= ?`, now);
       for (const { id } of gone) this.push({ type: table === "invites" ? "invite-removed" : "closure-removed", id });
     }
-    const next = this.sql
+    let next = this.sql
       .exec("SELECT MIN(e) AS e FROM (SELECT MIN(expires) AS e FROM invites UNION ALL SELECT MIN(expires) AS e FROM closures)")
       .toArray()[0]?.e;
+    // Sockets past their hour: closed, and the app connects again with its current token.
+    for (const ws of this.ctx.getWebSockets()) {
+      const until = ws.deserializeAttachment()?.until ?? 0;
+      if (until <= now) {
+        try {
+          ws.close(4001, "renew");
+        } catch {
+          // already closing
+        }
+      } else if (!next || until < next) next = until;
+    }
     if (next) await this.ctx.storage.setAlarm(next);
   }
 
@@ -464,44 +482,13 @@ export class Inbox extends DurableObject {
     if (current === null || current > t) await this.ctx.storage.setAlarm(t);
   }
 
-  /** First use: remember whose inbox this is, and copy their entries from the old KV inbox. */
+  /** First use: remember whose inbox this is. */
   async open(userId) {
     if (this.ready) return;
     const owner = this.sql.exec("SELECT v FROM meta WHERE k = 'owner'").toArray()[0]?.v;
     if (owner !== undefined && owner !== String(userId)) throw new Error("inbox owner mismatch");
-    if (owner === undefined) {
-      await this.importKv(userId);
-      this.sql.exec("INSERT OR REPLACE INTO meta (k, v) VALUES ('owner', ?)", String(userId));
-    }
+    if (owner === undefined) this.sql.exec("INSERT OR REPLACE INTO meta (k, v) VALUES ('owner', ?)", String(userId));
     this.ready = true;
-  }
-
-  async importKv(userId) {
-    const kv = this.env.INVITES;
-    if (!kv) return;
-    const now = Date.now();
-    let earliest = Infinity;
-    for (const [prefix, table] of [[`inv:${userId}:`, "invites"], [`cls:${userId}:`, "closures"]]) {
-      let cursor;
-      do {
-        const page = await kv.list({ prefix, cursor });
-        for (const k of page.keys) {
-          let e = k.metadata;
-          if (!e) {
-            const v = await kv.get(k.name);
-            e = v ? JSON.parse(v) : undefined;
-          }
-          if (!e || e.id === undefined) continue;
-          // KV gives the key's own expiry; invites also carry theirs.
-          const expires = table === "invites" ? Date.parse(e.expires_at) : (k.expiration ? k.expiration * 1000 : Date.parse(e.at) + INVITE_LIFETIME_S * 1000);
-          if (!(expires > now)) continue;
-          this.sql.exec(`INSERT OR IGNORE INTO ${table} (id, body, expires) VALUES (?, ?, ?)`, e.id, JSON.stringify(e), expires);
-          earliest = Math.min(earliest, expires);
-        }
-        cursor = page.list_complete ? undefined : page.cursor;
-      } while (cursor);
-    }
-    if (earliest !== Infinity) await this.wakeAt(earliest);
   }
 }
 
@@ -523,13 +510,32 @@ async function ghGetUser(token, login) {
 
 // ---------- GitHub helpers ----------
 
+/**
+ * Who a token belongs to. Answers are kept a minute in this Worker instance (by a hash of the
+ * token, never the token), so a burst of inbox calls doesn't spend one of the person's GitHub
+ * requests each. A revoked token is refused at most a minute late.
+ */
+const USER_CACHE_MS = 60_000;
+const userCache = new Map();
 async function ghUser(token) {
-  const u = await ghGet(token, "/user");
+  const key = [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token)))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const hit = userCache.get(key);
+  if (hit && hit.at > Date.now() - USER_CACHE_MS) return hit.user;
+  const u = await ghGet(token, "/user", "invalid token");
   if (!u || typeof u.id !== "number") throw new HttpError(401, "invalid token");
-  return { id: u.id, login: u.login };
+  const user = { id: u.id, login: u.login };
+  if (userCache.size >= 1000) userCache.clear();
+  userCache.set(key, { user, at: Date.now() });
+  return user;
 }
 
-async function ghGet(token, path) {
+/** A GitHub rate limit answer (403 or 429 with the limit's headers), as a 429 of ours. */
+function rateLimited(res) {
+  if (res.status === 429) return true;
+  return res.status === 403 && (res.headers.get("x-ratelimit-remaining") === "0" || res.headers.has("retry-after"));
+}
+
+async function ghGet(token, path, notFound = "invitation not found on your repository") {
   const res = await fetch(GH_API + path, {
     headers: {
       Authorization: `Bearer ${token}`,
@@ -539,7 +545,8 @@ async function ghGet(token, path) {
     },
   });
   if (res.status === 401) throw new HttpError(401, "invalid token");
-  if (res.status === 403 || res.status === 404) throw new HttpError(404, "invitation not found on your repository");
+  if (rateLimited(res)) throw new HttpError(429, "GitHub rate limit reached; try again in a few minutes");
+  if (res.status === 403 || res.status === 404) throw new HttpError(404, notFound);
   if (!res.ok) throw new HttpError(502, `github error ${res.status}`);
   return res.json();
 }

@@ -2,14 +2,13 @@
  * Live check of the GitHub provider against real GitHub.
  *   npm run build:live && node scripts/live-github.mjs <loginA> <loginB>
  *
- * Signs both accounts in to the GitHub App with device flow (through the Worker), caching
- * tokens in ~/.keyhold-live (mode 600). Device flow was turned off on 2026-11-25 (phishing risk):
- * re-enable it on the App and restore the Worker's /oauth/device routes to sign in again. Uses separate repo names (keyhold-live-*, ghchat-live-*)
+ * Uses each account's sign-in from the web app (see token() below; device flow was turned off on
+ * 2026-11-25, phishing risk), kept in ~/.keyhold-live (mode 600). Uses separate repo names (keyhold-live-*, ghchat-live-*)
  * and deletes every repo it made at the end. Prints a JSON report.
  */
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { execFile } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { githubProvider, toAddress } from '../src/index.js';
 import { memoryDevice, resolveFeatures } from 'keyhold/storage';
 import { Chat, createRootKey, createDeviceIdentity, DirectoryWriter, IdentityRegistry, MemoryPinStore, newDeviceId } from 'keyhold/chat';
@@ -25,35 +24,37 @@ async function ghUser(token: string) {
   return r.ok ? ((await r.json()) as { login: string; id: number }) : undefined;
 }
 
+/**
+ * A token for this account. Device flow is off (2026-11-25), so the script signs in with what the
+ * web app already has: the env var KEYHOLD_LIVE_TOKEN_<LOGIN>, or ~/.keyhold-live/<login>.json
+ * holding the app's saved sign-in (localStorage "kh.auth": {token, refreshToken}) or an OAuth
+ * answer ({access_token, refresh_token}). An expired token is renewed through the Worker with its
+ * refresh token, and the file is updated (the old refresh token is spent, so a browser whose
+ * "kh.auth" was copied must sign in again: copy from a browser profile kept for the test accounts).
+ */
 async function token(login: string): Promise<string> {
+  const fromEnv = process.env[`KEYHOLD_LIVE_TOKEN_${login.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`];
+  if (fromEnv) {
+    if ((await ghUser(fromEnv))?.login.toLowerCase() === login.toLowerCase()) return fromEnv;
+    throw new Error(`KEYHOLD_LIVE_TOKEN for ${login} is not a working token of that account`);
+  }
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = `${dir}/${login.toLowerCase()}.json`;
-  if (existsSync(file)) {
-    const t = JSON.parse(readFileSync(file, 'utf8')).access_token as string;
-    const u = await ghUser(t);
-    if (u?.login.toLowerCase() === login.toLowerCase()) return t;
-  }
-  const code = (await (await fetch(`${WORKER}/oauth/device/code`, { method: 'POST' })).json()) as {
-    device_code: string; user_code: string; verification_uri: string; interval: number; error?: string;
-  };
-  if (!code.device_code) throw new Error(`device flow not available: ${JSON.stringify(code)}`);
-  console.log(`\n>>> Sign in as ${login}: open ${code.verification_uri} and enter ${code.user_code}\n`);
-  execFile('open', [code.verification_uri], () => {});
-  let interval = (code.interval ?? 5) * 1000;
-  for (;;) {
-    await sleep(interval);
-    const t = (await (await fetch(`${WORKER}/oauth/device/token`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ device_code: code.device_code }),
-    })).json()) as { access_token?: string; error?: string };
-    if (t.access_token) {
-      const u = await ghUser(t.access_token);
-      if (u?.login.toLowerCase() !== login.toLowerCase()) throw new Error(`signed in as ${u?.login}, expected ${login}. Sign out of GitHub in the browser and retry.`);
-      writeFileSync(file, JSON.stringify(t), { mode: 0o600 });
-      return t.access_token;
-    }
-    if (t.error === 'slow_down') interval += 5000;
-    else if (t.error !== 'authorization_pending') throw new Error(`device flow: ${t.error}`);
-  }
+  if (!existsSync(file)) throw new Error(`no sign-in for ${login}: put the web app's "kh.auth" value (signed in as ${login}) in ${file}, or set KEYHOLD_LIVE_TOKEN_${login.toUpperCase()}`);
+  const saved = JSON.parse(readFileSync(file, 'utf8')) as { token?: string; refreshToken?: string; access_token?: string; refresh_token?: string };
+  const access = saved.token ?? saved.access_token;
+  const refresh = saved.refreshToken ?? saved.refresh_token;
+  if (access && (await ghUser(access))?.login.toLowerCase() === login.toLowerCase()) return access;
+  if (!refresh) throw new Error(`the saved sign-in for ${login} has expired and has no refresh token`);
+  const retryKey = randomBytes(24).toString('base64url');
+  const t = (await (await fetch(`${WORKER}/oauth/token`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ refresh_token: refresh, retry_key: retryKey }),
+  })).json()) as { access_token?: string; refresh_token?: string; error?: string };
+  if (!t.access_token) throw new Error(`refreshing ${login}'s sign-in failed: ${t.error ?? 'no token'}`);
+  writeFileSync(file, JSON.stringify({ access_token: t.access_token, refresh_token: t.refresh_token ?? refresh }), { mode: 0o600 });
+  const u = await ghUser(t.access_token);
+  if (u?.login.toLowerCase() !== login.toLowerCase()) throw new Error(`the saved sign-in is for ${u?.login}, expected ${login}`);
+  return t.access_token;
 }
 
 /** Only plain data the step chose to report; never users, groups, tokens or keys. */

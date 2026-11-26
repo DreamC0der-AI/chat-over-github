@@ -126,7 +126,7 @@ export function Settings({ session, route }: { session: Session; route: string }
                 <section className="box">
                   <div className="box-row kv">
                     <span>Sign out <Hint text="Signs out of GitHub here. Your keys stay in this browser, so signing back in picks up where you left off." /></span>
-                    <button className="btn" onClick={() => { session.stop(); signOut(); location.hash = ''; location.reload(); }}>Sign out</button>
+                    <button className="btn" onClick={() => { session.stop(); forgetAvatars(); signOut(); location.hash = ''; location.reload(); }}>Sign out</button>
                   </div>
                 </section>
                 <section className="box danger-box">

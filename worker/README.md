@@ -11,8 +11,8 @@ All inbox calls send the user's GitHub user access token as `Authorization: Bear
 
 | Call | Body / query | Result |
 | --- | --- | --- |
-| `POST /oauth/token` | `{code, redirect_uri?, code_verifier?}` or `{refresh_token, retry_key?}` | GitHub's token response. A refresh asked again with the same `refresh_token` and `retry_key` (16-128 base64url chars the app keeps until it has saved the new tokens) within 10 minutes gets the same answer; without `retry_key` (old apps) only within 60 seconds. |
-| `GET /inbox` (WebSocket) | subprotocols above; Origin must be in `ALLOWED_ORIGINS` | first `{type:"snapshot", invites, closures}`, then `{type:"invite", invite}`, `{type:"invite-removed", id}`, `{type:"closure", closure}`, `{type:"closure-removed", id}`. Send `ping` to get `pong` (answered without waking the object). |
+| `POST /oauth/token` | `{code, redirect_uri?, code_verifier?}` or `{refresh_token, retry_key?}` | GitHub's token response. A refresh asked again with the same `refresh_token` and `retry_key` (16-128 base64url chars the app keeps until it has saved the new tokens) within 10 minutes gets the same answer; without `retry_key` (old apps) nothing is kept. |
+| `GET /inbox` (WebSocket) | subprotocols above; Origin must be in `ALLOWED_ORIGINS` | first `{type:"snapshot", invites, closures}`, then `{type:"invite", invite}`, `{type:"invite-removed", id}`, `{type:"closure", closure}`, `{type:"closure-removed", id}`. Send `ping` to get `pong` (answered without waking the object). The Worker closes a socket (code 4001) an hour after it opened, since the token is only checked when it opens: the app connects again with its current token. |
 | `POST /invites` | `{invite_id, repo}` (repo = name of the caller's own repo) | `201 {invitee_id, expires_at}`; `404` if no such invitation on the caller's repo; `410` if expired |
 | `GET /invites` | none | `{invites: [{id, from, from_id, created_at, expires_at}]}` for the caller |
 | `DELETE /invites/:id` | invitee: none. Inviter withdrawing: `?invitee_id=` | `200` / `404` |
@@ -57,6 +57,6 @@ Tests: `npm test` runs the Worker and its Durable Objects in wrangler's local ru
 
 ## Moving off Workers KV (2026-11-17)
 
-The inbox used to be Workers KV keys (`inv:<user>:<id>`, `cls:<user>:...`). Polling tabs used up KV's free 1,000 lists a day. Each inbox object now copies its owner's old KV entries the first time it is used, and never again. Everything in KV expires by 2026-11-24; after that the `INVITES` binding in `wrangler.toml` and the copy code (`importKv`) can be removed.
+The inbox used to be Workers KV keys (`inv:<user>:<id>`, `cls:<user>:...`). Polling tabs used up KV's free 1,000 lists a day. Each inbox object copied its owner's old KV entries the first time it was used. Everything in KV expired by 2026-11-24, and the copy code was removed on 2026-11-26. The `INVITES` binding stays: it keeps the refresh answers (`rt:` keys).
 
 Free-plan limits that matter now (Durable Objects, SQLite backend, reset 00:00 UTC): 100,000 requests a day (a socket open, an RPC from the Worker, or incoming socket messages at 20 per request; auto-answered pings cost nothing), 13,000 GB-s of duration a day (hibernated sockets don't count), 5 million rows read and 100,000 rows written a day, 5 GB stored. Workers requests are 100,000 a day too.
