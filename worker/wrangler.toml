@@ -2,6 +2,12 @@ name = "chat-over-github"
 main = "src/index.js"
 compatibility_date = "2026-10-01"
 
+# The app's address. workers.dev is blocked in mainland China, so the app lives on chat-over-github.sunzy.app
+# (Cloudflare custom domain). The old workers.dev address stays on: browsers keep their keys and
+# messages per address, so people move over when they choose.
+routes = [{ pattern = "chat-over-github.sunzy.app", custom_domain = true }]
+workers_dev = true
+
 # The chat web app (npm run build in the repo root writes it here). Files are served first; other paths reach the Worker.
 [assets]
 directory = "./public"
@@ -14,7 +20,7 @@ enabled = false
 GITHUB_CLIENT_ID = "Iv23liFOHVM634uq8c39"
 # Comma-separated list of web origins allowed to call the Worker from a browser. Production only:
 # `npm run dev` adds http://localhost:5173 for local work (see package.json), never the deployed Worker.
-ALLOWED_ORIGINS = "https://chat-over-github.akagishigerutokyo.workers.dev"
+ALLOWED_ORIGINS = "https://chat-over-github.sunzy.app,https://chat-over-github.akagishigerutokyo.workers.dev"
 
 # Keeps each token refresh's answer for 10 minutes ("rt:" keys, see src/index.js). Until
 # 2026-11-17 it also held the invite inbox.

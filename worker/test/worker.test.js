@@ -419,7 +419,7 @@ test("production trusts only the real origin; local dev adds localhost", async (
   const { readFileSync } = await import("node:fs");
   const toml = readFileSync(new URL("../wrangler.toml", import.meta.url), "utf8");
   const origins = toml.match(/^ALLOWED_ORIGINS\s*=\s*"([^"]*)"/m)[1].split(",");
-  assert.deepEqual(origins, ["https://chat-over-github.akagishigerutokyo.workers.dev"]);
+  assert.deepEqual(origins, ["https://chat-over-github.sunzy.app", "https://chat-over-github.akagishigerutokyo.workers.dev"]);
   const dev = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).scripts.dev;
-  assert.match(dev, /--var ALLOWED_ORIGINS:https:\/\/chat-over-github\.akagishigerutokyo\.workers\.dev,http:\/\/localhost:5173/);
+  assert.match(dev, /--var ALLOWED_ORIGINS:https:\/\/chat-over-github\.sunzy\.app,https:\/\/chat-over-github\.akagishigerutokyo\.workers\.dev,http:\/\/localhost:5173/);
 });
