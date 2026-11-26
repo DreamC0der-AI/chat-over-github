@@ -57,6 +57,12 @@ export function mockBackend() {
           installed.add(user);
           return send(204);
         }
+        // User search, as GitHub answers it for the invite box (login contains the term).
+        if (path === '/search/users' && user) {
+          const term = (url.searchParams.get('q') ?? '').split(' ')[0]!.toLowerCase();
+          const items = [...gh.users.entries()].filter(([l]) => term && l.includes(term)).slice(0, 6).map(([login, u]) => ({ login, id: u.id, type: 'User' }));
+          return json(200, { total_count: items.length, items });
+        }
         if (path === '/user/installations' && user) {
           const r = await gh.fetch(gh.api + rest, { method: 'GET', headers: { Authorization: auth! } });
           const data = (await r.json()) as { installations: { id: number; account: { login: string } }[] };

@@ -213,6 +213,10 @@ try {
   await alice.page.getByLabel('Group name').fill('Weekend hikers');
   // bob is a contact: pick him from the list; carol isn't yet: type her username and press Enter
   await alice.page.getByRole('option', { name: 'bob' }).click();
+  // Not a contact: found on GitHub as she types, listed after any contacts.
+  await alice.page.getByLabel('Invite people').fill('ca');
+  await alice.page.getByRole('option', { name: /carol.*GitHub/ }).waitFor();
+  check(true, 'typing finds GitHub accounts that are not contacts');
   await alice.page.getByLabel('Invite people').fill('carol');
   await alice.page.getByLabel('Invite people').press('Enter');
   await alice.page.locator('.chip', { hasText: 'carol' }).waitFor();

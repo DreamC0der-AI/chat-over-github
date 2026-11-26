@@ -1,12 +1,13 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { type Session } from '../lib/session';
 import { Avatar, Icon } from '../ui';
 
 const clean = (s: string) => s.trim().replace(/^@/, '').toLowerCase();
 
 /**
- * Pick people from your contacts (search, tap to toggle), or type a GitHub username of
- * someone who isn't a contact yet and press Enter. `value` holds the picked logins.
+ * Pick people from your contacts (search, tap to toggle), then from GitHub accounts matching
+ * what is typed, or type a GitHub username and press Enter. Contacts always come first.
+ * `value` holds the picked logins.
  * `exclude`: logins not offered (already in the group or invited).
  */
 export function PeoplePicker({ session, id, label, value, onChange, query, onQuery, exclude = [], disabled }: {
@@ -31,7 +32,18 @@ export function PeoplePicker({ session, id, label, value, onChange, query, onQue
   const q = clean(query);
   const has = (l: string) => value.some((x) => x.toLowerCase() === l.toLowerCase());
   const shown = contacts.filter((l) => !q || l.toLowerCase().includes(q));
-  const typed = q && /^[a-z0-9][a-z0-9-]{0,38}$/.test(q) && !contacts.some((l) => l.toLowerCase() === q) && !has(q) && !excluded(q) ? q : '';
+  // GitHub accounts matching the text, asked a moment after typing stops.
+  const [found, setFound] = useState<{ q: string; logins: string[] }>({ q: '', logins: [] });
+  useEffect(() => {
+    if (q.length < 2) return;
+    let live = true;
+    const t = setTimeout(() => void session.searchUsers(q).then((logins) => live && setFound({ q, logins })), 300);
+    return () => { live = false; clearTimeout(t); };
+  }, [q]);
+  const isContact = (l: string) => contacts.some((c) => c.toLowerCase() === l.toLowerCase());
+  const onGitHub = found.q === q ? found.logins.filter((l) => !isContact(l) && !excluded(l.toLowerCase()) && l.toLowerCase() !== session.login) : [];
+  // What was typed, when GitHub's answer doesn't list it (not back yet, or search missed it).
+  const typed = q && /^[a-z0-9][a-z0-9-]{0,38}$/.test(q) && !isContact(q) && !onGitHub.some((l) => l.toLowerCase() === q) && !has(q) && !excluded(q) ? q : '';
   const toggle = (l: string) => {
     onChange(has(l) ? value.filter((x) => x.toLowerCase() !== l.toLowerCase()) : [...value, l]);
     onQuery('');
@@ -78,8 +90,21 @@ export function PeoplePicker({ session, id, label, value, onChange, query, onQue
           autoComplete="off"
         />
       </div>
-      {(shown.length > 0 || typed) && (
-        <ul className="picker-list" role="listbox" aria-label="Contacts" aria-multiselectable="true">
+      {(shown.length > 0 || onGitHub.length > 0 || typed) && (
+        <ul className="picker-list" role="listbox" aria-label="People" aria-multiselectable="true">
+          {[...shown, ...onGitHub].map((l, i) => {
+            const on = has(l);
+            return (
+              <li key={l} role="option" aria-selected={on}>
+                <button type="button" className={`picker-item${on ? ' on' : ''}`} disabled={disabled} onClick={() => toggle(l)}>
+                  <Avatar name={l} login={l} size="sm" />
+                  <span className="name">{l}</span>
+                  {i >= shown.length && <span className="small muted">GitHub</span>}
+                  <span className="picker-mark">{on && Icon.check(14)}</span>
+                </button>
+              </li>
+            );
+          })}
           {typed && (
             <li role="option" aria-selected={false}>
               <button type="button" className="picker-item" disabled={disabled} onClick={() => toggle(typed)}>
@@ -89,18 +114,6 @@ export function PeoplePicker({ session, id, label, value, onChange, query, onQue
               </button>
             </li>
           )}
-          {shown.map((l) => {
-            const on = has(l);
-            return (
-              <li key={l} role="option" aria-selected={on}>
-                <button type="button" className={`picker-item${on ? ' on' : ''}`} disabled={disabled} onClick={() => toggle(l)}>
-                  <Avatar name={l} login={l} size="sm" />
-                  <span className="name">{l}</span>
-                  <span className="picker-mark">{on && Icon.check(14)}</span>
-                </button>
-              </li>
-            );
-          })}
         </ul>
       )}
     </div>

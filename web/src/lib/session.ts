@@ -1489,6 +1489,26 @@ export class Session {
     return { login: r.data!.login };
   }
 
+  private userSearch = new Map<string, Promise<string[]>>();
+  /**
+   * GitHub accounts whose login starts with or contains `q` (users only, at most 6), for the
+   * invite box. Answers are kept for this session: GitHub allows 30 searches a minute.
+   */
+  searchUsers(q: string): Promise<string[]> {
+    const key = q.trim().replace(/^@/, '').toLowerCase();
+    if (key.length < 2 || !/^[a-z0-9-]+$/.test(key)) return Promise.resolve([]);
+    let p = this.userSearch.get(key);
+    if (!p) {
+      p = this.ghJson<{ items?: { login: string; type: string }[] }>(`/search/users?q=${encodeURIComponent(`${key} in:login type:user`)}&per_page=6`)
+        .then((r) => (r.status === 200 ? (r.data?.items ?? []).filter((u) => u.type === 'User').map((u) => u.login) : []))
+        .catch(() => []);
+      // A failed search may work later.
+      void p.then((list) => { if (!list.length) this.userSearch.delete(key); });
+      this.userSearch.set(key, p);
+    }
+    return p;
+  }
+
   private normLogin(input: string) {
     const l = input.trim().replace(/^@/, '').toLowerCase();
     if (!/^[a-z0-9](?:[a-z0-9-]{0,38})$/.test(l)) throw new Error(`"${input}" is not a GitHub username`);
