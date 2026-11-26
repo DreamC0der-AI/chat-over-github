@@ -42,6 +42,26 @@ describe('pre-keys', () => {
     expect(bob.chat('Hikers')).toBeDefined(); // the group name reached him
   });
 
+  it('"joined" sits where they accepted, before what was written while their app was joining', async () => {
+    w = await world();
+    const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
+    for (const b of [alice, bob]) await b.setup();
+    await w.until(() => preKeys('bob') === 1, 'pre-key published');
+    await alice.s.createGroup('Hikers', ['bob']);
+    await w.until(() => !!bob.inviteFrom('alice'), 'bob sees the invitation');
+    await bob.s.acceptInvite(bob.inviteFrom('alice')!.key);
+    await bob.sync();
+    // Alice writes before her app has seen bob's join (he can already read it).
+    const g = alice.chat('Hikers')!.live!;
+    await alice.s.send(g, 'one');
+    await alice.s.send(g, 'two');
+    await w.until(async () => (await alice.notes(alice.chat('Hikers'))).includes('@bob joined'), 'alice sees bob join');
+    const shown = (await alice.messages(alice.chat('Hikers'))).map((m) => m.body);
+    expect(shown.indexOf('@bob joined')).toBeLessThan(shown.indexOf('one'));
+    expect(shown.indexOf('@bob joined')).toBeGreaterThan(shown.findIndex((b) => b?.startsWith('Invitation sent to @bob')));
+    await w.until(async () => (await bob.texts(bob.chat('Hikers'))).includes('two'), 'bob reads both');
+  });
+
   it('accepting while the regular check runs joins once: no rejected changes, everyone reads everyone', async () => {
     w = await world();
     const [alice, bob, carol] = [await w.browser('alice'), await w.browser('bob'), await w.browser('carol')];

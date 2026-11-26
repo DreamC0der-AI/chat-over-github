@@ -396,7 +396,18 @@ test("a refresh without a retry key is not kept, a keyed one is kept 10 minutes"
   }
 });
 
+/**
+ * The local rate limiter counts in windows aligned to the wall clock (one per minute): a burst
+ * that straddles a minute boundary is split across two windows and may never hit the limit.
+ * Start the burst early in a window.
+ */
+async function freshMinute(need = 10_000) {
+  const left = 60_000 - (Date.now() % 60_000);
+  if (left < need) await new Promise((r) => setTimeout(r, left + 50));
+}
+
 test("posting invites and closures is rate limited per user", async () => {
+  await freshMinute();
   const res = await inBatches(
     Array.from({ length: 115 }, (_, i) => () => call("POST", "/closures", "tok-rl", { to: "erin", tag: hex32(i) }).then(async (r) => (await r.json()).error ?? r.status)),
     5,
@@ -408,6 +419,7 @@ test("posting invites and closures is rate limited per user", async () => {
 });
 
 test("OAuth calls are rate limited per IP", async () => {
+  await freshMinute();
   const from = (ip) => ({ "CF-Connecting-IP": ip });
   const res = await inBatches(Array.from({ length: 70 }, () => () => call("POST", "/oauth/token", null, {}, from("198.51.100.7")).then((r) => r.status)), 10);
   assert.ok(res.includes(429), "rate limited");
