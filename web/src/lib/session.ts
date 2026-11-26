@@ -1583,15 +1583,19 @@ export class Session {
     );
   }
 
-  /** Invite someone to a group that already exists. */
-  async invite(g: Group, input: string, onStart?: (a: Activity) => void) {
-    const login = this.normLogin(input);
-    await this.activities.run(`Inviting @${login}`, [`Finding @${login} on GitHub`, `Inviting @${login}`], async (t) => {
-      await this.ensurePublished();
-      if (!(await this.userExists(login))) throw new Error(`No GitHub user named ${login}`);
-      t.step(`Inviting @${login}`);
-      const [failed] = await this.inviteNow(g, [login]);
-      if (failed) throw new Error(failed.replace(/^[^:]+: /, ''));
+  /** Invite people to a group that already exists, together in one commit. */
+  async invite(g: Group, input: string | string[], onStart?: (a: Activity) => void) {
+    const logins = [...new Set((Array.isArray(input) ? input : [input]).filter((s) => s.trim()).map((s) => this.normLogin(s)))];
+    if (!logins.length) return;
+    const label = inviteLabel(logins);
+    const one = logins.length === 1 ? `@${logins[0]}` : `${logins.length} people`;
+    await this.activities.run(label, [`Finding ${one} on GitHub`, label], async (t) => {
+      const [exists] = await Promise.all([Promise.all(logins.map((l) => this.userExists(l))), this.ensurePublished()]);
+      const missing = logins.find((_, i) => !exists[i]);
+      if (missing) throw new Error(`No GitHub user named ${missing}`);
+      t.step(label);
+      const failed = await this.inviteNow(g, logins);
+      if (failed.length) throw new Error(logins.length === 1 ? failed[0]!.replace(/^[^:]+: /, '') : failed.join('; '));
     }, { key: this.convoKey(this.record(g.id)), space: g.space, onStart });
   }
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { loginFrom, type Convo, type PeerInfo, type Session } from '../lib/session';
 import { PicturePicker } from './GroupPicture';
+import { PeoplePicker } from './PeoplePicker';
 import { ask, Avatar, ErrorFlash, go, GroupAvatar, Hint, Icon, Menu, MenuItem, Modal, toast, useAction } from '../ui';
 
 export const CLOSE_ASK = { title: 'Close this chat?', body: 'It ends for everyone and its repo is deleted from GitHub. Everyone keeps the messages their app already has.', confirm: 'Close chat', danger: true };
@@ -66,7 +67,9 @@ function ChatInfo({ session, convo, onClose, onVerify }: { session: Session; con
   const members = (group?.members() ?? []).filter((m) => !m.pending);
   const iAmAdmin = !!group && group.policy.admins.includes(session.identity!.fingerprint);
   const pending = live ? session.pending(live) : [];
-  const [invite, setInvite] = useState('');
+  const [invite, setInvite] = useState<string[]>([]);
+  const [query, setQuery] = useState('');
+  const inGroup = [...members.map((m) => loginFrom(m.address)), ...pending.map(loginFrom)];
   const [name, setName] = useState(group?.name ?? '');
   const { busy, doing, error, run } = useAction();
   return (
@@ -118,10 +121,13 @@ function ChatInfo({ session, convo, onClose, onVerify }: { session: Session; con
         ))}
       </div>
       {!dm && iAmAdmin && live && (
-        <form className="inline-form" onSubmit={(e) => { e.preventDefault(); void run(async () => { await session.invite(live, invite); setInvite(''); }, 'invite'); }}>
-          <label className="sr" htmlFor="invite-login">Invite someone</label>
-          <input id="invite-login" className="input" value={invite} onChange={(e) => setInvite(e.target.value)} placeholder="Invite by GitHub username" autoComplete="off" />
-          <button className="btn primary" disabled={busy || !invite.trim()}>{doing === 'invite' ? <><span className="spinner" /> Inviting…</> : 'Invite'}</button>
+        <form className="invite-form" onSubmit={(e) => {
+          e.preventDefault();
+          const who = [...invite, ...query.split(/[\s,]+/)].filter(Boolean);
+          void run(async () => { await session.invite(live, who); setInvite([]); setQuery(''); }, 'invite');
+        }}>
+          <PeoplePicker session={session} id="invite-login" label="Invite people" value={invite} onChange={setInvite} query={query} onQuery={setQuery} exclude={inGroup} disabled={busy} />
+          <button className="btn primary" disabled={busy || (!invite.length && !query.trim())}>{doing === 'invite' ? <><span className="spinner" /> Inviting…</> : invite.length > 1 ? `Invite ${invite.length}` : 'Invite'}</button>
         </form>
       )}
       {group && (

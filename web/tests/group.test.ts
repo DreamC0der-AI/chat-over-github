@@ -62,6 +62,22 @@ describe('groups', () => {
     expect(who.invites()).toEqual([]);
   }
 
+  it('an admin adds several people to an existing group at once', async () => {
+    w = await world();
+    const [alice, bob, carol, dave] = [await w.browser('alice'), await w.browser('bob'), await w.browser('carol'), await w.browser('dave')];
+    for (const b of [alice, bob, carol, dave]) await b.setup();
+    await alice.s.createGroup('Climbers', []);
+    await w.until(() => !!alice.chat('Climbers')?.live, 'group made');
+    await alice.s.invite(alice.chat('Climbers')!.live!, ['bob', '@Carol', 'bob', ' dave ']);
+    await w.until(() => [bob, carol, dave].every((b) => !!b.inviteFrom('alice')), 'all three see the invitation');
+    for (const b of [bob, carol, dave]) await b.s.acceptInvite(b.inviteFrom('alice')!.key);
+    await w.until(() => [bob, carol, dave].every((b) => !!b.chat('Climbers')?.live), 'all three joined');
+    const notes = await alice.notes(alice.chat('Climbers'));
+    for (const l of ['bob', 'carol', 'dave']) expect(notes.filter((n) => n === `Invitation sent to @${l}.`)).toHaveLength(1);
+    await expect(alice.s.invite(alice.chat('Climbers')!.live!, ['nobody-here'])).rejects.toThrow('No GitHub user named nobody-here');
+    await w.checkConverged();
+  });
+
   it('someone who quit can be invited back and join again', async () => {
     const { alice, bob } = await hikers();
     await bob.s.quitChat(bob.chat('Hikers')!.live!);

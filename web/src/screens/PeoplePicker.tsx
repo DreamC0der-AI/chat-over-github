@@ -7,8 +7,9 @@ const clean = (s: string) => s.trim().replace(/^@/, '').toLowerCase();
 /**
  * Pick people from your contacts (search, tap to toggle), or type a GitHub username of
  * someone who isn't a contact yet and press Enter. `value` holds the picked logins.
+ * `exclude`: logins not offered (already in the group or invited).
  */
-export function PeoplePicker({ session, id, label, value, onChange, query, onQuery }: {
+export function PeoplePicker({ session, id, label, value, onChange, query, onQuery, exclude = [], disabled }: {
   session: Session;
   id: string;
   label: string;
@@ -16,14 +17,21 @@ export function PeoplePicker({ session, id, label, value, onChange, query, onQue
   onChange: (logins: string[]) => void;
   query: string;
   onQuery: (q: string) => void;
+  exclude?: string[];
+  disabled?: boolean;
 }) {
   const input = useRef<HTMLInputElement>(null);
   const v = session.getVersion();
-  const contacts = useMemo(() => session.people().filter((p) => !p.blocked).map((p) => p.login), [v]);
+  const skip = exclude.map((l) => l.toLowerCase()).sort().join(' ');
+  const contacts = useMemo(() => {
+    const out = new Set(skip.split(' '));
+    return session.people().filter((p) => !p.blocked && !out.has(p.login.toLowerCase())).map((p) => p.login);
+  }, [v, skip]);
+  const excluded = (l: string) => skip.split(' ').includes(l);
   const q = clean(query);
   const has = (l: string) => value.some((x) => x.toLowerCase() === l.toLowerCase());
   const shown = contacts.filter((l) => !q || l.toLowerCase().includes(q));
-  const typed = q && /^[a-z0-9][a-z0-9-]{0,38}$/.test(q) && !contacts.some((l) => l.toLowerCase() === q) && !has(q) ? q : '';
+  const typed = q && /^[a-z0-9][a-z0-9-]{0,38}$/.test(q) && !contacts.some((l) => l.toLowerCase() === q) && !has(q) && !excluded(q) ? q : '';
   const toggle = (l: string) => {
     onChange(has(l) ? value.filter((x) => x.toLowerCase() !== l.toLowerCase()) : [...value, l]);
     onQuery('');
@@ -32,8 +40,8 @@ export function PeoplePicker({ session, id, label, value, onChange, query, onQue
   const commit = () => {
     if (!q) return false;
     const exact = contacts.find((l) => l.toLowerCase() === q);
-    const pick = exact ?? (shown.length === 1 && !typed ? shown[0] : q);
-    if (!has(pick)) onChange([...value, pick]);
+    const pick = exact ?? (shown.length === 1 && !typed ? shown[0]! : q);
+    if (!has(pick) && !excluded(pick.toLowerCase())) onChange([...value, pick]);
     onQuery('');
     return true;
   };
@@ -44,19 +52,20 @@ export function PeoplePicker({ session, id, label, value, onChange, query, onQue
           <span key={l} className="chip">
             <Avatar name={l} login={l} size="xs" />
             {l}
-            <button type="button" className="chip-x" aria-label={`Remove ${l}`} onClick={(e) => { e.stopPropagation(); toggle(l); }}>{Icon.close()}</button>
+            <button type="button" className="chip-x" disabled={disabled} aria-label={`Remove ${l}`} onClick={(e) => { e.stopPropagation(); toggle(l); }}>{Icon.close()}</button>
           </span>
         ))}
         <input
           ref={input}
           id={id}
           aria-label={label}
+          disabled={disabled}
           value={query}
           onChange={(e) => {
             const t = e.target.value;
             if (/[\s,]$/.test(t) && clean(t)) {
               const parts = t.split(/[\s,]+/).map(clean).filter(Boolean);
-              const add = parts.filter((p, i) => !has(p) && parts.indexOf(p) === i);
+              const add = parts.filter((p, i) => !has(p) && !excluded(p) && parts.indexOf(p) === i);
               if (add.length) onChange([...value, ...add]);
               onQuery('');
             } else onQuery(t.replace(/^[\s,]+/, ''));
@@ -73,7 +82,7 @@ export function PeoplePicker({ session, id, label, value, onChange, query, onQue
         <ul className="picker-list" role="listbox" aria-label="Contacts" aria-multiselectable="true">
           {typed && (
             <li role="option" aria-selected={false}>
-              <button type="button" className="picker-item" onClick={() => toggle(typed)}>
+              <button type="button" className="picker-item" disabled={disabled} onClick={() => toggle(typed)}>
                 <Avatar name={typed} login={typed} size="sm" />
                 <span className="name">Add <strong>{typed}</strong></span>
                 <span className="picker-mark">{Icon.plus()}</span>
@@ -84,7 +93,7 @@ export function PeoplePicker({ session, id, label, value, onChange, query, onQue
             const on = has(l);
             return (
               <li key={l} role="option" aria-selected={on}>
-                <button type="button" className={`picker-item${on ? ' on' : ''}`} onClick={() => toggle(l)}>
+                <button type="button" className={`picker-item${on ? ' on' : ''}`} disabled={disabled} onClick={() => toggle(l)}>
                   <Avatar name={l} login={l} size="sm" />
                   <span className="name">{l}</span>
                   <span className="picker-mark">{on && Icon.check(14)}</span>

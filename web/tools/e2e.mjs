@@ -263,6 +263,13 @@ try {
   await carol.page.locator('.sys, .flash', { hasText: /@alice removed you/ }).first().waitFor({ timeout: 45000 });
   await carol.page.screenshot({ path: `${SHOTS}/carol-removed.png` });
   check(true, 'carol removed and told who did it');
+  // Inviting more people: the contacts picker, without anyone already in the group.
+  const info = alice.page.getByRole('dialog', { name: 'Group info' });
+  await info.getByLabel('Invite people').waitFor();
+  check((await info.getByRole('option', { name: 'bob' }).count()) === 0, 'group info invite does not offer members');
+  await info.getByLabel('Invite people').fill('bo');
+  check((await info.getByRole('option', { name: /bob/ }).count()) === 0, 'typing a member\'s name offers no "Add" either');
+  await info.getByLabel('Invite people').fill('');
   await alice.page.screenshot({ path: `${SHOTS}/group-alice-panel.png` });
   await closeDialog(alice);
 
