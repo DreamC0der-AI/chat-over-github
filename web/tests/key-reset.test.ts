@@ -128,6 +128,44 @@ describe('key reset', () => {
     expect(await bob.texts(bob.chat('alice'))).toEqual(['before', 'after']);
   });
 
+  it('the new key declines the invitation: the chat says they didn’t join, stops waiting, and Invite again works', async () => {
+    w = await world();
+    const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
+    for (const b of [alice, bob]) await b.setup();
+    await w.dm(alice, bob);
+    const bob2 = await bob.resetKey(w);
+    recheck(alice);
+    await w.until(async () => (await alice.notes(alice.chat('bob'))).includes('@bob reset their encryption key'), 'alice is told');
+    await w.rounds(2);
+    await alice.s.inviteBack(alice.chat('bob')!, 'github:bob');
+    await w.until(() => !!bob2.inviteFrom('alice'), 'bob’s new key gets the invitation');
+    await bob2.s.declineInvite(bob2.inviteFrom('alice')!.key);
+
+    const live = () => alice.chat('bob')!.live!;
+    await w.until(() => alice.s.notJoined(live()).includes('github:bob'), 'alice sees bob didn’t join');
+    expect(await alice.notes(alice.chat('bob'))).toContain('@bob didn’t join');
+    expect(alice.s.pending(live())).toEqual([]); // not "Waiting for @bob to accept"
+    expect(alice.s.resetPeople(alice.chat('bob')!)).toEqual([]);
+
+    // A browser that missed the decline (it wasn't in the chat yet) asks GitHub when the chat is opened.
+    alice.s.records.get(live().id)!.notJoined = undefined;
+    expect(alice.s.pending(live())).toEqual(['github:bob']);
+    await alice.s.checkInvited(live());
+    expect(alice.s.notJoined(live())).toEqual(['github:bob']);
+
+    await alice.s.invite(live(), ['bob']);
+    expect(alice.s.notJoined(live())).toEqual([]);
+    await w.until(() => !!bob2.inviteFrom('alice'), 'bob gets the second invitation');
+    // While it is open on GitHub, nothing says he didn't join.
+    await alice.s.checkInvited(live());
+    expect(alice.s.notJoined(live())).toEqual([]);
+    await bob2.s.acceptInvite(bob2.inviteFrom('alice')!.key);
+    await w.until(() => !!bob2.chat('alice')?.live && live().members().filter((m) => !m.pending).length === 2, 'bob is back');
+    await bob2.s.send(bob2.chat('alice')!.live!, 'changed my mind');
+    await w.until(async () => (await alice.texts(alice.chat('bob'))).includes('changed my mind'), 'alice reads it');
+    expect(alice.chats()).toHaveLength(1);
+  });
+
   it('an invitation from someone who reset says so, and Accept trusts their new key', async () => {
     w = await world();
     const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];

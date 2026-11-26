@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { loginFrom, type Convo, type PeerInfo, type Session } from '../lib/session';
+import { useEffect, useState } from 'react';
+import { loginFrom, type Convo, type Session } from '../lib/session';
 import { PicturePicker } from './GroupPicture';
 import { PeoplePicker } from './PeoplePicker';
 import { ask, Avatar, ErrorFlash, go, GroupAvatar, Hint, Icon, Menu, MenuItem, Modal, toast, useAction } from '../ui';
@@ -8,10 +8,9 @@ export const CLOSE_ASK = { title: 'Close this chat?', body: 'It ends for everyon
 export const deleteAsk = (peer?: string) => ({ title: 'Delete this chat?', body: `Your copy of the messages is deleted from your browsers. ${peer ?? 'The other members'} keep${peer ? 's' : ''} their copy.`, confirm: 'Delete chat', danger: true });
 const QUIT_ASK = { title: 'Quit this chat?', body: 'You stop receiving messages. Your copy of the history stays until you delete it.', confirm: 'Quit chat', danger: true };
 
-/** The "…" button of a chat: info, verify, delete, close or quit, block. Used in the chat list and the chat header. */
+/** The "…" button of a chat: info, delete, close or quit, block. Used in the chat list and the chat header. */
 export function ChatMenu({ session, convo, className }: { session: Session; convo: Convo; className?: string }) {
   const [info, setInfo] = useState(false);
-  const [verify, setVerify] = useState<{ address: string; fingerprint?: string }>();
   const dm = convo.dm;
   const live = convo.live;
   const peer = convo.peer;
@@ -28,7 +27,6 @@ export function ChatMenu({ session, convo, className }: { session: Session; conv
           return (
             <>
               <MenuItem icon={dm ? Icon.info() : Icon.people()} onClick={pick(() => setInfo(true))}>{dm ? 'Chat info' : 'Group info'}</MenuItem>
-              {dm && peer && <MenuItem icon={Icon.shield(true, 16)} onClick={pick(() => setVerify({ address: peer, fingerprint: (convo.live ?? convo.current)?.members().find((m) => m.address === peer && !m.pending)?.fingerprint }))}>Safety number</MenuItem>}
               <div className="menu-sep" role="separator" />
               <MenuItem icon={Icon.trash()} disabled={busy} onClick={pick(() => act(async () => {
                 if (!(await ask(deleteAsk(dm ? convo.title : undefined)))) return;
@@ -53,20 +51,20 @@ export function ChatMenu({ session, convo, className }: { session: Session; conv
           );
         }}
       </Menu>
-      {info && <ChatInfo session={session} convo={convo} onClose={() => setInfo(false)} onVerify={(a, fp) => { setInfo(false); setVerify({ address: a, fingerprint: fp }); }} />}
-      {verify && <VerifyModal session={session} address={verify.address} fingerprint={verify.fingerprint} onClose={() => setVerify(undefined)} />}
+      {info && <ChatInfo session={session} convo={convo} onClose={() => setInfo(false)} />}
     </>
   );
 }
 
 /** Who is in the chat and where it is stored. Admins of a group rename, change the picture, invite and remove here. */
-function ChatInfo({ session, convo, onClose, onVerify }: { session: Session; convo: Convo; onClose: () => void; onVerify: (address: string, fingerprint: string) => void }) {
+function ChatInfo({ session, convo, onClose }: { session: Session; convo: Convo; onClose: () => void }) {
   const dm = convo.dm;
   const live = convo.live;
   const group = live ?? convo.current;
   const members = (group?.members() ?? []).filter((m) => !m.pending);
   const iAmAdmin = !!group && group.policy.admins.includes(session.identity!.fingerprint);
   const pending = live ? session.pending(live) : [];
+  const notJoined = live ? session.notJoined(live) : [];
   const [invite, setInvite] = useState<string[]>([]);
   const [query, setQuery] = useState('');
   const inGroup = [...members.map((m) => loginFrom(m.address)), ...pending.map(loginFrom)];
@@ -105,7 +103,6 @@ function ChatInfo({ session, convo, onClose, onVerify }: { session: Session; con
                 </div>
                 <div className="small muted">{m.devices.length} {m.devices.length === 1 ? 'device' : 'devices'}</div>
               </div>
-              {!me && <button className="btn" onClick={() => onVerify(m.address, m.fingerprint)}>Verify</button>}
               {!me && !dm && iAmAdmin && live && (
                 <button className="btn danger" disabled={busy} onClick={() => run(async () => {
                   if (await ask({ title: `Remove ${login}?`, body: 'Keys rotate right away, so they can\'t read new messages.', confirm: 'Remove', danger: true })) await session.removeMember(live, m.fingerprint);
@@ -121,6 +118,17 @@ function ChatInfo({ session, convo, onClose, onVerify }: { session: Session; con
             {live && (dm ? session.isOwner(live) : iAmAdmin) && (
               <button className="btn" disabled={busy} onClick={() => run(() => session.invite(live, [loginFrom(a)]), `resend:${a}`)}>
                 {doing === `resend:${a}` ? <><span className="spinner" /> Sending…</> : 'Resend'}
+              </button>
+            )}
+          </div>
+        ))}
+        {notJoined.map((a) => (
+          <div className="member" key={a}>
+            <Avatar name={loginFrom(a)} login={loginFrom(a)} />
+            <div className="member-text"><strong>{loginFrom(a)}</strong><div className="small muted">Didn’t join</div></div>
+            {live && (dm ? session.isOwner(live) : iAmAdmin) && !session.blocked.has(a) && (
+              <button className="btn" disabled={busy} onClick={() => run(() => session.invite(live, [loginFrom(a)]), `again:${a}`)}>
+                {doing === `again:${a}` ? <><span className="spinner" /> Inviting…</> : 'Invite again'}
               </button>
             )}
           </div>
@@ -149,74 +157,5 @@ function ChatInfo({ session, convo, onClose, onVerify }: { session: Session; con
         </dl>
       )}
     </Modal>
-  );
-}
-
-export function VerifyModal({ session, address, fingerprint, onClose }: { session: Session; address: string; fingerprint?: string; onClose: () => void }) {
-  return (
-    <Modal title={`Verify ${loginFrom(address)}`} onClose={onClose}>
-      <VerifyPanel session={session} address={address} fingerprint={fingerprint} />
-    </Modal>
-  );
-}
-
-/** Safety number and the verify or accept-new-key button. In the verify dialog and on a contact. */
-/** `fingerprint`: the key their leaf in a chat carries; it is what gets compared when given. */
-export function VerifyPanel({ session, address, fingerprint }: { session: Session; address: string; fingerprint?: string }) {
-  const [p, setP] = useState<PeerInfo>();
-  const { busy, error, run } = useAction();
-  const login = loginFrom(address);
-  const v = session.getVersion();
-  // Checked against the directory once when shown; after that the cached answer, which a change
-  // (a verified mark, a key accepted, news from another browser) clears. Refreshing on every
-  // update kept restarting the check on a busy phone, so the number never showed.
-  const checked = useRef<string>();
-  useEffect(() => {
-    const key = `${address}|${fingerprint ?? ''}`;
-    const refresh = checked.current !== key;
-    checked.current = key;
-    if (refresh && !fingerprint) {
-      void session.knownPeer(address).then((k) => k && setP((cur) => cur ?? k));
-    }
-    // Not dropped when an update comes first: a later check might never finish before the next one.
-    void session.peer(address, refresh, fingerprint).then(setP);
-  }, [address, fingerprint, v]);
-  if (!p) return <span className="spinner" />;
-  if (p.status === 'none') return <p>{login} hasn't created an identity yet.</p>;
-  if (p.status === 'error') return <ErrorFlash error={p.error} />;
-  if (p.status === 'mismatch') {
-    return (
-      <>
-        <div className="flash warn">The key {login} uses in this chat is not the one published for them. Messages from it may not be from {login}. Ask them in person before you trust it.</div>
-        <p className="verify-lead">Safety number of the key in this chat:</p>
-        <div className="safety">{p.safety?.split(' ').map((g, i) => <span key={i}>{g}</span>)}</div>
-      </>
-    );
-  }
-  return (
-    <>
-      {p.status === 'key-changed' && (
-        <div className="flash warn">
-          {p.otherBrowser
-            ? <>Another of your browsers trusts a different key for {login}. Compare the number before you accept the one shown here.</>
-            : <>{login}'s identity key changed. Compare the new number before you accept it.</>}
-        </div>
-      )}
-      <p className="verify-lead">
-        Compare with {login} in person or on a call.{' '}
-        <Hint text={<>If the numbers match on both screens, nobody is in the middle. Verified marks apply on all your browsers. Their key fingerprint: <span className="mono">{p.fingerprint?.slice(0, 32)}…</span></>} />
-      </p>
-      <div className="safety">{p.safety?.split(' ').map((g, i) => <span key={i}>{g}</span>)}</div>
-      <ErrorFlash error={error} />
-      {p.checking ? (
-        <div className="verified-note checking"><span className="spinner" /> Checking…</div>
-      ) : p.status === 'key-changed' ? (
-        <button className="btn primary block" disabled={busy} onClick={() => run(() => session.acceptKeyChange(address))}>{busy ? <><span className="spinner" /> Saving…</> : 'Numbers match, accept the new key'}</button>
-      ) : p.verified ? (
-        <div className="verified-note">{Icon.shield(true, 16)} Verified</div>
-      ) : (
-        <button className="btn primary block" disabled={busy} onClick={() => run(() => session.markVerified(address))}>{busy ? <><span className="spinner" /> Saving…</> : 'Numbers match, mark as verified'}</button>
-      )}
-    </>
   );
 }

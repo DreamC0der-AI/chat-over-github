@@ -1,4 +1,4 @@
-// Direct messages between two people: invitations, talking, files, reactions, safety numbers.
+// Direct messages between two people: invitations, talking, files, reactions.
 import { afterEach, describe, expect, it } from 'vitest';
 import { world, type World } from './harness';
 
@@ -29,20 +29,6 @@ describe('direct messages', () => {
     expect(await bob.texts(bob.chat('alice'))).toEqual(['hi alice', 'hello bob\nsecond line']);
     expect(bob.chats()).toHaveLength(1);
     await w.checkConverged();
-  });
-
-  it('safety numbers match on both sides and can be marked verified', async () => {
-    w = await world();
-    const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
-    await alice.setup();
-    await bob.setup();
-    await w.dm(alice, bob);
-    const a = await alice.s.peer('github:bob', true);
-    const b = await bob.s.peer('github:alice', true);
-    expect(a.safety).toBeTruthy();
-    expect(a.safety).toBe(b.safety);
-    await alice.s.markVerified('github:bob');
-    expect((await alice.s.peer('github:bob', true)).verified).toBe(true);
   });
 
   it('files and pictures arrive decrypted, with their caption', async () => {

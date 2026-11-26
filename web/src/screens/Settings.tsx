@@ -243,7 +243,7 @@ function SyncBox({ session }: { session: Session }) {
     <section className="box">
       <div className="box-header">
         <h3>Sync across browsers</h3>
-        <Hint text={<>Your chat list, contacts and their verified keys, deleted and closed chats, read marks, blocks and declined invitations are kept, encrypted, in <span className="mono">{session.login}/{session.homeRepo}</span>. Your other browsers apply them within about a minute.</>} />
+        <Hint text={<>Your chat list, contacts and the key you trust for each, deleted and closed chats, read marks, blocks and declined invitations are kept, encrypted, in <span className="mono">{session.login}/{session.homeRepo}</span>. Your other browsers apply them within about a minute.</>} />
         <span className="spacer" />
         {session.syncOn ? <span className="label green">On</span> : <span className="label">Off</span>}
       </div>

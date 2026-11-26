@@ -125,27 +125,13 @@ try {
   });
   check(marked === 1 && kept.n === 1 && kept.sameEl, `avatar stays mounted when a message joins the run (${JSON.stringify({ marked, ...kept })})`);
 
-  // Verify safety number match on both sides
-  await menu(alice, 'Safety number');
-  const sa = await alice.page.locator('.safety').innerText();
-  // Verifying lives in Contacts: the chat header shows no shield until a chat is verified.
-  check(!(await bob.page.locator('.convo-head .trust').count()), 'unverified chat shows no shield in the header');
-  await bob.page.getByRole('link', { name: 'Contacts' }).click();
-  await bob.page.locator('.contact-item', { hasText: 'alice' }).click();
-  const sb = await bob.page.locator('.safety').innerText();
-  check(sa === sb && sa.length > 50, 'safety numbers match');
-  await alice.page.getByRole('button', { name: /mark as verified/ }).click();
-  await closeDialog(alice);
-  await closeDialog(bob);
-  await alice.page.locator('.convo-head').getByRole('button', { name: 'Verified', exact: true }).waitFor();
-  check(true, 'marked verified');
-  await openChat(bob, 'alice');
+  // Contacts lists the people you chat with; a person opens a card with their chats.
   await alice.page.getByRole('link', { name: 'Contacts' }).click();
-  await alice.page.locator('.contact-item', { hasText: 'bob' }).locator('.trust.ok').waitFor();
-  check(true, 'Contacts shows bob as verified');
+  await alice.page.locator('.contact-item', { hasText: 'bob' }).waitFor();
+  check(true, 'Contacts lists bob');
   await alice.page.screenshot({ path: `${SHOTS}/contacts.png` });
   await alice.page.locator('.contact-item', { hasText: 'bob' }).click();
-  await alice.page.locator('.verified-note').waitFor();
+  await alice.page.getByRole('dialog').waitFor();
   await alice.page.screenshot({ path: `${SHOTS}/contact.png` });
   await closeDialog(alice);
   await openChat(alice, 'bob');
@@ -301,9 +287,6 @@ try {
   await bubble(alice2, 'hi alice, it works').waitFor({ timeout: 30000 });
   check(true, 'second device shows earlier messages from the history backup');
   check((await alice2.page.locator('.sys.divider', { hasText: 'Earlier messages aren’t on this browser' }).count()) === 0, 'and does not say they are elsewhere');
-  // The verified mark from alice's first browser came with sync: no new first contact here.
-  await alice2.page.locator('.convo-head').getByRole('button', { name: 'Verified', exact: true }).waitFor({ timeout: 30000 });
-  check(true, 'second device shows the verified mark from the first');
   await openChat(bob, 'alice');
   await sendMsg(bob, 'message for both alice devices');
   await bubble(alice2, 'message for both alice devices').waitFor({ timeout: 45000 });
@@ -353,6 +336,24 @@ try {
   await bob.page.getByRole('menuitem', { name: 'Unblock alice' }).waitFor();
   await bob.page.keyboard.press('Escape');
   check(true, 'Block from the chat menu, then Unblock is offered');
+
+  // A declined invitation: the one who asked is told in the chat and can ask again from there.
+  await carol.page.evaluate(() => { location.hash = '#/'; });
+  await carol.page.getByRole('button', { name: 'New chat' }).first().click();
+  await carol.page.getByLabel('GitHub username').fill('bob');
+  await carol.page.getByRole('button', { name: 'Start chat' }).click();
+  await carol.page.locator('.sys', { hasText: 'Invitation sent to @bob' }).waitFor({ timeout: 30000 });
+  const carolCard = bob.page.locator('div.row', { hasText: 'carol invited you' }).filter({ has: bob.page.getByRole('button', { name: 'Decline' }) }).first();
+  await carolCard.waitFor({ timeout: 45000 });
+  await carolCard.getByRole('button', { name: 'Decline' }).click();
+  const didnt = carol.page.locator('.flash.banner', { hasText: 'bob didn’t join' });
+  check(await until(carol, async () => { await syncRounds(carol, 1); return (await didnt.count()) > 0; }, 45000), 'after a decline the chat says they didn’t join');
+  check(!(await carol.page.locator('.sys', { hasText: 'Waiting for @bob to accept' }).count()), 'and no longer says it waits for them');
+  await carol.page.screenshot({ path: `${SHOTS}/didnt-join.png` });
+  await didnt.getByRole('button', { name: 'Invite again' }).click();
+  await didnt.waitFor({ state: 'detached', timeout: 30000 });
+  await carolCard.waitFor({ timeout: 45000 });
+  check(true, 'Invite again sends a new invitation');
 
   // first run: no install yet -> guided steps -> continues by itself
   const newbie = await person('newbie');

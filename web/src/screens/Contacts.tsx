@@ -1,11 +1,10 @@
 import { useMemo, useState } from 'react';
 import { type Convo, type Person, type Session } from '../lib/session';
 import { ask, Avatar, ErrorFlash, GroupAvatar, go, Icon, Modal, toast, useAction, useSession } from '../ui';
-import { VerifyPanel } from './ChatMenu';
 
 /**
- * Contacts: everyone you have a DM with or share a group with, and your groups. Verifying a
- * person (safety numbers) lives here; marks and remembered keys sync across your browsers.
+ * Contacts: everyone you have a DM with or share a group with, and your groups. The key this
+ * account trusts for each person syncs across your browsers.
  */
 export function Contacts({ session, onNewGroup }: { session: Session; onNewGroup: () => void }) {
   useSession(session);
@@ -45,7 +44,6 @@ export function Contacts({ session, onNewGroup }: { session: Session; onNewGroup
                       <span className="name">{p.login}{p.blocked && <span className="label">Blocked</span>}</span>
                       <span className="preview">{sharedText(p)}</span>
                     </span>
-                    <TrustMark p={p} />
                   </button>
                 </li>
               ))}
@@ -88,13 +86,6 @@ function sharedText(p: Person) {
   return parts.join(' · ') || 'No chats now';
 }
 
-/** Green shield once verified, a warning when the key changed, nothing otherwise. */
-export function TrustMark({ p }: { p: Pick<Person, 'verified' | 'conflict'> & { keyChanged?: boolean } }) {
-  if (p.conflict || p.keyChanged) return <span className="trust warn" title="Key changed" aria-label="Key changed">{Icon.shield(false, 16)}</span>;
-  if (p.verified) return <span className="trust ok" title="Verified" aria-label="Verified">{Icon.shield(true, 16)}</span>;
-  return null;
-}
-
 function ContactModal({ session, p, onClose }: { session: Session; p: Person; onClose: () => void }) {
   const { busy, error, run } = useAction();
   const open = (c: Convo) => { onClose(); go(`/c/${encodeURIComponent(c.key)}`); };
@@ -131,10 +122,6 @@ function ContactModal({ session, p, onClose }: { session: Session; p: Person; on
           ))}
         </div>
       )}
-      <div className="contact-verify">
-        <h4>Safety number</h4>
-        <VerifyPanel session={session} address={p.address} />
-      </div>
     </Modal>
   );
 }
