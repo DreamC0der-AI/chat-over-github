@@ -35,7 +35,7 @@ It stores only invitation ID, inviter login and id, and timestamps, under the in
 
 The Worker also serves the chat web app from `public/` (Workers static assets). Files there are served first; every other path reaches the Worker code above. Build it with `npm run build` in the repo root, which writes `web/` straight into `public/` (not committed). Because the app and the API share an origin, the browser needs no CORS for the Worker. `public/_headers` sets a strict Content-Security-Policy.
 
-The GitHub App's callback URL must be `https://chat-over-github.akagishigerutokyo.workers.dev/` for the "Sign in with GitHub" button.
+The GitHub App's callback URLs must include `https://chat-over-github.sunzy.app/` and `https://chat-over-github.akagishigerutokyo.workers.dev/` for the "Sign in with GitHub" button.
 
 ## Deploy
 

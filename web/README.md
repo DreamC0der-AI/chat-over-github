@@ -1,6 +1,6 @@
 # Chat over GitHub: web app
 
-End-to-end encrypted 1:1 and group chat in the browser, with GitHub as the only backend. Built on `keyhold/chat` (MLS) and the GitHub provider in `../provider`. Live at https://chat-over-github.akagishigerutokyo.workers.dev, served by the chat-over-github Worker (static assets), which also does the OAuth exchange and the invite inbox.
+End-to-end encrypted 1:1 and group chat in the browser, with GitHub as the only backend. Built on `keyhold/chat` (MLS) and the GitHub provider in `../provider`. Live at https://chat-over-github.sunzy.app (old address https://chat-over-github.akagishigerutokyo.workers.dev still works), served by the chat-over-github Worker (static assets), which also does the OAuth exchange and the invite inbox.
 
 ## What it does
 
