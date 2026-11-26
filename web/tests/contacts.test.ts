@@ -153,6 +153,9 @@ describe('synced contacts', () => {
     expect(w.requests.length).toBe(before);
     const checked = await alice.s.peer('github:bob', true);
     expect(known).toMatchObject({ status: 'ok', fingerprint: checked.fingerprint, safety: checked.safety });
+    // Until the check answers, the screen says "Checking…" instead of offering Verified.
+    expect(known?.checking).toBe(true);
+    expect(checked.checking).toBeUndefined();
     expect(await alice.s.knownPeer('github:carol')).toBeUndefined(); // never seen: wait for the check
   });
 });

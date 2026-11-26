@@ -273,6 +273,8 @@ export interface PeerInfo {
   firstSeen?: number;
   /** key-changed because another of this account's browsers trusts a different key (not GitHub). */
   otherBrowser?: boolean;
+  /** Only what this account remembers: the directory hasn't confirmed the key yet. */
+  checking?: boolean;
   error?: string;
 }
 
@@ -2236,15 +2238,39 @@ export class Session {
    * people we can already open. Both wait for the user to accept. Our own repos (another of our
    * devices made the chat) are joined right away. Then join the accepted ones.
    */
-  checkInvites(force = false): Promise<void> {
-    // One at a time: Accept and the regular check overlapping would join the same chat twice.
-    const run = this.invitesQueue.then(() => this.checkInvitesNow(force));
-    this.invitesQueue = run.catch(() => undefined);
-    return run;
+  async checkInvites(force = false): Promise<void> {
+    // Collecting runs one at a time (Accept and the regular check overlapping would see the same
+    // invitations twice). The joins run outside that queue, so Accept doesn't wait behind a new
+    // browser catching up on other chats: each invitation is joined by one caller only (busy).
+    const run = this.invitesQueue.then(() => this.collectInvites(force));
+    this.invitesQueue = run.then(() => undefined, () => undefined);
+    await this.joinDue(await run);
   }
   private invitesQueue: Promise<void> = Promise.resolve();
 
+  /** Collect and join, for callers that already hold the queue. */
   private async checkInvitesNow(force: boolean) {
+    await this.joinDue(await this.collectInvites(force));
+  }
+
+  /** Join these invitations, a few at a time, skipping any another caller has taken meanwhile. */
+  private async joinDue(due: { inv: PendingInvite; attempts: number }[]) {
+    if (!due.length) return;
+    // Several chats at once: a new browser catching up on all of the account's chats did them one
+    // after another, minutes each on a phone. Each join is for its own repo and group.
+    await inParallel(due, async ({ inv, attempts }) => {
+      if (inv.busy || inv.attempts !== attempts || this.invites.get(inv.key) !== inv) return;
+      inv.busy = true;
+      try {
+        await this.joinOne(inv);
+      } finally {
+        inv.busy = false;
+      }
+    }, JOINS_AT_ONCE);
+    this.bump();
+  }
+
+  private async collectInvites(force: boolean): Promise<{ inv: PendingInvite; attempts: number }[]> {
     const p = this.provider;
     const chat = this.chat!;
     const now = Date.now();
@@ -2308,7 +2334,7 @@ export class Session {
         // Our own repo that no chat here knows: being made here, a chat to catch up on, or left empty.
         if (!g && space.split('/')[0]!.toLowerCase() === this.login && ![...this.records.values()].some((r) => r.space === space) && !(await this.ownRepoInUse(space))) {
           const inv = this.invites.get(space);
-          if (inv && inv.status !== 'invited') this.invites.delete(space);
+          if (inv && inv.status !== 'invited' && !inv.busy) this.invites.delete(space);
           continue;
         }
         if (this.invites.has(space)) continue;
@@ -2354,27 +2380,18 @@ export class Session {
     }
     // A room GitHub refused us doesn't count as joined: being invited back is how access returns.
     have = new Set([...chat.groups.values()].filter((g) => g.active).map((g) => g.space));
-    const due: PendingInvite[] = [];
+    const due: { inv: PendingInvite; attempts: number }[] = [];
     for (const inv of [...this.invites.values()]) {
+      if (inv.busy) continue; // being joined by another caller
       if (inv.space && have.has(inv.space)) {
         this.invites.delete(inv.key);
         continue;
       }
       if (!inv.space || inv.dismissed || inv.status === 'invited') continue;
       if (!force && now < inv.nextTry) continue;
-      due.push(inv);
+      due.push({ inv, attempts: inv.attempts });
     }
-    // Several chats at once: a new browser catching up on all of the account's chats did them one
-    // after another, minutes each on a phone. Each join is for its own repo and group.
-    await inParallel(due, async (inv) => {
-      inv.busy = true;
-      try {
-        await this.joinOne(inv);
-      } finally {
-        inv.busy = false;
-      }
-    }, JOINS_AT_ONCE);
-    this.bump();
+    return due;
   }
 
   /** Join the chat of one accepted invitation (or one the account is already in). */
@@ -2403,6 +2420,9 @@ export class Session {
         if (a && !a.ended) a.link = `/c/${encodeURIComponent(this.convoKey(r))}`;
         // Catching up on a chat the account was already in: its history stays in the other browsers.
         // "Already" means it existed before this browser was added, not some fixed age.
+        // The chat's age comes from the synced chat list: on a new browser, wait for its first read
+        // (a join can finish first, and the record then only knows "now").
+        if (inv.mine && !r.joinedAt) await this.syncStarting;
         if (inv.mine && !r.joinedAt && r.createdAt < (this.identity?.cert.issuedAt ?? Date.now())) {
           r.joinedAt = Date.now();
           await this.saveRecord(r);
@@ -3017,6 +3037,7 @@ export class Session {
       verified: !conflict && this.contacts.verified(address),
       firstSeen: this.contacts.firstSeen(address),
       ...(conflict ? { otherBrowser: true } : {}),
+      checking: true,
     };
   }
 
