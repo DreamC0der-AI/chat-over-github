@@ -4,12 +4,13 @@
  * Each browser keeps its own copy of the pins (IndexedDB, `pin:<address>`), so lookups work
  * offline and before sync has started. The account's browsers share them through the encrypted
  * personal store (collection `contacts`), so "first contact" with a person happens once per
- * account, not once per browser, and a "verified" mark made in one browser shows in all of them.
+ * account, not once per browser.
  *
- * Safety rule: sync never replaces a pinned key. A new browser takes the synced pin as its own
- * (it has none yet). A browser whose pin differs from the synced one keeps its pin and reports a
- * conflict, which the app shows as "identity key changed"; only the user accepting the key
- * GitHub serves now (after comparing safety numbers) writes a different key up.
+ * Safety rule: sync by itself never replaces a pinned key. A new browser takes the synced pin as
+ * its own (it has none yet). A browser whose pin differs from the synced one keeps its pin and
+ * reports a conflict. Only a person choosing to trust the key GitHub serves now (Invite again, or
+ * Accept on an invitation from someone who reset their key) writes a different key up; the
+ * account's other browsers then take it once they see the person publishes that key (adoptSynced).
  */
 import type { MergeRule, PersonalData, Pin, PinStore } from 'keyhold/chat';
 import type { Db } from './idb';
@@ -24,8 +25,6 @@ export interface LocalPin extends Pin {
 export interface SyncedContact {
   /** Root key fingerprint plus the directory head it was checked at (one field, so they never mix). */
   pin?: { fingerprint: string; index: number; hash: string };
-  /** The fingerprint the user compared safety numbers for. Verified only while it equals pin.fingerprint. */
-  verifiedKey?: string;
   firstSeen?: number;
   login?: string;
 }
@@ -42,7 +41,7 @@ export class ContactBook implements PinStore {
   constructor(
     private db: Db,
     private loginOf: (address: string) => string,
-    /** A contact's trust changed (verified mark or a conflict arrived from another browser). */
+    /** What the account's other browsers trust for a contact changed. */
     private onChange: (address: string) => void = () => undefined,
     private now: () => number = Date.now,
   ) {}
@@ -60,19 +59,17 @@ export class ContactBook implements PinStore {
     const l = this.local.get(address);
     if (l) return l;
     const s = this.synced.get(address);
-    if (s?.pin) return { ...s.pin, verified: s.verifiedKey === s.pin.fingerprint || undefined };
+    if (s?.pin) return { ...s.pin };
     return undefined;
   }
 
   async set(address: string, pin: Pin): Promise<void> {
     const prev = this.local.get(address);
     const s = this.synced.get(address);
-    const syncedVerified = !!s?.pin && s.pin.fingerprint === pin.fingerprint && s.verifiedKey === pin.fingerprint;
     const next: LocalPin = {
       fingerprint: pin.fingerprint,
       index: pin.index,
       hash: pin.hash,
-      ...(pin.verified || syncedVerified ? { verified: true } : {}),
       firstSeen: (prev?.fingerprint === pin.fingerprint ? prev.firstSeen : undefined) ?? s?.firstSeen ?? this.now(),
     };
     this.local.set(address, next);
@@ -97,7 +94,6 @@ export class ContactBook implements PinStore {
     if (s.pin && !sameKey && !force) return; // a conflict: shown to the user, not settled by sync
     const fields: Record<string, unknown> = {};
     if (!s.pin || !sameKey || p.index > s.pin.index) fields.pin = { fingerprint: p.fingerprint, index: p.index, hash: p.hash };
-    if (p.verified && s.verifiedKey !== p.fingerprint) fields.verifiedKey = p.fingerprint;
     if (!s.firstSeen && p.firstSeen) fields.firstSeen = p.firstSeen;
     if (!s.login) fields.login = this.loginOf(address);
     if (!Object.keys(fields).length) return;
@@ -115,18 +111,17 @@ export class ContactBook implements PinStore {
     const before = this.synced.get(address);
     const s: SyncedContact = {
       pin: isPin(v.pin) ? v.pin : undefined,
-      verifiedKey: typeof v.verifiedKey === 'string' ? v.verifiedKey : undefined,
       firstSeen: typeof v.firstSeen === 'number' ? v.firstSeen : undefined,
       login: typeof v.login === 'string' ? v.login : undefined,
     };
     this.synced.set(address, s);
     const l = this.local.get(address);
     if (l && s.pin && l.fingerprint === s.pin.fingerprint) {
-      // Same key: take the verified mark and the first-seen time from the other browsers.
-      let changed = false;
-      if (!l.verified && s.verifiedKey === l.fingerprint) { l.verified = true; changed = true; }
-      if (s.firstSeen && s.firstSeen !== l.firstSeen) { l.firstSeen = s.firstSeen; changed = true; }
-      if (changed) await this.db.put('kv', l, `pin:${address}`);
+      // Same key: take the first-seen time from the other browsers.
+      if (s.firstSeen && s.firstSeen !== l.firstSeen) {
+        l.firstSeen = s.firstSeen;
+        await this.db.put('kv', l, `pin:${address}`);
+      }
     }
     if (JSON.stringify(before) !== JSON.stringify(s)) this.onChange(address);
   }
@@ -149,13 +144,18 @@ export class ContactBook implements PinStore {
     return this.local.get(address)?.fingerprint ?? this.synced.get(address)?.pin?.fingerprint;
   }
 
-  /** Verified for the key this browser trusts (without a lookup). */
-  verified(address: string): boolean {
-    if (this.conflict(address)) return false;
-    const l = this.local.get(address);
-    if (l) return !!l.verified;
+  /** The root key the account's browsers share for the person, if any. */
+  syncedKey(address: string): string | undefined {
+    return this.synced.get(address)?.pin?.fingerprint;
+  }
+
+  /** Take the account's key for the person as this browser's own (see the safety rule above). */
+  async adoptSynced(address: string) {
     const s = this.synced.get(address);
-    return !!s?.pin && s.verifiedKey === s.pin.fingerprint;
+    if (!s?.pin) return;
+    const next: LocalPin = { ...s.pin, firstSeen: s.firstSeen ?? this.now() };
+    this.local.set(address, next);
+    await this.db.put('kv', next, `pin:${address}`);
   }
 
   /** Everyone with a pin here or in the synced store. */

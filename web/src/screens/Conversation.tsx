@@ -3,7 +3,7 @@ import type { Group } from 'keyhold/chat';
 import { describeError, loginFrom, type Convo, type MsgRecord, type PeerInfo, type Session } from '../lib/session';
 import { EARLIER_ELSEWHERE, endedText } from './Home';
 import { ask, Avatar, ErrorFlash, GroupAvatar, go, Hint, Icon, MenuItem, Notices, timeLabel, toast, useAction } from '../ui';
-import { ChatMenu, CLOSE_ASK, deleteAsk, VerifyModal } from './ChatMenu';
+import { ChatMenu, CLOSE_ASK, deleteAsk } from './ChatMenu';
 import { AttachmentView, DraftTray, isImage, Lightbox, PendingAttachment, saveBlob, toDrafts, type Draft, type Viewing } from './Attachments';
 import { EmojiRow, MsgPopup, useLongPress, type Anchor } from './MessageMenu';
 import { stepLine } from './Progress';
@@ -52,7 +52,6 @@ function runs(items: Item[]): Run[] {
 
 export function Conversation({ session, convo }: { session: Session; convo: Convo }) {
   const [items, setItems] = useState<Item[]>([]);
-  const [verify, setVerify] = useState<string>();
   const [peer, setPeer] = useState<PeerInfo>();
   const [viewing, setViewing] = useState<Viewing>();
   const innerRef = useRef<HTMLDivElement>(null);
@@ -92,6 +91,11 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
     };
   }, [v, roomIds]);
 
+  // Someone shown as invited may have declined without the chat saying so: ask GitHub once.
+  useEffect(() => {
+    if (live) void session.checkInvited(live).catch(() => undefined);
+  }, [live?.id]);
+
   useEffect(() => {
     if (!peerAddr) return;
     let alive = true;
@@ -130,11 +134,14 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
   const canWrite = !!live && (!dm || joined);
   // People who reset their key and haven't been invited back. In a DM the chat waits for that.
   const resets = session.resetPeople(convo);
-  // (Once they are in the live room again, with their new key, it's over.)
-  const peerReset = dm && !!peerAddr && !joined && (resets.includes(peerAddr) || last0(convo)?.ended?.how === 'reset');
+  // (Once they are in the live room again, with their new key, it's over.) Their directory showing
+  // another key than the one this account trusts is the same thing, seen before the chat's own check.
+  const peerReset = dm && !!peerAddr && !forged && (peer?.status === 'key-changed' || (!joined && (resets.includes(peerAddr) || last0(convo)?.ended?.how === 'reset')));
   const amAdmin = !!live && live.policy.admins.includes(session.identity?.fingerprint ?? '');
   const groupResets = !dm && live && amAdmin ? resets.filter((a) => !live.members().some((m) => m.address === a && !session.keyMismatch(m))) : [];
   const peerLeft = !!live && dm && !!liveRec?.peerLeft && !joined && !peerReset;
+  // They turned the invitation down (or it ran out): nothing is waiting, the one who asked can ask again.
+  const notJoined = !!live && dm && !!peerAddr && !joined && !peerReset && !peerLeft && session.notJoined(live).includes(peerAddr);
   const inviteBack = (a: string) => run(async () => go(`/c/${encodeURIComponent(await session.inviteBack(convo, a))}`));
   const last = convo.rooms[convo.rooms.length - 1]!;
   const space = group?.space ?? last.space;
@@ -155,32 +162,30 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
           ) : !dm && group && <span className="convo-sub">{session.joinedMembers(group).length} {session.joinedMembers(group).length === 1 ? 'member' : 'members'}</span>}
         </div>
         <div className="convo-actions">
-          {dm && peer && <TrustBadge peer={peer} onClick={() => setVerify(peer.address)} />}
           <ChatMenu session={session} convo={convo} />
         </div>
       </div>
       {forged && (
         <div className="flash warn banner">
-          <span><strong>The key {title} uses in this chat is not the one you trust for them.</strong> <Hint text="Their messages here may not be from them. Compare safety numbers in person." /></span>
-          <button className="btn" onClick={() => setVerify(peerAddr)}>Review</button>
+          <span><strong>The key {title} uses in this chat is not the one you trust for them.</strong> <Hint text="Their messages here may not be from them." /></span>
         </div>
       )}
       {peerReset && (
         <div className="flash warn banner">
-          <span><strong>{title} reset their encryption key.</strong> <Hint text={`Their old key can't be used any more. Invite ${title} again to keep chatting: their app asks them to accept, and your earlier messages stay here.`} /></span>
+          <span><strong>{title} reset their encryption key.</strong> <Hint text={`Their old key can't be used any more. Invite ${title} again to keep chatting: their app asks them to accept, and your earlier messages stay here. Not sure it was them? Check with them another way first.`} /></span>
           {!session.blocked.has(peerAddr!) && <button className="btn primary" disabled={busy} onClick={() => inviteBack(peerAddr!)}>{busy ? <><span className="spinner" /> Inviting…</> : 'Invite again'}</button>}
         </div>
       )}
       {groupResets.map((a) => (
         <div key={a} className="flash warn banner">
-          <span><strong>@{loginFrom(a)} reset their encryption key.</strong> <Hint text="Their old key was taken out of the group. Invite them again to let the new key in; they won't see earlier messages." /></span>
+          <span><strong>@{loginFrom(a)} reset their encryption key.</strong> <Hint text="Their old key was taken out of the group. Invite them again to let the new key in; they won't see earlier messages. Not sure it was them? Check with them another way first." /></span>
           <button className="btn" disabled={busy} onClick={() => inviteBack(a)}>{busy ? <span className="spinner" /> : 'Invite again'}</button>
         </div>
       ))}
-      {!forged && !peerReset && peer?.status === 'key-changed' && (
+      {notJoined && (
         <div className="flash warn banner">
-          <span><strong>{loginFrom(peer.address)}'s identity key changed.</strong> <Hint text="They may have a new device or reset their account, or someone may be impersonating them. Compare safety numbers before you trust it." /></span>
-          <button className="btn" onClick={() => setVerify(peer.address)}>Review</button>
+          <span><strong>{title} didn’t join.</strong> <Hint text="They declined your invitation, or it ran out. Your messages stay here." /></span>
+          {session.isOwner(live!) && !session.blocked.has(peerAddr!) && <button className="btn primary" disabled={busy} onClick={() => run(() => session.invite(live!, [loginFrom(peerAddr!)]))}>{busy ? <><span className="spinner" /> Inviting…</> : 'Invite again'}</button>}
         </div>
       )}
       {peerLeft && (
@@ -255,12 +260,11 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
         </div>
       </div>
       {live ? (
-        <Composer session={session} group={live} disabledReason={busyLabel ?? (peerReset ? `Paused until ${title} is invited again` : peerLeft ? `${title} left this chat` : !canWrite ? 'Waiting for the other person to join…' : undefined)} error={err} />
+        <Composer session={session} group={live} disabledReason={busyLabel ?? (peerReset ? `Paused until ${title} is invited again` : peerLeft ? `${title} left this chat` : notJoined ? `${title} didn’t join` : !canWrite ? 'Waiting for the other person to join…' : undefined)} error={err} />
       ) : (
         <div className="composer ended">This chat has ended</div>
       )}
       {viewing && <Lightbox v={viewing} onClose={() => setViewing(undefined)} />}
-      {verify && <VerifyModal session={session} address={verify} fingerprint={verify === peerAddr ? peerKey?.fingerprint : undefined} onClose={() => setVerify(undefined)} />}
     </>
   );
 }
@@ -268,13 +272,6 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
 /** The newest room of a conversation. */
 function last0(c: Convo) {
   return c.rooms[c.rooms.length - 1];
-}
-
-/** A green shield once verified, a warning when the key changed, nothing otherwise: verifying is optional and lives in Contacts. Marks sync across your browsers. */
-function TrustBadge({ peer, onClick }: { peer: PeerInfo; onClick: () => void }) {
-  if (peer.status === 'key-changed') return <button className="btn icon ghost trust warn" aria-label="Key changed" title="Key changed. Review the new safety number." onClick={onClick}>{Icon.shield(false, 16)}</button>;
-  if (peer.status !== 'none' && peer.status !== 'error' && peer.verified) return <button className="btn icon ghost trust ok" aria-label="Verified" title="Verified" onClick={onClick}>{Icon.shield(true, 16)}</button>;
-  return null;
 }
 
 function Message({ m, session, group, showAuthor, first = true, last = true, onOpen }: { m: MsgRecord; session: Session; group?: Group; showAuthor: boolean; first?: boolean; last?: boolean; onOpen: (v: Viewing) => void }) {

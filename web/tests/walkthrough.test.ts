@@ -194,7 +194,12 @@ describe('DM walkthroughs', () => {
     await w.rounds(3);
     expect(bob.chat('alice')).toBeUndefined();
     expect(bob.invites()).toEqual([]);
+    // Alice's chat says so (the screen offers Invite again), and no longer waits for him.
+    const live = alice.chat('bob')!.live!;
+    await w.until(() => alice.s.notJoined(live).includes('github:bob'), 'alice sees bob didn’t join');
+    expect(alice.s.pending(live)).toEqual([]);
     await alice.s.startDm('bob');
+    expect(alice.s.notJoined(live)).toEqual([]);
     await accept(bob, 'alice');
     await talk(alice, bob, 'asked again');
   });

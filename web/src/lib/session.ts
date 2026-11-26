@@ -14,7 +14,6 @@ import {
   IdentityRegistry,
   loadDeviceIdentity,
   newDeviceId,
-  safetyNumber,
   verifyDirectory,
   wipeRoot,
   fingerprint,
@@ -174,6 +173,11 @@ export interface ChatRecord {
   readTo?: number;
   /** DM owner side: the other person quit. */
   peerLeft?: boolean;
+  /**
+   * This browser only: people whose invitation ended without them joining (declined, or it ran
+   * out), until they are invited again.
+   */
+  notJoined?: string[];
   /** Ended and deleted: nothing of it is shown or kept, only this tombstone. */
   purged?: boolean;
   /** When it was deleted (synced, newest wins): a later rejoin outranks it. */
@@ -275,25 +279,17 @@ export interface Person {
   /** Groups you share. */
   groups: Convo[];
   blocked: boolean;
-  verified: boolean;
-  /** Another browser of this account trusts a different key for them. */
-  conflict: boolean;
   firstSeen?: number;
 }
 
+/** What their public directory says about a person, against the key this account trusts for them. */
 export interface PeerInfo {
   address: string;
-  /** mismatch: the key they use in this chat is not the one published (and trusted) for them. */
-  status: LookupResult['status'] | 'error' | 'mismatch';
+  /** key-changed: they publish another key than the trusted one (a key reset). */
+  status: LookupResult['status'] | 'error';
   fingerprint?: string;
-  safety?: string;
-  verified?: boolean;
   /** When this account first saw their key (any of its browsers). */
   firstSeen?: number;
-  /** key-changed because another of this account's browsers trusts a different key (not GitHub). */
-  otherBrowser?: boolean;
-  /** Only what this account remembers: the directory hasn't confirmed the key yet. */
-  checking?: boolean;
   error?: string;
 }
 
@@ -459,7 +455,7 @@ export class Session {
   device!: DeviceStorage;
   provider!: StorageProvider & { client: { requests: number }; changes: ChangeWatch };
   registry!: IdentityRegistry;
-  /** Trusted keys and verified marks for the people this account talks to (synced). */
+  /** The key this account trusts for each person it talks to (synced). */
   contacts!: ContactBook;
   identity?: DeviceIdentity;
   chat?: Chat;
@@ -743,6 +739,8 @@ export class Session {
     void this.pruneBlobs();
     this.contacts = new ContactBook(this.db, loginFrom, (a) => {
       this.peers.delete(a);
+      // Another browser of this account accepted their new key: take it here too.
+      if (this.contacts.conflict(a)) void this.registry?.lookup(a).then((r) => this.settle(a, r)).catch(() => undefined).then(() => this.bump());
       this.bump();
     });
     await this.contacts.load();
@@ -1620,7 +1618,41 @@ export class Session {
     const members = g.members();
     const joined = new Set(members.filter((m) => !m.pending).map((m) => m.address));
     const added = members.filter((m) => m.pending).map((m) => m.address);
-    return [...new Set([...added, ...(this.records.get(g.id)?.invited ?? [])])].filter((a) => !joined.has(a));
+    const gone = new Set(this.notJoined(g));
+    return [...new Set([...added, ...(this.records.get(g.id)?.invited ?? [])])].filter((a) => !joined.has(a) && !gone.has(a));
+  }
+
+  /** People whose invitation ended without them joining (declined, or it ran out): nothing waits for them. */
+  notJoined(g: Group): string[] {
+    const r = this.records.get(g.id);
+    if (!r?.notJoined?.length) return [];
+    const members = new Set(g.members().map((m) => m.address));
+    return r.notJoined.filter((a) => !members.has(a));
+  }
+
+  private invitedChecked = new Map<string, number>();
+  /**
+   * In a chat this account runs: is someone it shows as invited still invited on GitHub? A
+   * decline normally shows up as a change in the chat ("didn’t join"); this covers the cases
+   * where it can't (they had no pre-key, or this browser wasn't in the chat yet). Asked when
+   * the chat is opened, at most once a minute.
+   */
+  async checkInvited(g: Group) {
+    const r = this.records.get(g.id);
+    if (!r || !g.active || !this.isOwner(g) || this.isUnreachable(g)) return;
+    const act = this.activities.forKey(this.convoKey(r));
+    if (act && !act.ended) return; // an invitation is going out right now
+    const members = new Set(g.members().map((m) => m.address));
+    const waiting = r.invited.filter((a) => !members.has(a) && !r.notJoined?.includes(a));
+    if (!waiting.length || Date.now() - (this.invitedChecked.get(g.id) ?? 0) < 60_000) return;
+    this.invitedChecked.set(g.id, Date.now());
+    const { active, pending } = await this.provider.channel.members(g.space);
+    const there = new Set([...active, ...pending].map((a) => a.toLowerCase()));
+    const gone = waiting.filter((a) => !there.has(a.toLowerCase()));
+    if (!gone.length) return;
+    r.notJoined = [...new Set([...(r.notJoined ?? []), ...gone])];
+    await this.saveRecord(r);
+    this.bump();
   }
 
   /** People in the chat who have joined (not just added while offline). */
@@ -1876,6 +1908,7 @@ export class Session {
         continue;
       }
       if (!r.invited.includes(res.address)) r.invited.push(res.address);
+      if (r.notJoined?.includes(res.address)) r.notJoined = r.notJoined.filter((a) => a !== res.address);
       await this.systemNote(g.id, `Invitation sent to @${login}.`);
     }
     await this.saveRecord(r);
@@ -2528,8 +2561,9 @@ export class Session {
       if (e.type === 'joined') {
         await this.systemNote(g.id, e.address === this.address ? 'You joined. Messages are end-to-end encrypted.' : `${who} joined`);
         this.peers.delete(e.address);
-        if (r.resets?.[e.address]) {
-          delete r.resets[e.address];
+        if (r.resets?.[e.address] || r.notJoined?.includes(e.address)) {
+          if (r.resets) delete r.resets[e.address];
+          r.notJoined = r.notJoined?.filter((a) => a !== e.address);
           await this.saveRecord(r);
         }
       } else if (e.type === 'key-reset') {
@@ -2549,7 +2583,12 @@ export class Session {
           await this.saveRecord(r);
         }
       } else if (e.type === 'left' && e.pending) {
+        // Declined, or the invitation ran out: nothing waits for them now. Whoever invited can ask again.
         await this.systemNote(g.id, `${who} didn’t join`);
+        if (e.address !== this.address && !r.notJoined?.includes(e.address)) {
+          r.notJoined = [...(r.notJoined ?? []), e.address];
+          await this.saveRecord(r);
+        }
       } else if (e.type === 'left') {
         // Removed by an admin (maybe us), or left on their own.
         await this.systemNote(g.id, !e.by ? `${who} left` : e.by.address === this.address ? `You removed ${who}` : `@${loginFrom(e.by.address)} removed ${who}`);
@@ -3437,14 +3476,14 @@ export class Session {
 
   /**
    * Everyone this account talks to, for the Contacts screen: people with a DM, members of its
-   * groups, and anyone whose key it remembers (synced), with trust state known without a lookup.
+   * groups, and anyone whose key it remembers (synced).
    */
   people(): Person[] {
     const by = new Map<string, Person>();
     const get = (address: string) => {
       let p = by.get(address);
       if (!p) {
-        p = { address, login: loginFrom(address), groups: [], blocked: this.blocked.has(address), verified: this.contacts.verified(address), conflict: this.contacts.conflict(address), firstSeen: this.contacts.firstSeen(address) };
+        p = { address, login: loginFrom(address), groups: [], blocked: this.blocked.has(address), firstSeen: this.contacts.firstSeen(address) };
         by.set(address, p);
       }
       return p;
@@ -3484,12 +3523,8 @@ export class Session {
     return !!want && want !== m.fingerprint;
   }
 
-  /**
-   * What to show when verifying someone. `inChat`: the root key their leaf in a chat carries
-   * (Member.fingerprint), which is what must be compared, not a fresh look at their address.
-   */
-  peer(address: string, refresh = false, inChat?: string): Promise<PeerInfo> {
-    if (inChat) return this.lookupPeer(address, inChat);
+  /** Their directory against the key this account trusts for them (cached until something changes). */
+  peer(address: string, refresh = false): Promise<PeerInfo> {
     if (refresh) this.peers.delete(address);
     let p = this.peers.get(address);
     if (!p) {
@@ -3500,61 +3535,36 @@ export class Session {
   }
 
   /**
-   * What this account already trusts for them, with no network: the remembered key and its safety
-   * number. Shown at once while the directory is checked (seconds on a busy phone).
+   * This browser trusts one key for them and the account's other browsers another, and the
+   * other one is what they publish now: a person accepted it there (Invite again, or Accept on
+   * their invitation), so it holds here too. Returns the lookup to go by.
    */
-  async knownPeer(address: string): Promise<PeerInfo | undefined> {
-    const fp = this.contacts.pinned(address);
-    if (!fp || !this.identity) return undefined;
-    const conflict = this.contacts.conflict(address);
-    return {
-      address,
-      status: conflict ? 'key-changed' : 'ok',
-      fingerprint: fp,
-      safety: await safetyNumber(this.identity.fingerprint, fp),
-      verified: !conflict && this.contacts.verified(address),
-      firstSeen: this.contacts.firstSeen(address),
-      ...(conflict ? { otherBrowser: true } : {}),
-      checking: true,
-    };
+  private async settle(address: string, r: LookupResult): Promise<LookupResult> {
+    if (r.status !== 'key-changed' || !this.contacts.conflict(address) || this.contacts.syncedKey(address) !== r.view.fingerprint) return r;
+    await this.contacts.adoptSynced(address);
+    this.peers.delete(address);
+    return this.registry.lookup(address);
   }
 
-  private async lookupPeer(address: string, inChat?: string): Promise<PeerInfo> {
+  private async lookupPeer(address: string): Promise<PeerInfo> {
     try {
-      const r = await this.registry.lookup(address);
-      // The key in the chat is neither the published one nor (after a change) the one to accept.
-      if (inChat && (r.status === 'none' || inChat !== r.view.fingerprint)) {
-        return { address, status: 'mismatch', fingerprint: inChat, safety: await safetyNumber(this.identity!.fingerprint, inChat) };
-      }
+      const r = await this.settle(address, await this.registry.lookup(address));
       if (r.status === 'none') return { address, status: 'none' };
-      const fp = r.view.fingerprint;
-      const pin = await this.registry.pins.get(address);
-      // Another browser of this account trusts a different key: same warning as a key change on GitHub.
-      const otherBrowser = r.status === 'ok' && this.contacts.conflict(address);
-      return {
-        address,
-        status: otherBrowser ? 'key-changed' : r.status,
-        fingerprint: fp,
-        safety: await safetyNumber(this.identity!.fingerprint, fp),
-        verified: r.status === 'ok' && !otherBrowser && !!pin?.verified,
-        firstSeen: this.contacts.firstSeen(address),
-        ...(otherBrowser ? { otherBrowser } : {}),
-      };
+      // This browser pinned the key they publish before it read what the account remembers,
+      // which is another key: the same warning as a change on GitHub.
+      const status = r.status === 'ok' && this.contacts.conflict(address) ? 'key-changed' : r.status;
+      return { address, status, fingerprint: r.view.fingerprint, firstSeen: this.contacts.firstSeen(address) };
     } catch (e) {
       return { address, status: 'error', error: describeError(e) };
     }
   }
 
-  async markVerified(address: string) {
-    await this.registry.markVerified(address);
-    await this.flushPersonal().catch(() => undefined);
-    this.peers.delete(address);
-    this.bump();
-  }
-
-  /** The user compared numbers and trusts the key GitHub serves now: in this browser and, through sync, all of them. */
+  /**
+   * A person chose to trust the key they publish now (Invite again, or Accept on an invitation
+   * from someone who reset): in this browser and, through sync, all of them.
+   */
   async acceptKeyChange(address: string) {
-    const r = await this.registry.lookup(address);
+    const r = await this.settle(address, await this.registry.lookup(address));
     if (r.status === 'key-changed' || (r.status === 'ok' && this.contacts.conflict(address))) {
       this.contacts.willAccept(address);
       await this.registry.acceptKeyChange(address, r.view);
