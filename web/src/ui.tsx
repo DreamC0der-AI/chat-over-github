@@ -154,15 +154,25 @@ export const Icon = {
   ),
 };
 
-export function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+/** Open dialogs, newest last: Escape closes only the one on top. */
+const openModals: object[] = [];
+
+export function Modal({ title, onClose, children, className }: { title: string; onClose: () => void; children: ReactNode; className?: string }) {
+  const close = useRef(onClose);
+  close.current = onClose;
   useEffect(() => {
-    const k = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
+    const me = {};
+    openModals.push(me);
+    const k = (e: KeyboardEvent) => e.key === 'Escape' && openModals[openModals.length - 1] === me && close.current();
     addEventListener('keydown', k);
-    return () => removeEventListener('keydown', k);
-  }, [onClose]);
+    return () => {
+      openModals.splice(openModals.indexOf(me), 1);
+      removeEventListener('keydown', k);
+    };
+  }, []);
   return (
     <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal" role="dialog" aria-modal="true" aria-label={title}>
+      <div className={`modal${className ? ' ' + className : ''}`} role="dialog" aria-modal="true" aria-label={title}>
         <div className="modal-head">
           <h3>{title}</h3>
           <button className="btn icon" onClick={onClose} aria-label="Close">{Icon.close()}</button>

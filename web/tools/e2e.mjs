@@ -218,7 +218,20 @@ try {
   await alice.page.locator('.chip', { hasText: 'carol' }).waitFor();
   // a group picture, picked in the dialog (its file input sits in the picture picker)
   await alice.page.locator('.modal .pic-picker input[type=file]').setInputFiles({ name: 'group.png', mimeType: 'image/png', buffer: PNG });
+  // crop: zoom in with the slider, drag the picture, then use it
+  const crop = alice.page.getByRole('dialog', { name: 'Crop picture' });
+  await crop.locator('.crop-stage img').waitFor();
+  await crop.getByLabel('Zoom').fill('2');
+  const box = (await crop.locator('.crop-stage').boundingBox());
+  await alice.page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await alice.page.mouse.down();
+  await alice.page.mouse.move(box.x + box.width / 2 + 30, box.y + box.height / 2 + 20, { steps: 4 });
+  await alice.page.mouse.up();
+  await alice.page.screenshot({ path: `${SHOTS}/group-picture-crop.png` });
+  await crop.getByRole('button', { name: 'Use picture' }).click();
+  await crop.waitFor({ state: 'detached' });
   await alice.page.locator('.modal .pic-picker img').waitFor();
+  check(await alice.page.getByRole('dialog', { name: 'New group' }).isVisible(), 'the crop dialog closes back into New group');
   await alice.page.screenshot({ path: `${SHOTS}/new-group-picker.png` });
   await alice.page.getByRole('button', { name: 'Create group' }).click();
   await alice.page.locator('.sys', { hasText: 'Invitation sent to @carol' }).waitFor({ timeout: 30000 });
