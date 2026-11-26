@@ -128,7 +128,14 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
   const joined = !!live && live.members().length > 1;
   // A group can be written in alone: people invited later join from then on. A DM waits for the other person.
   const canWrite = !!live && (!dm || joined);
-  const peerLeft = !!live && dm && !!liveRec?.peerLeft && !joined;
+  // People who reset their key and haven't been invited back. In a DM the chat waits for that.
+  const resets = session.resetPeople(convo);
+  // (Once they are in the live room again, with their new key, it's over.)
+  const peerReset = dm && !!peerAddr && !joined && (resets.includes(peerAddr) || last0(convo)?.ended?.how === 'reset');
+  const amAdmin = !!live && live.policy.admins.includes(session.identity?.fingerprint ?? '');
+  const groupResets = !dm && live && amAdmin ? resets.filter((a) => !live.members().some((m) => m.address === a && !session.keyMismatch(m))) : [];
+  const peerLeft = !!live && dm && !!liveRec?.peerLeft && !joined && !peerReset;
+  const inviteBack = (a: string) => run(async () => go(`/c/${encodeURIComponent(await session.inviteBack(convo, a))}`));
   const last = convo.rooms[convo.rooms.length - 1]!;
   const space = group?.space ?? last.space;
   const startNew = () => run(async () => go(`/c/${encodeURIComponent(await session.startDm(loginFrom(peerAddr!)))}`));
@@ -158,7 +165,19 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
           <button className="btn" onClick={() => setVerify(peerAddr)}>Review</button>
         </div>
       )}
-      {!forged && peer?.status === 'key-changed' && (
+      {peerReset && (
+        <div className="flash warn banner">
+          <span><strong>{title} reset their encryption key.</strong> <Hint text={`Their old key can't be used any more. Invite ${title} again to keep chatting: their app asks them to accept, and your earlier messages stay here.`} /></span>
+          {!session.blocked.has(peerAddr!) && <button className="btn primary" disabled={busy} onClick={() => inviteBack(peerAddr!)}>{busy ? <><span className="spinner" /> Inviting…</> : 'Invite again'}</button>}
+        </div>
+      )}
+      {groupResets.map((a) => (
+        <div key={a} className="flash warn banner">
+          <span><strong>@{loginFrom(a)} reset their encryption key.</strong> <Hint text="Their old key was taken out of the group. Invite them again to let the new key in; they won't see earlier messages." /></span>
+          <button className="btn" disabled={busy} onClick={() => inviteBack(a)}>{busy ? <span className="spinner" /> : 'Invite again'}</button>
+        </div>
+      ))}
+      {!forged && !peerReset && peer?.status === 'key-changed' && (
         <div className="flash warn banner">
           <span><strong>{loginFrom(peer.address)}'s identity key changed.</strong> <Hint text="They may have a new device or reset their account, or someone may be impersonating them. Compare safety numbers before you trust it." /></span>
           <button className="btn" onClick={() => setVerify(peer.address)}>Review</button>
@@ -170,7 +189,7 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
           {session.isOwner(live!) && <button className="btn danger" disabled={busy || !!busyLabel} onClick={() => run(async () => { if (await ask(CLOSE_ASK)) await session.chatAction(convo.key, 'Closing chat…', () => session.closeChat(live!)); })}>{busyLabel ? <><span className="spinner" /> Closing…</> : 'Close chat'}</button>}
         </div>
       )}
-      {!live && (
+      {!live && !peerReset && (
         <div className="flash banner">
           <span>
             <strong>{convo.unreachable ? 'Can\u2019t reach this chat. Retrying…' : group ? 'This chat is no longer available.' : `${last.ended ? endedText(session, last.ended, dm) : 'This chat has ended'}.`}</strong>{' '}
@@ -236,7 +255,7 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
         </div>
       </div>
       {live ? (
-        <Composer session={session} group={live} disabledReason={busyLabel ?? (peerLeft ? `${title} left this chat` : !canWrite ? 'Waiting for the other person to join…' : undefined)} error={err} />
+        <Composer session={session} group={live} disabledReason={busyLabel ?? (peerReset ? `Paused until ${title} is invited again` : peerLeft ? `${title} left this chat` : !canWrite ? 'Waiting for the other person to join…' : undefined)} error={err} />
       ) : (
         <div className="composer ended">This chat has ended</div>
       )}
@@ -244,6 +263,11 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
       {verify && <VerifyModal session={session} address={verify} fingerprint={verify === peerAddr ? peerKey?.fingerprint : undefined} onClose={() => setVerify(undefined)} />}
     </>
   );
+}
+
+/** The newest room of a conversation. */
+function last0(c: Convo) {
+  return c.rooms[c.rooms.length - 1];
 }
 
 /** A green shield once verified, a warning when the key changed, nothing otherwise: verifying is optional and lives in Contacts. Marks sync across your browsers. */

@@ -745,3 +745,7 @@ body.resizing iframe, body.resizing img { pointer-events: none; }
 .notice.warn .notice-icon { color: var(--attention); }
 .notice-float { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 65; width: min(420px, calc(100vw - 32px)); border-radius: var(--r-lg); background: var(--canvas); box-shadow: var(--shadow-md); }
 @media (max-width: 760px) { .notice-float { bottom: 76px; } } /* clear of the account bar under the chat list */
+
+/* Invitation from someone who reset their key: said before Accept. */
+.invite-reset { display: flex; align-items: center; gap: 4px; color: var(--attention); }
+.reset-costs { margin: 0; padding-left: 20px; display: grid; gap: 2px; color: var(--muted); }

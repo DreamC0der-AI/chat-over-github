@@ -134,6 +134,30 @@ describe('group walkthroughs', () => {
     await walk.send('carol');
     await walk.check();
   });
+
+  it('a member resets their key: everyone is told, the old key is taken out, invited back they read only what follows', async () => {
+    w = await world();
+    const { people, codes } = await cast(w, ['alice', 'bob', 'carol']);
+    const walk = new Walk(w, people, 'alice', 'Reset club');
+    await walk.create(['bob', 'carol']);
+    await walk.accept('bob');
+    await walk.accept('carol');
+    await walk.send('bob');
+    await walk.newBrowser('bob', codes.get('bob')!);
+    await walk.check();
+    const { old } = await walk.resetKey('bob');
+    await walk.send('alice');
+    await walk.send('carol');
+    await walk.check();
+    expect(await walk.notes('carol')).toContain('@bob was removed after resetting their key');
+    // bob's other browser had the old key: it stops.
+    await w.until(() => old[1]!.s.phase === 'reset-elsewhere', "bob's other browser says the key was reset");
+    await walk.inviteBack('bob');
+    await walk.send('carol');
+    await walk.accept('bob');
+    await walk.send('bob');
+    await walk.check();
+  });
 });
 
 describe('DM walkthroughs', () => {

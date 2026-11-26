@@ -190,6 +190,7 @@ export function endedText(session: Session, e: NonNullable<import('../lib/sessio
     case 'moved': return 'Continued in a newer chat';
     case 'quit': return `You left ${what}`;
     case 'removed': return e.by ? `${who} removed you` : `You were removed from ${what}`;
+    case 'reset': return dm ? `${who} reset their encryption key` : `Ended: ${e.by ? `the admin ${who}` : 'the admin'} reset their key`;
   }
 }
 
@@ -291,6 +292,12 @@ function InviteRow({ session, inv }: { session: Session; inv: PendingInvite }) {
           </span>
           {why && <Hint text={why} />}
         </div>
+        {inv.keyReset && (
+          <div className="small invite-reset" role="note">
+            {Icon.alert(12)} {from} reset their encryption key. <Hint text={`Accepting trusts ${from}'s new key. If you didn't expect this, check with them first some other way.`} />
+          </div>
+        )}
+        {d?.afterReset && !inv.keyReset && <div className="small muted">Invited back after your key reset</div>}
         <div className="invite-kind small muted">
           {d?.kind === 'group' ? <><span className="kind-badge">{Icon.people()} Group</span>{d.people && d.people > 1 ? <span>{d.people} people</span> : null}</>
             : d?.kind === 'dm' ? <span className="kind-badge">{Icon.person()} Direct chat</span>

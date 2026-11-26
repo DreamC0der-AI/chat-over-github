@@ -139,7 +139,6 @@ export function Restore({ session }: { session: Session }) {
   const { busy, error, run } = useAction();
   const [code, setCode] = useState('');
   const [reset, setReset] = useState(false);
-  const [confirm, setConfirm] = useState('');
   return (
     <Frame title="Add this browser to your account">
       <div className="box">
@@ -163,26 +162,69 @@ export function Restore({ session }: { session: Session }) {
           </form>
         </div>
       </div>
+      {!reset ? (
+        <p className="center"><button className="btn link" onClick={() => setReset(true)}>Lost your recovery code?</button></p>
+      ) : (
+        <div className="box">
+          <div className="box-header"><h3>Reset your encryption key</h3></div>
+          <div className="box-body">
+            <ResetKeyForm session={session} onDone={() => location.reload()} />
+          </div>
+        </div>
+      )}
+    </Frame>
+  );
+}
+
+/**
+ * Reset the encryption key when the recovery code is lost. The GitHub account (the identity
+ * people know) stays; only the key is new, so people invite it back the normal way.
+ */
+export function ResetKeyForm({ session, onDone }: { session: Session; onDone: () => void }) {
+  const { busy, error, run } = useAction();
+  const [confirm, setConfirm] = useState('');
+  return (
+    <div className="stack">
+      <div className="flash">
+        <strong>Still signed in on another browser?</strong> Keep using that one. It has your key, so nothing is lost.
+      </div>
+      <p>
+        <strong>{session.login}</strong> gets a new encryption key. Your GitHub account stays the same.{' '}
+        <Hint text={<>Your public key in <span className="mono">keyhold-id</span> and your encrypted backup in <span className="mono">{session.homeRepo}</span> are made again. You leave other people's chat repos, and chats only you ran are deleted.</>} />
+      </p>
+      <ul className="reset-costs">
+        <li>Your chats and contacts start empty.</li>
+        <li>People see that you reset your key and invite you again.</li>
+        <li>Groups where you are the only admin end.</li>
+      </ul>
+      <label className="field">
+        <span>Type <code>{session.login}</code> to confirm</span>
+        <input className="input" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="off" spellCheck={false} />
+      </label>
+      <ErrorFlash error={error} />
+      <button
+        className="btn danger block"
+        disabled={confirm.trim().toLowerCase() !== session.login || busy}
+        onClick={() => run(async () => { await session.resetIdentity(); onDone(); })}
+      >
+        {busy ? <><span className="spinner" /> Resetting…</> : 'Reset my encryption key'}
+      </button>
+    </div>
+  );
+}
+
+/** This account's key was reset on another browser: this browser's key is dead. */
+export function ResetElsewhere({ session }: { session: Session }) {
+  const { busy, error, run } = useAction();
+  return (
+    <Frame title="Your key was reset">
       <div className="box">
         <div className="box-body stack">
-          {!reset ? (
-            <button className="btn link" onClick={() => setReset(true)}>Lost your recovery code?</button>
-          ) : (
-            <>
-              <p>You can start over with a new identity. Your contacts will see that your key changed, and your current chats stop working for you.</p>
-              <label className="field">
-                Type <code>{session.login}</code> to delete <code>keyhold-id</code> and <code>{session.homeRepo}</code>
-                <input className="input" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
-              </label>
-              <button
-                className="btn danger block"
-                disabled={confirm.trim().toLowerCase() !== session.login || busy}
-                onClick={() => run(async () => { await session.resetIdentity(); location.reload(); })}
-              >
-                Start over with a new identity
-              </button>
-            </>
-          )}
+          <p><strong>{session.login}</strong>'s encryption key was reset on another browser, so this browser's chats can't be used any more. <Hint text="If you didn't do this, someone may have signed in to your GitHub account. Secure it on GitHub first." /></p>
+          <ErrorFlash error={error} />
+          <button className="btn primary block" disabled={busy} onClick={() => run(async () => { await session.forgetBrowser(); location.hash = ''; location.reload(); })}>
+            {busy ? <span className="spinner" /> : 'Set up this browser again'}
+          </button>
         </div>
       </div>
     </Frame>

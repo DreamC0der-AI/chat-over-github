@@ -14,7 +14,7 @@
     "live:contract": "esbuild scripts/live-contract.ts --bundle --platform=node --format=esm --outfile=scripts/live-contract.mjs && node scripts/live-contract.mjs"
   },
   "dependencies": {
-    "keyhold": "github:DreamC0der-AI/keyhold#c0fa307308510bdd93920098edf08a391c839b88"
+    "keyhold": "github:DreamC0der-AI/keyhold#b2c467f3133ea5c3cbb33222ec174a2c3a01dfab"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
