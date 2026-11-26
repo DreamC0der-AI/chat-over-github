@@ -297,8 +297,10 @@ try {
   check(progressShown, 'second device shows a progress bar while it loads and adds chats');
   check(true, 'second device joined the DM');
   await openChat(alice2, 'bob');
-  await alice2.page.locator('.sys.divider', { hasText: 'Earlier messages aren’t on this browser' }).waitFor({ timeout: 10000 });
-  check(true, 'second device says earlier messages are elsewhere');
+  // Earlier messages come from the history backup in alice's home repo.
+  await bubble(alice2, 'hi alice, it works').waitFor({ timeout: 30000 });
+  check(true, 'second device shows earlier messages from the history backup');
+  check((await alice2.page.locator('.sys.divider', { hasText: 'Earlier messages aren’t on this browser' }).count()) === 0, 'and does not say they are elsewhere');
   // The verified mark from alice's first browser came with sync: no new first contact here.
   await alice2.page.locator('.convo-head').getByRole('button', { name: 'Verified', exact: true }).waitFor({ timeout: 30000 });
   check(true, 'second device shows the verified mark from the first');
