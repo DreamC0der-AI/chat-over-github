@@ -19,6 +19,11 @@ type Msg =
   | { type: 'closure-removed'; id: string };
 
 const PING_MS = 45_000;
+/**
+ * A ping not answered by then means the connection is dead even if the browser still calls it
+ * open (after sleep or a network switch it can take minutes to notice): drop it and reconnect.
+ */
+const PONG_MS = 10_000;
 const MAX_BACKOFF_MS = 5 * 60_000;
 
 export class InboxSocket {
@@ -31,6 +36,7 @@ export class InboxSocket {
   private failures = 0;
   private ping?: ReturnType<typeof setInterval>;
   private retry?: ReturnType<typeof setTimeout>;
+  private pongDue?: ReturnType<typeof setTimeout>;
 
   constructor(
     private readonly workerUrl: string,
@@ -52,15 +58,47 @@ export class InboxSocket {
     document.removeEventListener('visibilitychange', this.wake);
     clearTimeout(this.retry);
     clearInterval(this.ping);
+    clearTimeout(this.pongDue);
     this.ws?.close(1000);
     this.setLive(false);
   }
 
   private wake = () => {
-    if (this.stopped || document.visibilityState === 'hidden' || this.ws) return;
+    if (this.stopped || document.visibilityState === 'hidden') return;
+    // Back to the tab or online: a socket that looks open may have died meanwhile; ask it now.
+    if (this.ws) return this.probe(this.ws);
     clearTimeout(this.retry);
     void this.connect();
   };
+
+  /** Ping, and give up on the socket if no pong comes back in time. */
+  private probe(ws: WebSocket) {
+    if (ws.readyState !== WebSocket.OPEN || this.pongDue) return;
+    try {
+      ws.send('ping');
+    } catch {
+      return this.drop(ws);
+    }
+    this.pongDue = setTimeout(() => this.drop(ws), PONG_MS);
+  }
+
+  /** Forget a socket that stopped answering, and connect again at once. */
+  private drop(ws: WebSocket) {
+    if (this.ws !== ws) return;
+    clearInterval(this.ping);
+    clearTimeout(this.pongDue);
+    this.pongDue = undefined;
+    ws.onclose = ws.onmessage = ws.onopen = null;
+    try {
+      ws.close();
+    } catch {
+      // already gone
+    }
+    this.ws = undefined;
+    this.setLive(false);
+    clearTimeout(this.retry);
+    void this.connect();
+  }
 
   private async connect() {
     if (this.stopped || this.ws) return;
@@ -83,7 +121,12 @@ export class InboxSocket {
     }
     this.ws = ws;
     ws.onmessage = (ev) => {
-      if (ev.data === 'pong' || typeof ev.data !== 'string') return;
+      if (ev.data === 'pong') {
+        clearTimeout(this.pongDue);
+        this.pongDue = undefined;
+        return;
+      }
+      if (typeof ev.data !== 'string') return;
       let msg: Msg;
       try {
         msg = JSON.parse(ev.data) as Msg;
@@ -95,10 +138,12 @@ export class InboxSocket {
     ws.onopen = () => {
       clearInterval(this.ping);
       // Keeps proxies from dropping an idle socket. The Worker answers without waking up.
-      this.ping = setInterval(() => ws.readyState === WebSocket.OPEN && ws.send('ping'), PING_MS);
+      this.ping = setInterval(() => this.probe(ws), PING_MS);
     };
     ws.onclose = () => {
       clearInterval(this.ping);
+      clearTimeout(this.pongDue);
+      this.pongDue = undefined;
       if (this.ws === ws) this.ws = undefined;
       const wasLive = this.live;
       this.setLive(false);

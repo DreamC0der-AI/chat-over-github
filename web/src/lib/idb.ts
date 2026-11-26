@@ -95,6 +95,10 @@ export class Db {
   del(store: StoreName, key: IDBValidKey): Promise<void> {
     return this.run(store, 'readwrite', (s) => { s.delete(key); }).then(() => undefined);
   }
+  /** Delete several keys in one transaction. */
+  delMany(store: StoreName, keys: IDBValidKey[]): Promise<void> {
+    return this.run(store, 'readwrite', (s) => { for (const k of keys) s.delete(k); }).then(() => undefined);
+  }
   async keys(store: StoreName, prefix = ''): Promise<string[]> {
     const all = await this.run<IDBValidKey[]>(store, 'readonly', (s) => s.getAllKeys());
     return (all as string[]).filter((k) => typeof k === 'string' && k.startsWith(prefix));

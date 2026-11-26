@@ -309,6 +309,11 @@ const FULL_SYNC_ACTIVE_MS = at(12_000);
 /** A quiet chat's folders are listed in full this often (its change check runs far more often). */
 const FULL_SYNC_IDLE_MS = at(10 * 60_000);
 const FULL_SYNC_WARM_MS = at(30_000);
+/**
+ * A tab in the background lists its chats in full this rarely: enough that a message GitHub's
+ * change answers missed (they can lag) still arrives before the mail cursor moves past its day.
+ */
+const FULL_SYNC_HIDDEN_MS = at(30 * 60_000);
 const SPACE_SCAN_MS = at(60_000);
 const SPACE_SCAN_PENDING_MS = at(15_000);
 const INVITE_RETRY_MS = at(10_000);
@@ -323,12 +328,18 @@ const JOINS_AT_ONCE = 3;
 /** Files kept across reloads by content hash (see blobStore), and how many before starting over. */
 const BLOB_PREFIX = 'blob:';
 const BLOBS_KEPT_MAX = 1500;
+const BLOB_PRUNE_MS = 60 * 60_000;
 /** A GitHub read that has not answered by then is given up (and retried by the next step). */
 const REQUEST_TIMEOUT_MS = 20_000;
 /** An answer slower than this is listed in Settings > Connection. */
 const SLOW_REQUEST_MS = 5_000;
-/** Writes can carry a picture over a slow link: more time, then the same. */
+/**
+ * Writes can carry a picture over a slow link: more time, then the same, plus time for the body
+ * at a slow upload speed (a 10 MB attachment is about 13 MB of base64). The timer stops when the
+ * answer starts, so downloads are never cut off part way.
+ */
 const WRITE_TIMEOUT_MS = 90_000;
+const WRITE_SLOWEST_BYTES_PER_S = 16_000;
 /** Chats checked at once in a sync step: each check is a GitHub round trip, slow on a phone. */
 const CHECKS_AT_ONCE = 4;
 // Rotation itself is weekly (keyhold DEFAULT_PREKEYS); this is only how often to look.
@@ -566,7 +577,7 @@ export class Session {
       // A phone switching networks can leave a request hanging for minutes, and every chat's
       // sync with it: give up and let the next step try again, like any dropped connection.
       const ctl = new AbortController();
-      const t = setTimeout(() => ctl.abort(), !init.method || init.method === 'GET' ? REQUEST_TIMEOUT_MS : WRITE_TIMEOUT_MS);
+      const t = setTimeout(() => ctl.abort(), !init.method || init.method === 'GET' ? REQUEST_TIMEOUT_MS : WRITE_TIMEOUT_MS + ((init.body?.length ?? 0) * 1000) / WRITE_SLOWEST_BYTES_PER_S);
       const t0 = Date.now();
       try {
         const r = await fetch(url, { ...init, headers: { ...(init.headers ?? {}), Authorization: `Bearer ${token}` }, cache: 'no-store', signal: ctl.signal });
@@ -641,15 +652,22 @@ export class Session {
     this.bump();
   }
 
-  /** The kept files are only a cache: when there are too many, start over. */
+  /**
+   * The kept files are only a cache: past the cap, some go (by hash, so any of them), down to
+   * three quarters of it. Checked at start and every hour, so a tab left open stays bounded and
+   * a reload doesn't download everything again.
+   */
   private async pruneBlobs() {
+    this.lastBlobPrune = Date.now();
     try {
       const keys = await this.db.keys('kv', BLOB_PREFIX);
-      if (keys.length > BLOBS_KEPT_MAX) for (const k of keys) await this.db.del('kv', k);
+      if (keys.length <= BLOBS_KEPT_MAX) return;
+      await this.db.delMany('kv', keys.slice(0, keys.length - Math.floor(BLOBS_KEPT_MAX * 0.75)));
     } catch {
-      /* the next start tries again */
+      /* the next check tries again */
     }
   }
+  private lastBlobPrune = 0;
 
   /** The provider needs the install: before it, GitHub hides every repo from the app. */
   private async makeProvider() {
@@ -2569,7 +2587,7 @@ export class Session {
    * Run every check now instead of when its timer comes due, and resolve once that full sync step
    * has finished. The schedule is untouched otherwise.
    */
-  async syncNow(): Promise<void> {
+  async syncNow(opts: { listInFull?: boolean } = {}): Promise<void> {
     if (this.stopped || !this.chat) return;
     await this.syncStarting;
     if (this.stopped) return;
@@ -2579,7 +2597,9 @@ export class Session {
     this.lastFullPull = 0;
     this.lastFlush = 0;
     this.lastCheck.clear();
-    this.lastFullSync.clear();
+    // listInFull: false runs only the change checks, as most timed steps do (tests use it to see
+    // what the app does between its full listings).
+    if (opts.listInFull !== false) this.lastFullSync.clear();
     this.lastSpaceScan = 0;
     for (const inv of this.invites.values()) inv.nextTry = 0;
     for (const l of this.lost.values()) l.next = 0;
@@ -2650,7 +2670,7 @@ export class Session {
       // answer can lag behind a push, and a list of changes is easier to get wrong than a
       // listing, so the chat's folders are also listed in full every little while: often for
       // the open chat and busy chats, now and then for the rest.
-      const fallback = hidden ? Infinity : this.onScreen(g.id) ? FULL_SYNC_ACTIVE_MS : warm ? FULL_SYNC_WARM_MS : FULL_SYNC_IDLE_MS;
+      const fallback = hidden ? FULL_SYNC_HIDDEN_MS : this.onScreen(g.id) ? FULL_SYNC_ACTIVE_MS : warm ? FULL_SYNC_WARM_MS : FULL_SYNC_IDLE_MS;
       // A chat whose last sync failed gets a full one again (not more often than an open chat's),
       // so its warning clears once GitHub answers, even if nothing new arrived meanwhile.
       const retry = this.groupErrors.has(g.id) ? (hidden ? HIDDEN_POLL_MS : FULL_SYNC_ACTIVE_MS) : fallback;
@@ -2709,6 +2729,7 @@ export class Session {
     }
     await this.resolveDuplicates().catch(() => undefined);
     await this.syncPersonal(now, hidden);
+    if (now - this.lastBlobPrune > BLOB_PRUNE_MS) void this.pruneBlobs();
     const due: Group[] = [];
     for (const g of [...this.chat.groups.values()]) {
       if (!g.active) {

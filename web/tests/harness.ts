@@ -30,6 +30,10 @@ export class Browser {
     await this.s.restoreIdentity(code);
     this.since = Date.now();
   }
+  /** One sync step that only runs the change checks: chats listed in full lately aren't listed again. */
+  async check() {
+    await this.s.syncNow({ listInFull: false });
+  }
   /** Run this browser's sync step n times. */
   async sync(n = 1) {
     for (let i = 0; i < n; i++) await this.s.syncNow();

@@ -876,13 +876,21 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
         const first = Math.floor(from / 1000);
         const shard = String(first).padStart(5, '0');
         const usable = (es: DirEntry[]) => es.length > 0 && !es.some((e) => Number(e.name) % 1000 === 999);
+        // Every entry of the shard from its first one, none missing. A listing is one snapshot, so
+        // it always is; the view (a listing plus the changes since) is not when the listing came
+        // from a GitHub copy a moment behind the head read before it. Handing keyhold a log with
+        // an entry missing would make it file the next one at the wrong index, for good.
+        const gapless = (es: DirEntry[]) => es.every((e, i) => Number(e.name) === first * 1000 + i);
         const v = await fresh(space, 'logGen');
         const head = v.head;
         if (head && v.log?.shard === shard && !v.relistLog) {
           // Known from a listing plus the changes since: no listing, and entries read before
           // (the last one is read again each time, to see that the log was not rewritten) cost nothing.
           const known = [...v.log.entries.values()].sort(byName);
-          if (usable(known)) return readAll(ow, re, known.filter((e) => Number(e.name) >= from));
+          // keyhold reads from an entry it has (to see it unchanged): the view must have it too.
+          const reaches = known.length > 0 && Number(known[known.length - 1]!.name) >= from;
+          if (usable(known) && gapless(known) && reaches) return readAll(ow, re, known.filter((e) => Number(e.name) >= from));
+          // Not usable as it is: the listing below starts the view again.
         }
         const direct = (await listDir(ow, re, `log/${shard}`, false)).filter((e) => e.type === 'file' && /^\d{8}$/.test(e.name));
         if (usable(direct)) {
@@ -918,6 +926,11 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
         }
         const r = await putFile(ow, re, logPath(index), entry, null);
         if (r === 'ok') appended.set(viewKey(ow, re), index);
+        else {
+          // Taken already: the next read lists the log again, in case the view is what was behind.
+          const v = views.get(viewKey(ow, re));
+          if (v) v.relistLog = true;
+        }
         return r;
       },
     },

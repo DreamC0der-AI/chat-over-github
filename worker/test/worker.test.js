@@ -53,6 +53,11 @@ const gh = http.createServer((req, res) => {
       }
       return send(200, { access_token: "x" });
     }
+    // An account over its GitHub rate limit.
+    if (req.headers.authorization === "Bearer tok-limited") {
+      res.writeHead(403, { "Content-Type": "application/json", "x-ratelimit-remaining": "0" });
+      return res.end(JSON.stringify({ message: "API rate limit exceeded" }));
+    }
     const me = users[(req.headers.authorization || "").replace("Bearer ", "")];
     if (!me) return send(401, {});
     if (u.pathname === "/user") return send(200, me);
@@ -75,17 +80,13 @@ before(async () => {
   mkdirSync(new URL("../public", import.meta.url), { recursive: true }); // wrangler wants the assets folder to exist
   await new Promise((r) => gh.listen(0, "127.0.0.1", r));
   const ghUrl = `http://127.0.0.1:${gh.address().port}`;
-  // Entries left in the old KV inbox (from before the move to Durable Objects) for carol.
+  // An entry left in the old KV inbox (from before the move to Durable Objects) for carol: no
+  // longer copied (everything there expired by 2026-11-24).
   persist = mkdtempSync(join(tmpdir(), "inbox-test-"));
   const proxy = await getPlatformProxy({ persist: { path: join(persist, "v3") } }) // the folder wrangler dev uses under persistTo;
   const soon = new Date(Date.now() + 3 * 864e5).toISOString();
   const old = { id: 555, from: "bob", from_id: 1, created_at: new Date().toISOString(), expires_at: soon };
   await proxy.env.INVITES.put("inv:4:555", JSON.stringify(old), { expirationTtl: 3 * 86400, metadata: old });
-  const gone = { ...old, id: 556, expires_at: new Date(Date.now() - 1000).toISOString() };
-  await proxy.env.INVITES.put("inv:4:556", JSON.stringify(gone), { metadata: gone });
-  const tag = "ab".repeat(16);
-  const cls = { id: `1:${tag}`, from: "bob", from_id: 1, tag, at: new Date().toISOString() };
-  await proxy.env.INVITES.put(`cls:4:1:${tag}`, JSON.stringify(cls), { expirationTtl: 86400, metadata: cls });
   await proxy.dispose();
 
   worker = await unstable_dev("src/index.js", {
@@ -224,19 +225,15 @@ test("the socket needs a valid token and an allowed origin", async () => {
   assert.equal((await call("GET", "/inbox", "tok-alice")).status, 426);
 });
 
-test("pending entries from the old KV inbox are copied once, expired ones are not", async () => {
-  let r = await call("GET", "/invites", "tok-carol");
-  assert.deepEqual((await r.json()).invites.map((i) => i.id), [555]);
-  r = await call("GET", "/closures", "tok-carol");
-  assert.equal((await r.json()).closures.length, 1);
-  // Deleted entries stay deleted (no second copy from KV).
-  assert.equal((await call("DELETE", "/invites/555", "tok-carol")).status, 200);
-  const s = socket("tok-carol");
-  await s.opened;
-  const snap = await s.next("snapshot");
-  assert.deepEqual(snap.invites, []);
-  assert.equal(snap.closures.length, 1);
-  s.ws.close();
+test("GitHub's rate limit is passed on as one, not as \"not found\"", async () => {
+  const r = await call("GET", "/invites", "tok-limited");
+  assert.equal(r.status, 429);
+  assert.match((await r.json()).error, /rate limit/);
+});
+
+test("the old KV inbox is not read any more", async () => {
+  const r = await call("GET", "/invites", "tok-carol");
+  assert.deepEqual((await r.json()).invites, []);
 });
 
 test("token exchange adds the secret; device flow is gone", async () => {
@@ -251,14 +248,15 @@ test("token exchange adds the secret; device flow is gone", async () => {
 });
 
 test("a refresh asked again (answer lost while asleep) gets the same answer, once GitHub spent the token", async () => {
-  const first = await (await call("POST", "/oauth/token", null, { refresh_token: "r-lost" })).json();
+  const rk = "l".repeat(22);
+  const first = await (await call("POST", "/oauth/token", null, { refresh_token: "r-lost", retry_key: rk })).json();
   assert.ok(first.access_token);
   const n = refreshes;
-  const again = await (await call("POST", "/oauth/token", null, { refresh_token: "r-lost" })).json();
+  const again = await (await call("POST", "/oauth/token", null, { refresh_token: "r-lost", retry_key: rk })).json();
   assert.deepEqual(again, first);
   assert.equal(refreshes, n, "GitHub was not asked again");
   // Another refresh token gets its own answer, never this one.
-  const other = await (await call("POST", "/oauth/token", null, { refresh_token: "r-other" })).json();
+  const other = await (await call("POST", "/oauth/token", null, { refresh_token: "r-other", retry_key: rk })).json();
   assert.notEqual(other.access_token, first.access_token);
   // A dead refresh token GitHub turns down is passed through, not stored.
   spent.add("r-dead");
@@ -368,11 +366,10 @@ test("a refresh replayed with the spent refresh token but without the app's retr
   // Anyone else with the old refresh token: no cached answer, and GitHub says it is spent.
   assert.equal((await (await call("POST", "/oauth/token", null, { refresh_token: "r-keyed" })).json()).error, "bad_refresh_token");
   assert.equal((await (await call("POST", "/oauth/token", null, { refresh_token: "r-keyed", retry_key: "z".repeat(22) })).json()).error, "bad_refresh_token");
-  assert.equal(refreshes, n);
   assert.equal((await call("POST", "/oauth/token", null, { refresh_token: "r-keyed", retry_key: "short" })).status, 400);
 });
 
-test("a refresh from an app without a retry key is kept 60 seconds, a keyed one 10 minutes", async () => {
+test("a refresh without a retry key is not kept, a keyed one is kept 10 minutes", async () => {
   await call("POST", "/oauth/token", null, { refresh_token: "r-ttl-old" });
   await call("POST", "/oauth/token", null, { refresh_token: "r-ttl-new", retry_key: "q".repeat(22) });
   const id = async (rt, retryKey) => {
@@ -390,8 +387,8 @@ test("a refresh from an app without a retry key is kept 60 seconds, a keyed one 
       assert.ok(e, `${rt} cached`);
       return e.expiration - Date.now() / 1000;
     };
-    const old = await ttl("r-ttl-old");
-    assert.ok(old > 30 && old <= 61, `legacy ttl ${old}`);
+    const oldName = await id("r-ttl-old");
+    assert.ok(!keys.some((x) => x.name === oldName), "no kept answer without a retry key");
     const keyed = await ttl("r-ttl-new", "q".repeat(22));
     assert.ok(keyed > 540 && keyed <= 601, `keyed ttl ${keyed}`);
   } finally {

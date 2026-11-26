@@ -16,8 +16,8 @@ GITHUB_CLIENT_ID = "Iv23liFOHVM634uq8c39"
 # `npm run dev` adds http://localhost:5173 for local work (see package.json), never the deployed Worker.
 ALLOWED_ORIGINS = "https://chat-over-github.akagishigerutokyo.workers.dev"
 
-# The old invite inbox, read once per user to copy pending entries into their Durable Object.
-# Everything in it expires by 2026-11-24; after that this binding can go.
+# Keeps each token refresh's answer for 10 minutes ("rt:" keys, see src/index.js). Until
+# 2026-11-17 it also held the invite inbox.
 [[kv_namespaces]]
 binding = "INVITES"
 id = "f343b316d0984406897960fab255fb93"
@@ -35,7 +35,7 @@ new_sqlite_classes = ["Inbox"]
 
 # Rate limits (Workers rate limiting binding; counted per Cloudflare location, approximate). The code skips a limit whose binding is missing. namespace_id is any number unique
 # in the account.
-# OAuth calls per client IP: sign-in, refresh, and device-flow polling (one poll every 5 s).
+# OAuth calls per client IP: sign-in and token refresh.
 [[ratelimits]]
 name = "OAUTH_LIMIT"
 namespace_id = "7301"

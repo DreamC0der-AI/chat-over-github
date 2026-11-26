@@ -30,6 +30,10 @@
  *                                               //   TypeError('Failed to fetch')
  *     listingLimit: 1000,                       // Contents folder listings stop after N entries
  *                                               //   (sorted by name), as GitHub's do at 1,000
+ *     laggingListing: { match: 'GET .*contents/log/' },
+ *                                               // a Contents folder listing leaves out the folder's
+ *                                               //   newest file (by name), as a GitHub copy a commit
+ *                                               //   behind the head would
  *   };
  *
  * Each rule (`FaultRule`) fires on requests whose "METHOD /decoded/path" matches `match` (a regexp
@@ -102,6 +106,7 @@ export interface Faults {
   serverError?: Rules<{ status?: number }>;
   lostReply?: Rules;
   listingLimit?: number;
+  laggingListing?: Rules;
 }
 
 /** mulberry32: small, seeded, deterministic. */
@@ -378,6 +383,14 @@ export class MockGitHub {
         for (const [name, files] of sub) names.set(name, { type: 'dir', sha: this.treeOf(files), size: 0 });
         if (names.size === 0) return resp(404, { message: 'Not Found' });
         let list = [...names].map(([name, v]) => ({ name, path: prefix + name, sha: v.sha, size: v.size, type: v.type }));
+        if (this.fault(this.faultState?.f.laggingListing, { method, path: `/repos/${r.owner}/${r.name}/${rest}`, user })) {
+          const newest = list.filter((e) => e.type === 'file').sort((a, b) => (a.name < b.name ? 1 : -1))[0];
+          if (newest) {
+            list = list.filter((e) => e !== newest);
+            this.faultLog.push(`laggingListing GET ${path}`);
+            if (!list.length) return resp(404, { message: 'Not Found' });
+          }
+        }
         const limit = this.faultState?.f.listingLimit;
         if (limit !== undefined && list.length > limit) {
           list = list.sort((a, b) => (a.name < b.name ? -1 : 1)).slice(0, limit);

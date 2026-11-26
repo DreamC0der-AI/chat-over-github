@@ -102,3 +102,17 @@ describe('reloading the app', () => {
     await again.s.syncNow(); // the reopened chat runs its sync step again
   });
 });
+
+describe('the files kept across reloads', () => {
+  it('past the cap, a quarter are dropped, not all of them', async () => {
+    w = await world();
+    const alice = await w.browser('alice');
+    await alice.setup();
+    for (let i = 0; i < 1600; i++) await alice.s.db.put('kv', new Uint8Array([i & 255]), `blob:${i.toString(16).padStart(40, '0')}`);
+    const again = await w.reopen(alice);
+    await w.until(async () => (await again.s.db.keys('kv', 'blob:')).length <= 1200, 'pruned');
+    const left = (await again.s.db.keys('kv', 'blob:')).length;
+    expect(left).toBeGreaterThanOrEqual(1125);
+    expect(left).toBeLessThanOrEqual(1200);
+  });
+});
