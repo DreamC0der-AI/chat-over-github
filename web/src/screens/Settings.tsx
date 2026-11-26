@@ -5,6 +5,7 @@ import { onTheme, saveSideWidth, setTheme, SIDE_DEFAULT, sideWidth, themeChoice,
 import { loginFrom, type Session } from '../lib/session';
 import { ask, Avatar, ErrorFlash, Hint, Icon, Modal, useAction, useSession } from '../ui';
 import { forgetAvatars } from '../lib/avatars';
+import { ResetKeyForm } from './Onboarding';
 
 type SectionId = 'appearance' | 'devices' | 'privacy' | 'storage' | 'account';
 const SECTIONS: { id: SectionId; name: string; icon: () => JSX.Element }[] = [
@@ -136,7 +137,7 @@ export function Settings({ session, route }: { session: Session; route: string }
                     <button className="btn danger" onClick={() => run(async () => { if (!(await ask({ title: 'Forget this browser?', body: 'Its keys and message history are deleted. You need your recovery code to use this account here again.', confirm: 'Forget this browser', danger: true }))) return; await session.forgetBrowser(); forgetAvatars(); signOut(); location.hash = ''; location.reload(); })}>Forget</button>
                   </div>
                   <div className="box-row kv">
-                    <span>Reset identity <Hint text="Start over with a brand-new identity. Contacts see a key change and your current chats stop working." /></span>
+                    <span>Reset encryption key <Hint text="Only if you lost your recovery code. Your GitHub account stays; people invite your new key again." /></span>
                     <button className="btn danger" onClick={() => setReset(true)}>Reset</button>
                   </div>
                 </section>
@@ -228,16 +229,9 @@ function RevokeModal({ session, cert, onClose, onDone }: { session: Session; cer
 }
 
 function ResetModal({ session, onClose }: { session: Session; onClose: () => void }) {
-  const [confirmText, setConfirm] = useState('');
-  const { busy, error, run } = useAction();
   return (
-    <Modal title="Reset identity" onClose={onClose}>
-      <p>This deletes <code>{session.login}/keyhold-id</code> and <code>{session.login}/{session.homeRepo}</code> and this browser's keys. Chat repos stay on GitHub but you can't read them any more.</p>
-      <label className="field">Type <code>{session.login}</code> to confirm<input className="input" value={confirmText} onChange={(e) => setConfirm(e.target.value)} /></label>
-      <ErrorFlash error={error} />
-      <button className="btn danger block" disabled={busy || confirmText.trim().toLowerCase() !== session.login} onClick={() => run(async () => { await session.resetIdentity(); location.hash = ''; location.reload(); })}>
-        {busy ? <span className="spinner" /> : 'Delete and start over'}
-      </button>
+    <Modal title="Reset your encryption key" onClose={onClose}>
+      <ResetKeyForm session={session} onDone={() => { location.hash = ''; location.reload(); }} />
     </Modal>
   );
 }

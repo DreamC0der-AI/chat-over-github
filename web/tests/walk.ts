@@ -12,7 +12,8 @@
  *  - the member list each member's browser shows matches the model, and the chat is live for
  *    members and not for anyone else;
  *  - the group's name and picture reach every member's browsers;
- *  - removals read as removals and leaves as leaves.
+ *  - removals read as removals and leaves as leaves;
+ *  - after a key reset, the new key reads nothing from before it was invited back.
  *
  * The same chain runs against the in-memory GitHub (web/tests, every change) and real GitHub
  * (web/tools/live-walk.ts on a computer with the test accounts' sign-ins).
@@ -23,7 +24,7 @@ import type { Browser, World } from './harness';
  * leaving: they quit, and the admin's app hasn't committed it yet. A message sent then still goes
  * to a group they are cryptographically in, so whether they read it isn't checked.
  */
-export type State = 'out' | 'invited' | 'member' | 'declined' | 'removed' | 'leaving' | 'left';
+export type State = 'out' | 'invited' | 'member' | 'declined' | 'removed' | 'leaving' | 'left' | 'reset';
 
 interface Sent {
   text: string;
@@ -163,6 +164,30 @@ export class Walk {
     await this.excuse(p);
     await this.b(p).s.quitChat(this.group(p));
     this.state.set(p, 'leaving');
+  }
+
+  /**
+   * They lost their recovery code and reset their key on their first browser. Their browsers of
+   * the old key are done (the others say so); the new key starts with one fresh browser and is
+   * out of the group until someone invites it back. Everyone's directory check is made due.
+   */
+  async resetKey(p: string) {
+    this.note(`${p} resets their key`);
+    const old = this.people.get(p)!;
+    const fresh = await old[0]!.resetKey(this.w);
+    for (const b of old) b.since = Infinity;
+    this.people.set(p, [fresh]);
+    this.state.set(p, 'reset');
+    for (const b of this.w.browsers()) b.recheckKeys();
+    await this.w.until(() => !this.listed(p), `${this.admin}'s app took ${p}'s old key out`, 30);
+    return { fresh, old };
+  }
+
+  /** The admin lets the new key of someone who reset back in (Invite again). */
+  async inviteBack(p: string) {
+    this.note(`${this.admin} invites ${p} back`);
+    await this.b(this.admin).s.inviteBack(this.chatOf(this.b(this.admin))!, `github:${p}`);
+    this.invited(p);
   }
 
   /** Another browser for this person, restored from the recovery code. */

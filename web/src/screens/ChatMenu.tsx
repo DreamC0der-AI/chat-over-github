@@ -100,6 +100,7 @@ function ChatInfo({ session, convo, onClose, onVerify }: { session: Session; con
                 <div className="member-name">
                   <strong>{login}</strong>{me && <span className="muted">you</span>}
                   {m.admin && !dm && <span className="label blue">Admin</span>}
+                  {m.admin && !dm && members.filter((x) => x.admin).length === 1 && members.length > 1 && <Hint text="The only admin. If this admin resets their encryption key, the group ends." />}
                   {session.keyMismatch(m) && <span className="label red" title="The key this member uses here is not the one you trust for them. Their messages may not be from them.">Key doesn’t match</span>}
                 </div>
                 <div className="small muted">{m.devices.length} {m.devices.length === 1 ? 'device' : 'devices'}</div>

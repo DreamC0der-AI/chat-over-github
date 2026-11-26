@@ -3,7 +3,7 @@ import { finishWebFlow, loadAuth, signOut, type AuthState } from './lib/auth';
 import { Session } from './lib/session';
 import { acquireTabLock, takeOverTab } from './lib/tab-lock';
 import { SignIn } from './screens/SignIn';
-import { Install, NewIdentity, Restore } from './screens/Onboarding';
+import { Install, NewIdentity, ResetElsewhere, Restore } from './screens/Onboarding';
 import { Home } from './screens/Home';
 import { Settings } from './screens/Settings';
 import { ErrorFlash, FloatingNotices, useHash, useSession } from './ui';
@@ -94,6 +94,8 @@ function Signed({ auth, onSignOut, onSignedOut }: { auth: AuthState; onSignOut: 
         return <NewIdentity session={session} />;
       case 'restore':
         return <Restore session={session} />;
+      case 'reset-elsewhere':
+        return <ResetElsewhere session={session} />;
       case 'ready':
         return route === '/settings' || route.startsWith('/settings/') ? <Settings session={session} route={route} /> : <Home session={session} route={route} />;
     }

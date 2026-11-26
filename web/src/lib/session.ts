@@ -22,6 +22,7 @@ import {
   restoreRootKey,
   PersonalData,
   unsentMessages,
+  spacesRunByLostKeys,
   type AppMessage,
   type MergeRule,
   type DeviceIdentity,
@@ -46,7 +47,8 @@ import { servedType } from './mime';
 import { ContactBook } from './contacts';
 import { safeAvatar } from './group-avatar';
 
-export type Phase = 'loading' | 'install' | 'new-identity' | 'restore' | 'ready' | 'error';
+/** reset-elsewhere: this account's key was reset on another browser, so this browser's key is dead. */
+export type Phase = 'loading' | 'install' | 'new-identity' | 'restore' | 'ready' | 'error' | 'reset-elsewhere';
 
 export interface MsgRecord {
   groupId: string;
@@ -144,8 +146,16 @@ export interface ChatRecord {
   kind?: 'dm' | 'group';
   /** DM only: the other person. A conversation is the pair of people, across rooms. */
   peer?: string;
-  /** The room ended for good (closed, quit, removed). Its history stays until Delete chat. */
-  ended?: { how: 'closed' | 'moved' | 'quit' | 'removed'; by?: string; at: number };
+  /**
+   * The room ended for good (closed, quit, removed, or reset: every admin reset their key, so
+   * nobody can run it any more; `by` is that admin). Its history stays until Delete chat.
+   */
+  ended?: { how: 'closed' | 'moved' | 'quit' | 'removed' | 'reset'; by?: string; at: number };
+  /**
+   * This browser only: people of this room who reset their key and haven't been invited back
+   * (address -> when this browser saw it). In a DM it pauses the chat until one side invites again.
+   */
+  resets?: Record<string, number>;
   /**
    * Delete chat: messages up to here were deleted. The time of the newest message the deleting
    * browser had (the senders' clocks, like every message's ts), never the deleting browser's clock.
@@ -235,6 +245,11 @@ export interface PendingInvite {
   details?: InviteDetails;
   /** Invited back to a room that had ended for us: joining it again lifts that end. */
   rejoin?: boolean;
+  /**
+   * The inviter reset their key since this account last talked to them: accepting the invitation
+   * also trusts their new key (the card says so first).
+   */
+  keyReset?: boolean;
 }
 
 /**
@@ -247,6 +262,8 @@ export interface InviteDetails {
   name?: string;
   /** People already in the group, the inviter included. */
   people?: number;
+  /** The invitee reset their key and this invites the new key back. */
+  afterReset?: boolean;
 }
 
 /** One person on the Contacts screen. */
@@ -354,6 +371,10 @@ const INVITE_RETRY_MAX_MS = at(3 * 60_000);
  * request), so a send from an open chat nearly always goes straight out.
  */
 const SEND_FRESH_MS = 20_000;
+/** How often members' directories are read again (how soon a key reset shows), and this account's own. */
+const DIRECTORY_RECHECK_MS = 15 * 60_000;
+/** Set in localStorage by a key reset, until the new identity's app has cleaned up after the old key. */
+const RESET_FLAG = 'kh.keyReset';
 const JOINS_AT_ONCE = 3;
 /** Files kept across reloads by content hash (see blobStore), and how many before starting over. */
 const BLOB_PREFIX = 'blob:';
@@ -934,15 +955,78 @@ export class Session {
     }, { anyCall: true });
   }
 
-  /** Testing aid: delete the identity repos so the account can start fresh. */
+  /**
+   * Reset the encryption key (the recovery code is lost): the GitHub account stays, the key is
+   * new. Leaves other people's chat repos (old chats leave this account's list; people invite the
+   * new key back), deletes the public identity and the home repo, and clears this browser. The new
+   * identity's app then deletes the chats only the old key ran (see afterReset).
+   */
   async resetIdentity() {
     this.stop();
+    const spaces = await this.provider.channel.listSpaces().catch(() => [] as string[]);
+    for (const space of spaces) {
+      if (this.isOwner({ space })) continue;
+      await this.ghFetch(`${CONFIG.api}/repos/${space}/collaborators/${encodeURIComponent(this.login)}`, { method: 'DELETE' }).catch(() => undefined);
+    }
+    try {
+      localStorage.setItem(`${RESET_FLAG}:${this.login}`, String(Date.now()));
+    } catch {
+      /* without it, old chats this account owns show up to catch up on, and fail */
+    }
     for (const name of [CONFIG.directoryRepo, this.homeRepo]) {
       const r = await this.ghFetch(`${CONFIG.api}/repos/${this.login}/${name}`, { method: 'DELETE', headers: { Accept: 'application/vnd.github+json' } });
       if (![204, 404].includes(r.status)) throw new Error(`Could not delete ${name} (${r.status})`);
     }
     this.db.close();
     await Db.delete(this.db.name, this.env.indexedDB);
+  }
+
+  /**
+   * After a key reset, on the new identity's first open: chats only the old key ran end for their
+   * members (each app sees every admin reset), so their repos go, like Close chat. Other repos this
+   * account owns stay (another admin runs them) but aren't offered to the new key. Once.
+   */
+  private async afterReset() {
+    let flag: string | null = null;
+    try {
+      flag = localStorage.getItem(`${RESET_FLAG}:${this.login}`);
+    } catch {
+      return;
+    }
+    if (!flag || !this.identity) return;
+    const dead = await spacesRunByLostKeys(this.provider, this.address, this.identity.fingerprint);
+    for (const space of dead) {
+      const r = await this.ghFetch(`${CONFIG.api}/repos/${space}`, { method: 'DELETE', headers: { Accept: 'application/vnd.github+json' } });
+      if (r.status !== 204 && r.status !== 404) throw new Error(`Could not delete ${space} (${r.status})`);
+    }
+    const known = new Set([...(this.chat?.groups.values() ?? [])].map((g) => g.space));
+    for (const space of await this.provider.channel.listSpaces()) {
+      if (dead.includes(space) || known.has(space) || !this.isOwner({ space })) continue;
+      this.declined.add(space);
+      await this.db.put('kv', Date.now(), `declined:${space}`);
+      await this.syncDeclined(space).catch(() => undefined);
+    }
+    try {
+      localStorage.removeItem(`${RESET_FLAG}:${this.login}`);
+    } catch {
+      /* tried again next time: harmless */
+    }
+  }
+
+  private lastOwnCheck = 0;
+  /**
+   * This account's key was reset on another browser: its published key is not this browser's.
+   * This browser's key can never be used again, so it stops and says so. A missing directory
+   * (the reset is under way) is not a verdict.
+   */
+  private async checkOwnKey() {
+    if (Date.now() - this.lastOwnCheck < DIRECTORY_RECHECK_MS || !this.identity) return;
+    this.lastOwnCheck = Date.now();
+    const dir = await verifyDirectory(await this.provider.directory.read(this.address)).catch(() => undefined);
+    if (!dir || dir.fingerprint === this.identity.fingerprint || this.stopped) return;
+    this.stop();
+    this.phase = 'reset-elsewhere';
+    this.bump();
   }
 
   async forgetBrowser() {
@@ -971,6 +1055,8 @@ export class Session {
       // A chat on screen is synced every few seconds: a send right after one goes straight out
       // (one request instead of three in a row; keyhold re-sends what turns out to be late).
       sendFreshMs: SEND_FRESH_MS,
+      // Members' directories are read again this often: how soon a key reset is noticed.
+      directoryMaxAgeMs: DIRECTORY_RECHECK_MS,
       // Read the clock on each call (keyhold's default keeps the function it found at load).
       now: () => Date.now(),
     });
@@ -985,6 +1071,7 @@ export class Session {
     }
     for (const k of await this.db.keys('kv', 'declined:')) this.declined.add(k.slice('declined:'.length));
     for (const k of await this.db.keys('kv', 'block:')) this.blocked.add(k.slice('block:'.length));
+    await this.afterReset().catch((e) => (this.lastPollError = describeError(e)));
     this.hasSyncKey = !!(await this.device.keystore.get(PERSONAL_KEY_SLOT));
     // The chat list and messages are already in this browser: show them now, and read what other
     // browsers changed in the background (the sync step waits for this before its own sync work).
@@ -1592,7 +1679,7 @@ export class Session {
   }
 
   /** Open the chat with this person, or start one. Returns the conversation key. */
-  async startDm(input: string, onStart?: (a: Activity) => void): Promise<string> {
+  async startDm(input: string, onStart?: (a: Activity) => void, afterReset = false): Promise<string> {
     const login = this.normLogin(input);
     const address = toAddress(login);
     if (this.blocked.has(address)) throw new Error(`You blocked ${login}. Unblock them in Account and devices first.`);
@@ -1624,7 +1711,7 @@ export class Session {
         t.link(`/c/${encodeURIComponent(this.convoKey(r))}`);
         this.bump();
         t.step(`Inviting @${login}`);
-        await g.invite(address, { note: this.inviteNote(g) });
+        await g.invite(address, { note: this.inviteNote(g, afterReset) });
         await this.systemNote(g.id, `Invitation sent to @${login}. The chat opens for them when they accept in this app.`);
         this.bump();
         return this.convoKey(r);
@@ -1643,6 +1730,36 @@ export class Session {
     const asked = this.isOwner(g) && !g.members().some((m) => m.address === address);
     if (asked) await this.invite(g, login);
     return c.key;
+  }
+
+  /**
+   * Invite someone back after they reset their key: trust their new key (the person chose to,
+   * with the reset notice in front of them), then invite it the normal way. A DM continues in the
+   * same room when this account runs it, else in a new room of the same conversation. Returns the
+   * conversation key.
+   */
+  async inviteBack(c: Convo, address: string, onStart?: (a: Activity) => void): Promise<string> {
+    const login = loginFrom(address);
+    await this.acceptKeyChange(address);
+    const g = c.live;
+    let key = c.key;
+    if (g && (!c.dm || (this.isOwner(g) && g.policy.admins.includes(this.identity!.fingerprint)))) await this.invite(g, login, onStart, true);
+    else if (c.dm) key = await this.startDm(login, onStart, true);
+    else throw new Error('This group has ended.');
+    for (const r of c.rooms) {
+      if (!r.resets?.[address]) continue;
+      delete r.resets[address];
+      await this.saveRecord(r);
+    }
+    this.bump();
+    return key;
+  }
+
+  /** People of this conversation who reset their key and haven't been invited back. */
+  resetPeople(c: Convo): string[] {
+    const out = new Set<string>();
+    for (const r of c.rooms) for (const a of Object.keys(r.resets ?? {})) out.add(a);
+    return [...out];
   }
 
   /** `avatar`: a picture from makeAvatar, sent encrypted with the name. */
@@ -1675,7 +1792,7 @@ export class Session {
   }
 
   /** Invite people to a group that already exists, together in one commit. */
-  async invite(g: Group, input: string | string[], onStart?: (a: Activity) => void) {
+  async invite(g: Group, input: string | string[], onStart?: (a: Activity) => void, afterReset = false) {
     const logins = [...new Set((Array.isArray(input) ? input : [input]).filter((s) => s.trim()).map((s) => this.normLogin(s)))];
     if (!logins.length) return;
     const label = inviteLabel(logins);
@@ -1685,7 +1802,7 @@ export class Session {
       const missing = logins.find((_, i) => !exists[i]);
       if (missing) throw new Error(`No GitHub user named ${missing}`);
       t.step(label);
-      const failed = await this.inviteNow(g, logins);
+      const failed = await this.inviteNow(g, logins, afterReset);
       if (failed.length) throw new Error(logins.length === 1 ? failed[0]!.replace(/^[^:]+: /, '') : failed.join('; '));
     }, { key: this.convoKey(this.record(g.id)), space: g.space, onStart });
   }
@@ -1708,11 +1825,12 @@ export class Session {
   }
 
   /** What the invitee may read before accepting: kind, group name, how many are in it. */
-  private inviteNote(g: Group): Uint8Array {
+  private inviteNote(g: Group, afterReset = false): Uint8Array {
     const dm = this.records.get(g.id)?.kind === 'dm';
     const details: InviteDetails = dm
       ? { kind: 'dm' }
       : { kind: 'group', name: g.name?.slice(0, 200) || undefined, people: new Set(this.joinedMembers(g).map((m) => m.address)).size };
+    if (afterReset) details.afterReset = true;
     return new TextEncoder().encode(JSON.stringify(details));
   }
 
@@ -1727,6 +1845,7 @@ export class Session {
         kind: d.kind,
         name: typeof d.name === 'string' && d.name.trim() ? d.name.trim().slice(0, 200) : undefined,
         people: typeof d.people === 'number' && d.people > 0 && d.people < 10_000 ? Math.floor(d.people) : undefined,
+        ...(d.afterReset === true ? { afterReset: true } : {}),
       };
       this.bump();
     } catch {
@@ -1735,8 +1854,8 @@ export class Session {
   }
 
   /** Invite these people together (one commit for all of them). Returns "login: why" for each that failed. */
-  private async inviteNow(g: Group, logins: string[]): Promise<string[]> {
-    const results = await g.inviteMany(logins.map(toAddress), { note: this.inviteNote(g) });
+  private async inviteNow(g: Group, logins: string[], afterReset = false): Promise<string[]> {
+    const results = await g.inviteMany(logins.map(toAddress), { note: this.inviteNote(g, afterReset) });
     const r = this.record(g.id);
     const failed: string[] = [];
     for (const [i, res] of results.entries()) {
@@ -2398,6 +2517,26 @@ export class Session {
       if (e.type === 'joined') {
         await this.systemNote(g.id, e.address === this.address ? 'You joined. Messages are end-to-end encrypted.' : `${who} joined`);
         this.peers.delete(e.address);
+        if (r.resets?.[e.address]) {
+          delete r.resets[e.address];
+          await this.saveRecord(r);
+        }
+      } else if (e.type === 'key-reset') {
+        // Their address publishes a new key: the old one can't be used again. A person decides
+        // whether to let the new key in (Invite again).
+        await this.systemNote(g.id, `${who} reset their encryption key`);
+        r.resets = { ...(r.resets ?? {}), [e.address]: Date.now() };
+        await this.saveRecord(r);
+        this.peers.delete(e.address);
+      } else if (e.type === 'admins-reset') {
+        this.toEnd.set(g.id, { how: 'reset', ...(e.admins[0] ? { by: e.admins[0] } : {}), at: Date.now() });
+      } else if (e.type === 'left' && e.by && (r.resets?.[e.address] || (await this.wasReset(e.fingerprint, e.address)))) {
+        // Taken out by an admin's app because the key is dead, not by a person's choice.
+        await this.systemNote(g.id, `${who} was removed after resetting their key`);
+        if (!r.resets?.[e.address]) {
+          r.resets = { ...(r.resets ?? {}), [e.address]: Date.now() };
+          await this.saveRecord(r);
+        }
       } else if (e.type === 'left' && e.pending) {
         await this.systemNote(g.id, `${who} didn’t join`);
       } else if (e.type === 'left') {
@@ -2421,6 +2560,13 @@ export class Session {
         // else's is only unavailable: it may come back, so nothing is deleted and it is retried.
         if (this.isOwner(g) && (await this.ghFetch(`${CONFIG.api}/repos/${g.space}`)).status === 404) {
           this.toEnd.set(g.id, { how: 'closed', by: this.address, at: Date.now() });
+        } else {
+          // The admin reset their key and their new app deleted the repo before we noticed the reset.
+          const v = await g.checkResets().catch(() => undefined);
+          if (v?.adminsGone) {
+            const admin = g.members().find((m) => m.admin && v.people.some((p) => p.fingerprint === m.fingerprint));
+            this.toEnd.set(g.id, { how: 'reset', ...(admin ? { by: admin.address } : {}), at: Date.now() });
+          }
         }
       }
       // keyhold opened it, but this browser couldn't keep it (storage full for too long): not a decryption problem.
@@ -2436,6 +2582,13 @@ export class Session {
     if (shareName && g.active && !this.isDm(g) && (g.name || avatar) && g.policy.admins.includes(this.identity!.fingerprint)) {
       await g.send({ t: 'meta', name: g.name || undefined, avatar }).catch((e) => this.dropUnsent(g, e));
     }
+  }
+
+  /** Does this address publish another key than `fingerprint` now? Reads its directory. */
+  private async wasReset(fingerprint: string, address: string): Promise<boolean> {
+    if (address === this.address) return false;
+    await this.registry.lookup(address).catch(() => undefined);
+    return this.registry.isResetRoot(fingerprint, address);
   }
 
   async syncGroup(g: Group) {
@@ -2563,6 +2716,7 @@ export class Session {
       const inv: PendingInvite = { key, from: n.from, status: 'invited', pointer: n.pointer, noticeId: n.id, since: now, created, attempts: 0, nextTry: 0 };
       this.invites.set(key, inv);
       if (n.payload) void this.openNote(inv, n);
+      void this.checkInviter(inv);
     }
     for (const inv of [...this.invites.values()]) {
       if (inv.status !== 'invited') continue;
@@ -2627,7 +2781,9 @@ export class Session {
             break;
           }
         }
-        this.invites.set(space, { key: space, space, from, status: accepted ? 'joining' : 'invited', since: now, attempts: 0, nextTry: 0, mine, details });
+        const inv: PendingInvite = { key: space, space, from, status: accepted ? 'joining' : 'invited', since: now, attempts: 0, nextTry: 0, mine, details };
+        this.invites.set(space, inv);
+        if (!accepted) void this.checkInviter(inv);
       }
       // Invited back: an invitation the person accepted that matched no other repo of that person
       // is for the room they had left. Only the accepted invitation brings it back, never the listing.
@@ -2657,6 +2813,18 @@ export class Session {
       due.push({ inv, attempts: inv.attempts });
     }
     return due;
+  }
+
+  /** Did the inviter reset their key since this account last talked to them? Shown on the card. */
+  private async checkInviter(inv: PendingInvite) {
+    if (inv.from === this.address) return;
+    try {
+      const r = await this.registry.lookup(inv.from);
+      inv.keyReset = r.status === 'key-changed' || undefined;
+      if (inv.keyReset) this.bump();
+    } catch {
+      /* the join checks the key again */
+    }
   }
 
   /** Join the chat of one accepted invitation (or one the account is already in). */
@@ -2767,6 +2935,8 @@ export class Session {
     const what = inv.details?.kind === 'group' ? (inv.details.name ? `Joining ${inv.details.name}` : 'Joining the group') : `Joining the chat with @${from}`;
     await this.activities.run(what, plan, async (t) => {
       let gone = false;
+      // The card said they reset their key: accepting is trusting the new one.
+      if (inv.keyReset && !auto) await this.acceptKeyChange(inv.from);
       if (inv.pointer) {
         const id = inv.pointer.split('#').pop()!;
         const r = await this.ghFetch(`${CONFIG.api}/user/repository_invitations/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { Accept: 'application/vnd.github+json' } });
@@ -3033,6 +3203,8 @@ export class Session {
       await this.checkClosures().catch(() => undefined);
     }
     await this.resolveDuplicates().catch(() => undefined);
+    await this.checkOwnKey();
+    if (this.stopped) return;
     await this.syncPersonal(now, hidden);
     if (now - this.lastBlobPrune > BLOB_PRUNE_MS) void this.pruneBlobs();
     const due: Group[] = [];

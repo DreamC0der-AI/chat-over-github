@@ -38,6 +38,19 @@ export class Browser {
   async sync(n = 1) {
     for (let i = 0; i < n; i++) await this.s.syncNow();
   }
+  /** As if a quarter of an hour passed: people's directories (key resets) are read on every sync step from now on. */
+  recheckKeys() {
+    const s = this.s as unknown as { chat?: { opts: { directoryMaxAgeMs: number } }; lastOwnCheck: number };
+    if (s.chat) s.chat.opts.directoryMaxAgeMs = 0;
+    s.lastOwnCheck = -Infinity;
+  }
+  /** Lost the recovery code: reset the key here, then set up the new one in a fresh app (the reload). */
+  async resetKey(w: World): Promise<Browser> {
+    await this.s.resetIdentity();
+    const b = await w.browser(this.login);
+    await b.setup();
+    return b;
+  }
   chats(): Convo[] {
     return this.s.conversations();
   }
