@@ -1,5 +1,6 @@
 // One account in two browsers: the second catches up from the synced chat list and the repos.
 import { afterEach, describe, expect, it } from 'vitest';
+import { PersonalData } from 'keyhold/chat';
 import { world, type World } from './harness';
 
 let w: World;
@@ -100,13 +101,21 @@ describe('two browsers of one account', () => {
     const alice2 = await w.browser('alice');
     await alice2.restore(code);
     const from = w.requests.length;
+    const written: string[] = [];
+    const set = PersonalData.prototype.set;
+    PersonalData.prototype.set = function (this: PersonalData, ...a: Parameters<typeof set>) {
+      written.push(a[0]);
+      return set.apply(this, a);
+    };
     await alice2.sync();
+    PersonalData.prototype.set = set;
     expect(alice2.chats().filter((c) => c.live).length).toBe(5);
     expect(alice2.invites()).toEqual([]);
     // The chat list and read marks it pulled are already what the store says: no commit per chat
-    // (before, 11 writes here; what's left is this browser's own contact pins).
-    const puts = w.requests.slice(from).filter((r) => r.method === 'PUT' && r.url.includes('/chat-home/contents/items/'));
-    expect(puts.length).toBeLessThanOrEqual(1);
+    // (before, 11 writes here). What's left is this browser's own contact pins, and read marks the
+    // first browser hadn't written yet for chats whose messages came from the history backup.
+    expect(written.filter((c) => c === 'chats')).toEqual([]);
+    expect(written.filter((c) => c !== 'readMarks').length).toBeLessThanOrEqual(1);
 
     await bob.s.send(bob.chat('G2')!.live!, 'after the new browser');
     await w.until(async () => (await alice2.texts(alice2.chat('G2'))).includes('after the new browser'), 'the new browser reads G2');

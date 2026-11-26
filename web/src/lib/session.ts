@@ -288,6 +288,32 @@ const PERSONAL_KEY_SLOT = 'chat-web/personal-key';
 const INSTALL_KEY = 'install';
 /** Snapshots of what this browser last wrote to the synced store (kv). */
 const PUSHED_KEY = 'sync:pushed';
+/** How many deleted message ids each room remembers (see applyClear). */
+const CLEARED_IDS_KEPT = 5000;
+
+/**
+ * Message history backup, in the synced store (collection `history`): one record per chat room
+ * per month, `{ g: groupId, 'm:<id>': message }`. Every browser of the account writes what it
+ * stores and reads what the others wrote, so a new browser (or the app on a new address) gets the
+ * chat's earlier messages. Only decrypted messages go there, never keys. Deleting a chat or a
+ * message clears it there too.
+ */
+const histBucket = (groupId: string, ts: number) => `${groupId}:${new Date(ts).toISOString().slice(0, 7)}`;
+/** Local notes ("You joined") are this browser's own; notes made from a chat message are kept. */
+const backable = (m: MsgRecord) => !(m.kind === 'system' && m.id.startsWith('sys-'));
+function histValue(m: MsgRecord): Record<string, unknown> {
+  const { groupId: _g, id: _i, ...rest } = m;
+  return rest;
+}
+/** JSON with sorted keys and no undefined, to compare a message with what the backup holds. */
+function canon(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map((x) => (x === undefined ? 'null' : canon(x))).join(',')}]`;
+  if (v && typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    return `{${Object.keys(o).filter((k) => o[k] !== undefined).sort().map((k) => `${JSON.stringify(k)}:${canon(o[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(v ?? null);
+}
 /** What each synced chat field does when two browsers change it at once. */
 // `ended` stays set-once for older apps; `endedLast` (newest wins) is the end after a rejoin.
 const CHAT_RULES: Record<string, MergeRule> = { space: 'once', kind: 'once', peer: 'once', name: 'once', createdAt: 'once', ended: 'once', clearedAt: 'max', peerLeft: 'once', purged: 'once', purgedAt: 'max', rejoinedAt: 'max' };
@@ -939,6 +965,7 @@ export class Session {
       device: this.device,
       identity: this.identity!,
       registry: this.registry,
+      // The app keeps its own history backup (see histBucket), with deletes and edits; keyhold's recorder stays off.
       features: resolveFeatures(this.provider, { historyBackup: false, preKeys: true }),
       onMessage: (g, m) => this.onMessage(g, m),
       // A chat on screen is synced every few seconds: a send right after one goes straight out
@@ -1088,14 +1115,18 @@ export class Session {
     // With a copy of each record in this browser: GitHub can't roll one back or delete it
     // unnoticed (the trusted keys of contacts above all); what this browser knew is written back.
     this.personal = await PersonalData.open(this.provider.personal, key, this.identity!.deviceId, Date.now, { local: this.device.keystore });
-    // Everything this browser knows goes up once (only what changed since it last did).
+    // Read first: a chat this browser joins meanwhile must not go up before its synced record is
+    // here (it would only know "now"). Then everything this browser knows goes up once (only what
+    // changed since it last did).
+    await this.pull();
+    this.pulledOnce = true;
     for (const r of this.records.values()) this.push(r);
     for (const a of this.blocked) await this.syncBlock(a, true);
     for (const sp of this.declined) await this.syncDeclined(sp);
-    await this.pull();
     // Keys this browser pinned go up (after the pull, so a different synced key is a conflict, not overwritten).
     this.contacts.personal = this.personal;
     await this.contacts.migrate();
+    await this.fillBackup();
     await this.flushPersonal();
   }
 
@@ -1120,6 +1151,7 @@ export class Session {
   private async flushPersonal() {
     const p = this.personal;
     if (!p) return;
+    await this.drainHistory();
     // Changes still on their way into the queue go in this flush.
     while (this.inflight.size) await Promise.all([...this.inflight]);
     const batch = new Map(this.queuedSnaps);
@@ -1147,8 +1179,9 @@ export class Session {
   }
 
   /** Queue the synced fields of a chat, if they changed since last time. */
+  private pulledOnce = false;
   private push(r: ChatRecord) {
-    if (!this.personal) return;
+    if (!this.personal || !this.pulledOnce) return;
     const fields: Record<string, unknown> = {
       space: r.space, kind: r.kind, peer: r.peer, name: r.lastName, createdAt: r.createdAt,
       ended: r.ended, endedLast: r.ended, clearedAt: r.clearedAt, clearedId: r.clearedId, peerLeft: r.peerLeft || undefined,
@@ -1189,10 +1222,15 @@ export class Session {
   /** Apply what other browsers wrote. */
   private async pull() {
     if (!this.personal) return;
-    for (const ch of await this.personal.changes()) {
+    // The chat list first: the history backup is larger and slower to apply, and a join finishing
+    // meanwhile must find its chat's synced record (else it writes a fresh one back).
+    const changes = await this.personal.changes();
+    changes.sort((a, b) => Number(a.collection === 'history') - Number(b.collection === 'history'));
+    for (const ch of changes) {
       const v = ch.value;
       if (ch.collection === 'chats') await this.applyChat(ch.key, v);
       else if (ch.collection === 'contacts') await this.contacts.applyRemote(ch.key, v);
+      else if (ch.collection === 'history') await this.applyHistory(ch.key, v);
       else if (ch.collection === 'readMarks') {
         const r = this.records.get(ch.key);
         // Read up to there on some browser: only messages after it count as unread, here and later.
@@ -1266,7 +1304,16 @@ export class Session {
     const had = !local && id ? !!(await this.db.get('messages', [r.groupId, id])) : false;
     r.clearedAt = Math.max(r.clearedAt ?? 0, at);
     if (id) r.clearedId = id;
+    // Remember what was deleted: keyhold delivers at least once, and a repeat (a fast send posted
+    // again after the group changed) must not bring a deleted message back.
+    const ids = (await this.messages(r.groupId)).filter((m) => m.ts <= at && m.kind !== 'system').map((m) => m.id);
+    if (ids.length) {
+      const gone = await this.clearedIds(r.groupId);
+      for (const x of ids) gone.add(x);
+      await this.db.put('kv', [...gone].slice(-CLEARED_IDS_KEPT), `cleared-ids:${r.groupId}`);
+    }
     await this.db.deleteMessages(r.groupId, at);
+    this.unbackup(r.groupId, (_, ts) => ts <= at);
     if (local || had) {
       r.dropTo = undefined;
       r.dropUntil = undefined;
@@ -1281,11 +1328,23 @@ export class Session {
     }
   }
 
+  private clearedCache = new Map<string, Set<string>>();
+  /** Messages Delete chat removed from this room on this browser (the newest few thousand). */
+  private async clearedIds(groupId: string): Promise<Set<string>> {
+    let s = this.clearedCache.get(groupId);
+    if (!s) {
+      s = new Set((await this.db.get<string[]>('kv', `cleared-ids:${groupId}`)) ?? []);
+      this.clearedCache.set(groupId, s);
+    }
+    return s;
+  }
+
   /** An ended room deleted: drop what's left of it here and keep only a tombstone. */
   private async purgeRoom(r: ChatRecord, at = Date.now()) {
     r.purged = true;
     r.purgedAt = Math.max(r.purgedAt ?? 0, at);
     await this.db.deleteMessages(r.groupId);
+    this.unbackup(r.groupId);
     await this.chat!.purge(r.groupId);
     // If GitHub still lists the repo for a while, it must not come back as an invitation.
     if (r.space && !this.declined.has(r.space)) {
@@ -2061,6 +2120,112 @@ export class Session {
 
   private async put(m: MsgRecord) {
     await this.db.put('messages', m);
+    this.backupMsg(m);
+  }
+
+  // ---- history backup ----
+
+  /** What the backup holds, as last read or written: bucket -> message id -> canonical JSON and time. */
+  private histHave = new Map<string, Map<string, { j: string; ts: number }>>();
+  /** Backup changes not yet in the synced store's queue (null clears a message). */
+  private histQueue = new Map<string, { bucket: string; groupId: string; id: string; m: MsgRecord | null }>();
+
+  private backupMsg(m: MsgRecord) {
+    if (!backable(m)) return;
+    const bucket = histBucket(m.groupId, m.ts);
+    this.histQueue.set(`${bucket}\n${m.id}`, { bucket, groupId: m.groupId, id: m.id, m });
+  }
+
+  /** Clear messages of a room from the backup: those `drop` picks, or all. */
+  private unbackup(groupId: string, drop: (id: string, ts: number) => boolean = () => true) {
+    for (const [bucket, have] of this.histHave) {
+      if (!bucket.startsWith(`${groupId}:`)) continue;
+      for (const [id, e] of have) if (drop(id, e.ts)) this.histQueue.set(`${bucket}\n${id}`, { bucket, groupId, id, m: null });
+    }
+    for (const [k, q] of this.histQueue) if (q.groupId === groupId && q.m && drop(q.id, q.m.ts)) this.histQueue.set(k, { ...q, m: null });
+  }
+
+  /** Move queued backup changes into the synced store's queue, skipping what it already holds. */
+  private async drainHistory() {
+    const p = this.personal;
+    if (!p || !this.histQueue.size) return;
+    const byBucket = new Map<string, { groupId: string; fields: Record<string, unknown> }>();
+    for (const q of this.histQueue.values()) {
+      const have = this.histHave.get(q.bucket);
+      const j = q.m ? canon(histValue(q.m)) : undefined;
+      if (q.m ? have?.get(q.id)?.j === j : !have?.has(q.id)) continue;
+      const b = byBucket.get(q.bucket) ?? { groupId: q.groupId, fields: {} };
+      b.fields[`m:${q.id}`] = q.m ? histValue(q.m) : undefined;
+      byBucket.set(q.bucket, b);
+      const h = have ?? new Map();
+      if (q.m) h.set(q.id, { j: j!, ts: q.m.ts });
+      else h.delete(q.id);
+      this.histHave.set(q.bucket, h);
+    }
+    this.histQueue.clear();
+    for (const [bucket, b] of byBucket) {
+      const job: Promise<void> = p.set('history', bucket, { g: b.groupId, ...b.fields }, { g: 'once' })
+        .catch(() => {
+          // Not queued: forget what we assumed is there, so the next start-up check sends it again.
+          this.histHave.delete(bucket);
+        })
+        .finally(() => this.inflight.delete(job));
+      this.inflight.add(job);
+    }
+  }
+
+  /** Another browser's backup of a room for a month: add the messages this browser doesn't have. */
+  private async applyHistory(bucket: string, v: Record<string, unknown>) {
+    const groupId = typeof v.g === 'string' ? v.g : undefined;
+    if (!groupId) return;
+    const r = this.records.get(groupId);
+    const have = new Map<string, { j: string; ts: number }>();
+    let oldest = Infinity;
+    let newest: MsgRecord | undefined;
+    let changed = false;
+    for (const [f, val] of Object.entries(v)) {
+      if (!f.startsWith('m:') || !val || typeof val !== 'object') continue;
+      const m = { ...(val as MsgRecord), groupId, id: f.slice(2) };
+      if (typeof m.ts !== 'number' || typeof m.kind !== 'string') continue;
+      have.set(m.id, { j: canon(val), ts: m.ts });
+      // Deleted here (Delete chat) or gone for good: not brought back.
+      if (r && (r.purged || (r.clearedAt !== undefined && m.ts <= r.clearedAt))) continue;
+      const local = await this.db.get<MsgRecord>('messages', [groupId, m.id]);
+      if (!local) {
+        await this.db.put('messages', m);
+        changed = true;
+        oldest = Math.min(oldest, m.ts);
+        if (m.kind !== 'system' && (!newest || m.ts > newest.ts)) newest = m;
+      } else if (m.deleted && !local.deleted) {
+        // Deleted for everyone while this browser wasn't looking: deletes only go one way.
+        await this.db.put('messages', { ...local, deleted: true, body: undefined, file: undefined, caption: undefined });
+        changed = true;
+      }
+    }
+    this.histHave.set(bucket, have);
+    if (!r || !changed) return;
+    if (newest && newest.ts >= r.lastTs) {
+      r.lastTs = newest.ts;
+      r.lastText = previewText(newest);
+      // Restored isn't read: this browser doesn't write a read mark for it (one it reads later does).
+      if (!r.unread && !this.pushed.has(`r/${r.groupId}`)) this.pushed.set(`r/${r.groupId}`, `read:${r.lastTs}`);
+    }
+    // Messages after the synced read mark are unread here too (and the mark isn't moved past them).
+    if (r.readTo !== undefined) r.unread = await this.countUnread(r);
+    // The earlier messages came from the backup: they are on this browser now.
+    if (r.joinedAt && oldest < r.joinedAt) r.joinedAt = undefined;
+    await this.saveRecord(r);
+  }
+
+  /** Once per start: send up whatever this browser has that the backup doesn't (older browsers' history above all). */
+  private async fillBackup() {
+    for (const r of [...this.records.values()]) {
+      if (r.purged || this.stopped) continue;
+      for (const m of await this.messages(r.groupId)) {
+        if (!backable(m) || (r.clearedAt !== undefined && m.ts <= r.clearedAt)) continue;
+        if (!this.histHave.get(histBucket(m.groupId, m.ts))?.has(m.id)) this.backupMsg(m);
+      }
+    }
   }
 
   private async systemNote(groupId: string, body: string) {
@@ -2114,6 +2279,8 @@ export class Session {
     };
     // Delivery is at least once: a message already stored (maybe edited or reacted to since) stays as it is.
     if ((msg.t === 'text' || msg.t === 'attachment') && (await this.db.get('messages', [g.id, msg.id]))) return;
+    // Delivered again after Delete chat removed it: stays deleted.
+    if ((msg.t === 'text' || msg.t === 'attachment') && r.clearedAt !== undefined && msg.ts <= r.clearedAt && (await this.clearedIds(g.id)).has(msg.id)) return;
     switch (msg.t) {
       case 'text': {
         // A copy of a message from a retired duplicate room (rule 2): shown only if not here already.
@@ -2231,6 +2398,8 @@ export class Session {
       } else if (e.type === 'retracted') {
         // Sent to us after we were already removed (the sender hadn't synced yet): not ours to keep.
         for (const id of e.ids) await this.db.del('messages', [g.id, id]);
+        const gone = new Set(e.ids);
+        this.unbackup(g.id, (id) => gone.has(id));
         const last = await this.db.lastMessage<MsgRecord>(g.id, (x) => x.kind !== 'system');
         r.lastText = last ? previewText(last) : '';
         await this.saveRecord(r);
@@ -2498,7 +2667,8 @@ export class Session {
         // The chat's age comes from the synced chat list: on a new browser, wait for its first read
         // (a join can finish first, and the record then only knows "now").
         if (inv.mine && !r.joinedAt) await this.syncStarting;
-        if (inv.mine && !r.joinedAt && r.createdAt < (this.identity?.cert.issuedAt ?? Date.now())) {
+        // Earlier messages already here from the history backup: nothing to say is elsewhere.
+        if (inv.mine && !r.joinedAt && r.createdAt < (this.identity?.cert.issuedAt ?? Date.now()) && !(await this.db.lastMessage<MsgRecord>(r.groupId, (m) => m.kind !== 'system'))) {
           r.joinedAt = Date.now();
           await this.saveRecord(r);
         }
@@ -2887,6 +3057,7 @@ export class Session {
       return;
     }
     try {
+      await this.drainHistory();
       if (p.pending && now - this.lastFlush > PERSONAL_FLUSH_MS) {
         this.lastFlush = now;
         await this.flushPersonal();
