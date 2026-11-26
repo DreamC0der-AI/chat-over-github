@@ -10,7 +10,8 @@
     "mock-server": "node --experimental-strip-types tools/mock-server.ts",
     "e2e": "npm run build:mock && esbuild tools/mock-server.ts --bundle --platform=node --format=esm --outfile=tools/mock-server.mjs && node tools/e2e-run.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:walk": "WALK_SEEDS=${WALK_SEEDS:-20} vitest run tests/walk-random.test.ts"
   },
   "dependencies": {
     "chat-over-github-provider": "0.1.0",
