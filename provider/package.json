@@ -13,7 +13,7 @@
     "build:live": "esbuild scripts/live-github.ts --bundle --platform=node --format=esm --outfile=scripts/live-github.mjs"
   },
   "dependencies": {
-    "keyhold": "github:DreamC0der-AI/keyhold#acccfe2cd2943d9fd0b2b6101ddf0fc0424677ad"
+    "keyhold": "github:DreamC0der-AI/keyhold#0df90dc3bc5f6fd17c31e23217d202985633c870"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
