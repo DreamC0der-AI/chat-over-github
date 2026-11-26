@@ -508,15 +508,15 @@ export class Session {
   lastPollError?: string;
   /**
    * Catching up: from opening until the first full sync step is done, and again after the tab is
-   * shown (switching back to a phone). Chats fetching new changes count too. Steps that only find
-   * nothing new don't, so the dot stays still while the app is merely watching.
+   * shown (switching back to a phone). Not the routine syncs while the tab stays open (the open
+   * chat is listed in full every few seconds, busy chats often): with a few chats those overlap
+   * and the dot would never rest.
    */
   syncing(): boolean {
-    return this.phase === 'ready' && (this.catchingUp || this.syncingGroups > 0 || this.loadingChats());
+    return this.phase === 'ready' && (this.catchingUp || this.loadingChats());
   }
   private catchingUp = true;
   private wokeAt = 0;
-  private syncingGroups = 0;
   /** Messages on their way out, per group, for the "sending…" bubble and the failed state. */
   sending = new Map<string, Sending[]>();
   /** Reactions on their way out, by `groupId/messageId/emoji`. Shown at once, faded until sent. */
@@ -2685,7 +2685,6 @@ export class Session {
   }
 
   async syncGroup(g: Group) {
-    if (this.syncingGroups++ === 0) this.bump();
     try {
       const r = await g.sync();
       await this.onEvents(g, r.events);
@@ -2695,8 +2694,6 @@ export class Session {
       else this.clearGroupError(g.id);
     } catch (e) {
       this.setGroupError(g.id, this.noteError(e));
-    } finally {
-      this.syncingGroups--;
     }
     // Refused by GitHub (maybe only for a moment): try again later, less and less often. Only a
     // signed close or a removal we can read ends the room; until then it is "can't reach".
