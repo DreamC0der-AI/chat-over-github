@@ -200,7 +200,7 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
             return (
               <Fragment key={`${head.m.groupId}/${head.m.id}`}>
                 {run.newDay && <div className="day-divider" role="separator"><span>{dayLabel(head.m.ts)}</span></div>}
-                <div className={`run${head.m.mine ? ' mine' : ''}`}>
+                <div className={`run${head.m.mine ? ' mine' : ''}${dm ? '' : ' named'}`}>
                   {!head.m.mine && <span className="msg-avatar"><Avatar name={who} login={who} size="sm" /></span>}
                   <div className="run-msgs">
                     {run.msgs.map((it, j) => (

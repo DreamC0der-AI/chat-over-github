@@ -246,6 +246,14 @@ try {
   await bubble(bob, 'carol here').waitFor({ timeout: 30000 });
   await bubble(alice, 'carol here').waitFor({ timeout: 30000 });
   check(true, 'group message reached both');
+  // In a group, the sender's name lines up with the top of the avatar, with the bubble below it.
+  const head = await bob.page.evaluate(() => {
+    const run = [...document.querySelectorAll('.run.named')].find((r) => r.textContent?.includes('carol here'));
+    const box = (s) => run?.querySelector(s)?.getBoundingClientRect();
+    const [av, name, bub] = [box('.msg-avatar'), box('.msg-author'), box('.bubble')];
+    return av && name && bub ? { top: Math.round(Math.abs(av.top - name.top)), below: bub.top >= name.bottom } : null;
+  });
+  check(!!head && head.top <= 3 && head.below, `group sender name lines up with the avatar's top, bubble below (${JSON.stringify(head)})`);
   await bob.page.screenshot({ path: `${SHOTS}/group-bob.png` });
 
   // remove carol
