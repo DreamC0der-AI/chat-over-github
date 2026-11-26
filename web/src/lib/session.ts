@@ -1684,7 +1684,10 @@ export class Session {
     const address = toAddress(login);
     if (this.blocked.has(address)) throw new Error(`You blocked ${login}. Unblock them in Account and devices first.`);
     let existing = this.liveDm(address);
-    if (existing) return this.askAgain(existing, login);
+    if (existing) {
+      const key = await this.askAgain(existing, login);
+      if (key) return key;
+    }
     return this.activities.run(
       `Starting a chat with @${login}`,
       ['Checking for a chat you already have', `Finding @${login} on GitHub`, ...NEW_ROOM, `Inviting @${login}`],
@@ -1692,7 +1695,10 @@ export class Session {
         // Another of my devices may have started it already: join my own rooms first.
         await this.checkInvites(true);
         existing = this.liveDm(address);
-        if (existing) return this.askAgain(existing, login);
+        if (existing) {
+          const key = await this.askAgain(existing, login);
+          if (key) return key;
+        }
         t.step(`Finding @${login} on GitHub`);
         await this.ensurePublished();
         if (!(await this.userExists(login))) throw new Error(`No GitHub user named ${login}`);
@@ -1724,11 +1730,16 @@ export class Session {
    * Opening a DM whose invitation they turned down (or that expired) asks them again: their app
    * took them out of the encryption when they declined, so nothing is waiting for them any more.
    */
-  private async askAgain(c: Convo, login: string): Promise<string> {
+  private async askAgain(c: Convo, login: string): Promise<string | undefined> {
     const g = c.live!;
     const address = toAddress(login);
-    const asked = this.isOwner(g) && !g.members().some((m) => m.address === address);
-    if (asked) await this.invite(g, login);
+    if (!this.isOwner(g)) {
+      // Their room: they may have closed it a moment ago and this browser not synced since. Look
+      // now, so a closed room is replaced by a new chat (undefined) instead of reopened.
+      await this.syncGroup(g).catch(() => undefined);
+      return this.liveDm(address)?.key;
+    }
+    if (!g.members().some((m) => m.address === address)) await this.invite(g, login);
     return c.key;
   }
 

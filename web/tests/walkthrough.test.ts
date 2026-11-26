@@ -229,6 +229,18 @@ describe('DM walkthroughs', () => {
     await w.checkConverged();
   });
 
+  it('the owner closes and the other starts again at once, before their browser has seen the close', async () => {
+    const { a: alice, b: bob } = await dmStart();
+    await bob.s.startDm('alice');
+    await accept(alice, 'bob');
+    await talk(alice, bob, 'first');
+    await bob.s.closeChat(bob.chat('alice')!.live!);
+    await alice.s.startDm('bob');
+    await accept(bob, 'alice');
+    await talk(alice, bob, 'second');
+    await w.checkConverged();
+  });
+
   it('both start a DM at once: one chat, and it keeps working through quit and restart', async () => {
     const { a: alice, b: bob } = await dmStart();
     await Promise.all([alice.s.startDm('bob'), bob.s.startDm('alice')]);
