@@ -418,13 +418,18 @@ body.resizing iframe, body.resizing img { pointer-events: none; }
 .sys.divider + .sys, .sys + .sys.divider { margin-top: 0; }
 .day-divider { align-self: center; color: var(--muted); font-size: 12px; font-weight: 600; margin: 4px 0 -4px; }
 
-/* A message is a small grid: avatar in its own column, lined up with the bubble. */
-/* A run is one sender's consecutive messages. Its single avatar sits on the left,
-   level with the last bubble (above that message's reactions and time). */
+/* A run is one sender's consecutive messages with a single avatar on the left. In a DM it sits
+   level with the last bubble (above that message's reactions and time); in a group, at the top. */
 .run { display: flex; align-items: flex-end; gap: 8px; }
 .run-msgs { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.run .msg-avatar { flex: none; margin-bottom: 19px; }
-.run:has(.msg:last-child > .reactions) .msg-avatar { margin-bottom: 47px; }
+.run .msg-avatar { flex: none; }
+.run:not(.named) .msg-avatar { margin-bottom: 19px; }
+.run:not(.named):has(.msg:last-child > .reactions) .msg-avatar { margin-bottom: 47px; }
+/* In a group the run opens with a header: avatar and name on one line, bubbles hanging below. */
+.run.named { align-items: flex-start; }
+.run.named .msg-author { display: block; line-height: 16px; margin: -2px 0 6px 2px; color: var(--fg); font-size: 13px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run.named .msg:not(.mine) .bubble { border-radius: 6px 18px 18px 6px; }
+.run.named .msg:not(.mine):last-child .bubble { border-bottom-left-radius: 18px; }
 .msg { display: grid; grid-template-columns: minmax(0, 1fr); align-items: end; }
 .msg > * { grid-column: 1; justify-self: start; }
 .msg-author { grid-row: 1; font-size: 12px; font-weight: 600; color: var(--muted); margin: 0 0 3px 12px; }
