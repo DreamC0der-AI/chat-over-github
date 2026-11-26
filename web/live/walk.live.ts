@@ -50,8 +50,11 @@ beforeAll(async () => {
   await cleanup();
 });
 afterAll(async () => {
-  w?.stop();
-  await cleanup();
+  try {
+    w?.stop();
+  } finally {
+    await cleanup();
+  }
 });
 
 const t0 = Date.now();
@@ -61,21 +64,23 @@ describe('membership on real GitHub', () => {
   it('group: alone, invite, decline, re-invite, accept, remove, re-invite, leave, re-invite', async () => {
     w = await world({ tokens, api: API, pauseMs: 2500 });
     const { map, codes } = await people(w);
-    const [admin, b, c] = LOGINS as [string, string, string];
+    // With two accounts the third person's steps are left out.
+    const [admin, b, c] = LOGINS as [string, string, string | undefined];
     const walk = new Walk(w, map, admin, 'Walk group');
-    Walk.declinedMayRead = true; // the open decline bug; checked by the stand-in walkthroughs
     const log = (s: string) => step(s);
     const steps: [string, () => Promise<unknown>][] = [
       ['create alone and write', async () => { await walk.create(); await walk.send(admin); }],
       [`invite ${b}, ${b} declines`, async () => { await walk.invite(b); await walk.decline(b); await walk.send(admin); }],
       [`invite ${b} again, ${b} accepts`, async () => { await walk.invite(b); await walk.accept(b); await walk.send(b); }],
-      [`invite ${c}, ${c} accepts on a second browser too`, async () => { await walk.invite(c); await walk.accept(c); await walk.newBrowser(c, codes.get(c)!); await walk.send(c); }],
-      [`remove ${c}, write`, async () => { await walk.remove(c); await walk.send(b); }],
-      [`invite ${c} back, accept`, async () => { await walk.invite(c); await walk.accept(c); await walk.send(admin); }],
-      [`${b} leaves, write, invite ${b} back`, async () => { await walk.leave(b); await walk.send(c); await walk.check(); await walk.invite(b); await walk.accept(b); await walk.send(b); }],
+      [`invite ${c}, ${c} accepts on a second browser too`, async () => { await walk.invite(c!); await walk.accept(c!); await walk.newBrowser(c!, codes.get(c!)!); await walk.send(c!); }],
+      [`remove ${c}, write`, async () => { await walk.remove(c!); await walk.send(b); }],
+      [`invite ${c} back, accept`, async () => { await walk.invite(c!); await walk.accept(c!); await walk.send(admin); }],
+      [`remove ${b}, write, invite ${b} back`, async () => { await walk.remove(b); await walk.send(admin); await walk.check(); await walk.invite(b); await walk.accept(b); await walk.send(b); }],
+      [`${b} leaves, write, invite ${b} back`, async () => { await walk.leave(b); await walk.send(admin); await walk.check(); await walk.invite(b); await walk.accept(b); await walk.send(b); }],
       ['rename', async () => { await walk.rename('Walk group 2'); await walk.send(admin); }],
     ];
-    for (const [name, run] of steps) {
+    const runnable = c ? steps : steps.filter(([name]) => !name.includes('undefined'));
+    for (const [name, run] of runnable) {
       log(name);
       await run();
       await walk.check(40);

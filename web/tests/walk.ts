@@ -47,11 +47,10 @@ export class Walk {
   readonly log: string[] = [];
   private n = 0;
   /**
-   * Known gap, until decliners are taken out of the group's encryption (thread "Remove decliners
-   * from group encryption"): someone who declined and later accepts may read what was sent in
-   * between. While true, that alone isn't reported. Remove with the fix.
+   * Set to true to not report someone who declined and later accepted reading what was sent in
+   * between (the bug fixed in #56). Kept for checking an older build.
    */
-  static declinedMayRead = true;
+  static declinedMayRead = false;
   name: string;
   avatar?: string;
   /** The group's id, once made. */

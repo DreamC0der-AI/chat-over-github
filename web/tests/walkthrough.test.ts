@@ -1,12 +1,9 @@
 // Membership walkthroughs: chains of invite, accept, decline, remove, leave and re-invite, with
 // messages between every step, checked against a model of who may read what (tests/walk.ts).
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { world, type World } from './harness';
 import { cast, Walk } from './walk';
 
-// These chains check the decline leak themselves (as expected failures below).
-beforeEach(() => void (Walk.declinedMayRead = false));
-afterEach(() => void (Walk.declinedMayRead = true));
 
 let w: World;
 afterEach(() => w?.stop());

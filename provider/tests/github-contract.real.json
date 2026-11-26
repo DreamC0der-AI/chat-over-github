@@ -1,0 +1,192 @@
+{
+  "recorded": "2026-11-26",
+  "note": "Answers of real GitHub to scripts/github-contract.ts, signed in through the chatovergithub GitHub App. Re-record with npm run live:contract -w provider.",
+  "steps": [
+    {
+      "step": "owner creates a private repo",
+      "status": 201
+    },
+    {
+      "step": "invitee reads it before any invitation",
+      "status": 404
+    },
+    {
+      "step": "owner invites",
+      "status": 201,
+      "facts": {
+        "gaveInvitation": true
+      }
+    },
+    {
+      "step": "owner invites again while the first is open",
+      "status": 201,
+      "facts": {
+        "sameInvitation": true
+      }
+    },
+    {
+      "step": "owner lists invitations",
+      "status": 200,
+      "facts": {
+        "open": 1
+      }
+    },
+    {
+      "step": "invitee lists their invitations",
+      "status": 200,
+      "facts": {
+        "listed": false
+      }
+    },
+    {
+      "step": "invitee reads the repo while invited",
+      "status": 404
+    },
+    {
+      "step": "invitee declines",
+      "status": 204
+    },
+    {
+      "step": "owner lists invitations after the decline",
+      "status": 200,
+      "facts": {
+        "open": 0
+      }
+    },
+    {
+      "step": "owner invites after the decline",
+      "status": 201,
+      "facts": {
+        "gaveInvitation": true
+      }
+    },
+    {
+      "step": "the new invitation is a new one",
+      "status": 200,
+      "facts": {
+        "newId": true
+      }
+    },
+    {
+      "step": "owner removes the invitee as collaborator while only invited",
+      "status": 204
+    },
+    {
+      "step": "owner lists invitations after that removal",
+      "status": 200,
+      "facts": {
+        "open": 1
+      }
+    },
+    {
+      "step": "owner invites again",
+      "status": 201,
+      "facts": {
+        "gaveInvitation": true
+      }
+    },
+    {
+      "step": "invitee accepts",
+      "status": 204
+    },
+    {
+      "step": "invitee reads the repo after accepting",
+      "status": 200
+    },
+    {
+      "step": "invitee accepts the same invitation again",
+      "status": 404
+    },
+    {
+      "step": "invitee writes a file",
+      "status": 201
+    },
+    {
+      "step": "owner invites someone who is already a collaborator",
+      "status": 204,
+      "facts": {
+        "gaveInvitation": false
+      }
+    },
+    {
+      "step": "owner lists collaborators",
+      "status": 200,
+      "facts": {
+        "listed": true
+      }
+    },
+    {
+      "step": "owner removes the collaborator",
+      "status": 204
+    },
+    {
+      "step": "removed collaborator reads the repo",
+      "status": 404
+    },
+    {
+      "step": "removed collaborator writes a file",
+      "status": 404
+    },
+    {
+      "step": "owner invites the removed person again",
+      "status": 201,
+      "facts": {
+        "gaveInvitation": true
+      }
+    },
+    {
+      "step": "removed person accepts the new invitation",
+      "status": 204
+    },
+    {
+      "step": "they read the repo again",
+      "status": 200
+    },
+    {
+      "step": "collaborator leaves (removes themselves)",
+      "status": 204
+    },
+    {
+      "step": "they read the repo after leaving",
+      "status": 404
+    },
+    {
+      "step": "collaborator who left tries to remove the owner",
+      "status": 404
+    },
+    {
+      "step": "owner invites the one who left",
+      "status": 201,
+      "facts": {
+        "gaveInvitation": true
+      }
+    },
+    {
+      "step": "owner withdraws the invitation",
+      "status": 204
+    },
+    {
+      "step": "invitee accepts the withdrawn invitation",
+      "status": 404
+    },
+    {
+      "step": "owner invites once more",
+      "status": 201,
+      "facts": {
+        "gaveInvitation": true
+      }
+    },
+    {
+      "step": "invitee tries to invite someone (not the owner)",
+      "status": 404
+    },
+    {
+      "step": "owner deletes the repo",
+      "status": 204
+    },
+    {
+      "step": "invitee accepts an invitation to the deleted repo",
+      "status": 404
+    }
+  ]
+}

@@ -315,6 +315,15 @@ export class MockGitHub {
       if (!r || !this.canRead(r, user)) return resp(404, { message: 'Not Found' });
       return resp(200, { full_name: `${r.owner}/${r.name}`, private: r.private, default_branch: 'main' });
     }
+    // Deleting a repo (owner only) also ends its open invitations: accepting one then answers 404.
+    if ((m = path.match(/^\/repos\/([^/]+)\/([^/]+)$/)) && method === 'DELETE') {
+      const k = `${m[1]}/${m[2]}`.toLowerCase();
+      const r = this.repos.get(k);
+      if (!r || !this.canRead(r, user)) return resp(404, { message: 'Not Found' });
+      if (r.owner !== user) return resp(403, { message: 'Must have admin rights to Repository.' });
+      this.repos.delete(k);
+      return resp(204, undefined);
+    }
     if ((m = path.match(/^\/repos\/([^/]+)\/([^/]+)\/(.*)$/))) {
       const r = this.repos.get(`${m[1]}/${m[2]}`.toLowerCase());
       if (!r || !this.canRead(r, user)) return resp(404, { message: 'Not Found' });
@@ -333,6 +342,9 @@ export class MockGitHub {
       const slice = all.slice((page - 1) * 100, page * 100);
       return resp(200, { total_count: all.length, repositories: slice.map((r) => ({ name: r.name, full_name: `${r.owner}/${r.name}` })) });
     }
+    // A GitHub App's user token gets an empty list here, even with invitations open (checked
+    // against real GitHub, tests/github-contract.real.json): the invite inbox is how they're found.
+    if (path === '/user/repository_invitations' && method === 'GET') return resp(200, []);
     if ((m = path.match(/^\/user\/repository_invitations\/(\d+)$/)) && method === 'DELETE') {
       const id = Number(m[1]);
       for (const r of this.repos.values()) {
