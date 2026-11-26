@@ -404,7 +404,7 @@ const SLOW_REQUEST_MS = 5_000;
 const WRITE_TIMEOUT_MS = 90_000;
 const WRITE_SLOWEST_BYTES_PER_S = 16_000;
 /** Chats checked at once in a sync step: each check is a GitHub round trip, slow on a phone. */
-const CHECKS_AT_ONCE = 4;
+const CHECKS_AT_ONCE = 8;
 // Rotation itself is weekly (keyhold DEFAULT_PREKEYS); this is only how often to look.
 const PREKEY_CHECK_MS = at(10 * 60_000);
 /** A chat GitHub refuses us (maybe for a moment) is tried again after this, then less and less often. */
@@ -1104,6 +1104,8 @@ export class Session {
     this.syncStarting = this.startSync()
       .catch((e) => (this.syncError = describeError(e)))
       .then(() => {
+        // Just read (or failed, and the step retries on its own timer): the first step needn't read it again.
+        if (this.personal) this.lastPull = this.lastFullPull = Date.now();
         this.syncReady = true;
         this.bump();
       });
@@ -3251,8 +3253,10 @@ export class Session {
         this.lastPollError = this.noteError(e);
         this.bump();
       }
-      // A whole step ran since the start or the last wake: caught up (or failed, which the dot shows instead).
-      if (this.catchingUp && this.syncReady && started >= this.wokeAt) {
+      // A whole step ran since the start or the last wake: caught up (or failed, which the dot shows
+      // instead). The start-up read of the synced store counts by itself (loadingChats), so a step
+      // that ends just before it doesn't leave the dot waiting for the next one.
+      if (this.catchingUp && started >= this.wokeAt) {
         this.catchingUp = false;
         this.bump();
       }
@@ -3350,23 +3354,29 @@ export class Session {
     // GitHub asked us to slow down: nothing goes out until the pause is over.
     if (now < this.rateLimitedUntil) return;
     const hidden = document.visibilityState === 'hidden';
-    if (now - this.lastInvites > (hidden ? HIDDEN_POLL_MS : this.invites.size ? INVITE_PENDING_POLL_MS : INVITE_POLL_MS)) {
-      this.lastInvites = now;
-      await this.checkInvites();
-    }
-    if (now - this.lastClosures > (hidden ? HIDDEN_POLL_MS : INVITE_POLL_MS)) {
-      this.lastClosures = now;
-      await this.checkClosures().catch(() => undefined);
-    }
-    await this.resolveDuplicates().catch(() => undefined);
-    await this.checkOwnKey();
-    if (this.stopped) return;
+    // The parts below don't depend on each other, so they run side by side: a step then takes as
+    // long as its longest part, not their sum. One after another, catching up after a reload was
+    // some twenty round trips in a row (most of a minute on a slow connection).
+    const parts: Promise<unknown>[] = [];
+    parts.push((async () => {
+      if (now - this.lastInvites > (hidden ? HIDDEN_POLL_MS : this.invites.size ? INVITE_PENDING_POLL_MS : INVITE_POLL_MS)) {
+        this.lastInvites = now;
+        await this.checkInvites();
+      }
+      if (now - this.lastClosures > (hidden ? HIDDEN_POLL_MS : INVITE_POLL_MS)) {
+        this.lastClosures = now;
+        await this.checkClosures().catch(() => undefined);
+      }
+      await this.resolveDuplicates().catch(() => undefined);
+    })());
+    parts.push(this.checkOwnKey());
     // The chat on screen: has someone it waits for declined without the chat saying so?
     const open = this.activeConvo && !hidden ? this.convo(this.activeConvo)?.live : undefined;
-    if (open) await this.checkInvited(open).catch(() => undefined);
-    await this.syncPersonal(now, hidden);
+    if (open) parts.push(this.checkInvited(open).catch(() => undefined));
+    parts.push(this.syncPersonal(now, hidden));
     if (now - this.lastBlobPrune > BLOB_PRUNE_MS) void this.pruneBlobs();
     const due: Group[] = [];
+    const lost: Group[] = [];
     for (const g of [...this.chat.groups.values()]) {
       if (!g.active) {
         // Refused by GitHub, maybe only for a moment: check again with a growing wait (also after
@@ -3374,19 +3384,28 @@ export class Session {
         if (!this.isUnreachable(g)) continue;
         const l = this.lost.get(g.id);
         if (l && now < l.next) continue;
-        await this.syncGroup(g);
-        const again = this.lost.get(g.id);
-        if (again) {
-          again.delay = l ? Math.min(l.delay * 2, LOST_RETRY_MAX_MS) : LOST_RETRY_MS;
-          again.next = Date.now() + again.delay;
-        }
+        lost.push(g);
         continue;
       }
       // The chat on screen also has its own lane (openChatLoop), so a busy step doesn't hold it up.
       if (this.groupDue(g, now, hidden)) due.push(g);
     }
     // Several at once: one at a time, a phone spent most of a step waiting on round trips.
-    await inParallel(due, (g) => this.checkGroup(g, now, hidden), CHECKS_AT_ONCE);
+    parts.push(inParallel(due, (g) => this.checkGroup(g, now, hidden), CHECKS_AT_ONCE));
+    parts.push(inParallel(lost, async (g) => {
+      const l = this.lost.get(g.id);
+      await this.syncGroup(g);
+      const again = this.lost.get(g.id);
+      if (again) {
+        again.delay = l ? Math.min(l.delay * 2, LOST_RETRY_MAX_MS) : LOST_RETRY_MS;
+        again.next = Date.now() + again.delay;
+      }
+    }, CHECKS_AT_ONCE));
+    // Every part runs to its end before the step is over (the next step must not overlap it); the
+    // first failure is then the step's.
+    const failed = (await Promise.allSettled(parts)).find((r): r is PromiseRejectedResult => r.status === 'rejected');
+    if (failed) throw failed.reason;
+    if (this.stopped) return;
     // Keep this browser's pre-key published and fresh (accounts from before pre-keys get one
     // here). Only after a first full round, so invitations accepted elsewhere were joined first:
     // a retired key is pruned for good.
