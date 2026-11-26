@@ -204,7 +204,7 @@ code { background: var(--subtle); padding: 1px 5px; border-radius: 5px; }
 .field-label { display: flex; align-items: center; gap: 6px; }
 .inline-form { display: flex; gap: 8px; }
 
-/* people picker (new group) */
+/* people picker (new group, group info) */
 .picker { display: flex; flex-direction: column; gap: 6px; font-weight: 400; }
 .picker-box {
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-height: 36px; padding: 4px 8px;
@@ -226,6 +226,8 @@ code { background: var(--subtle); padding: 1px 5px; border-radius: 5px; }
 .picker-item.on .picker-mark { background: var(--accent-solid); border-color: var(--accent-solid); }
 .picker-item:not(.on) .picker-mark svg { color: var(--muted); }
 .inline-form .input { flex: 1; min-width: 0; }
+.invite-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: start; }
+.invite-form > .btn { min-height: 36px; }
 
 /* hints: a round "?" with the explanation behind it */
 .hint-wrap { display: inline-flex; vertical-align: middle; }
