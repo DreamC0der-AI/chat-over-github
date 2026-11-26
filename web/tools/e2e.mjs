@@ -283,12 +283,18 @@ try {
   await alice2.page.getByRole('button', { name: 'Add this browser' }).click();
   // Catching up on her own chats: never shown as an invitation from herself.
   let selfInvite = false;
+  let emptyShown = false;
+  let progressShown = false;
   const watchSelf = setInterval(() => {
     alice2.page.locator('.invite-title', { hasText: 'alice invited you' }).count().then((n) => { if (n) selfInvite = true; }, () => {});
+    alice2.page.getByText('No chats yet').count().then((n) => { if (n) emptyShown = true; }, () => {});
+    alice2.page.locator('.list-progress').count().then((n) => { if (n) progressShown = true; }, () => {});
   }, 100);
   await alice2.page.locator('.chat-item', { hasText: 'bob' }).waitFor({ timeout: 60000 });
   clearInterval(watchSelf);
   check(!selfInvite, 'second device never shows itself as the inviter');
+  check(!emptyShown, 'second device never says "No chats yet" while it reads its chat list');
+  check(progressShown, 'second device shows a progress bar while it loads and adds chats');
   check(true, 'second device joined the DM');
   await openChat(alice2, 'bob');
   await alice2.page.locator('.sys.divider', { hasText: 'Earlier messages aren’t on this browser' }).waitFor({ timeout: 10000 });
