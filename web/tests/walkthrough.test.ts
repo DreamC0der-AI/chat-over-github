@@ -22,9 +22,7 @@ async function start(logins: string[], name = 'Hikers', settle = true) {
 }
 
 describe('group walkthroughs', () => {
-  // Fails until decliners are taken out of the group's encryption (thread "Remove decliners from
-  // group encryption"): turn back into it() with that fix.
-  it.fails('alone, then invite, decline, write, invite again, accept', async () => {
+  it('alone, then invite, decline, write, invite again, accept', async () => {
     const { walk } = await start(['alice', 'bob']);
     await walk.create();
     await walk.send('alice');
@@ -101,9 +99,7 @@ describe('group walkthroughs', () => {
     await walk.check();
   });
 
-  // Fails until decliners are taken out of the group's encryption (thread "Remove decliners from
-  // group encryption"): turn back into it() with that fix.
-  it.fails('every way out and back for one person, with messages between', async () => {
+  it('every way out and back for one person, with messages between', async () => {
     const { walk } = await start(['alice', 'bob', 'carol']);
     await walk.create(['bob', 'carol']);
     await walk.accept('carol');
@@ -127,8 +123,8 @@ describe('group walkthroughs', () => {
     }
   });
 
-  // Fails until decliners are taken out of the group's encryption (thread "Remove decliners from
-  // group encryption"): turn back into it() with that fix.
+  // Fails today: carol joins by an admin's Welcome, and bob's quick send from just before that
+  // add is reposted to her (keyhold repostStale, as in the test above).
   it.fails('without pre-keys: invitees join only on accept, same rules', async () => {
     const { walk } = await start(['alice', 'bob', 'carol'], 'Hikers', false);
     await walk.create(['bob']);
