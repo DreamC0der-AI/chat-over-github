@@ -297,7 +297,7 @@ function useHeld(on: boolean, ms: number): boolean {
   return on || held;
 }
 
-/** The account bar's dot (and the chat bar's, on a phone): green and still when up to date, breathing while syncing, amber on a problem. */
+/** The account bar's dot (and the chat bar's, on a phone): green and still when up to date, breathing while catching up, amber on a problem. */
 export function SyncDot({ session, className = '' }: { session: Session; className?: string }) {
   const err = session.lastPollError;
   const syncing = useHeld(session.syncing(), 1600);

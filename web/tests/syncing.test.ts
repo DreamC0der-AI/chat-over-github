@@ -1,5 +1,5 @@
-// The account bar's dot breathes while the app catches up: at start, after the tab is shown
-// again (switching to the phone), and while a chat fetches new messages. Not while it only watches.
+// The account bar's dot breathes while the app catches up: at start, and after the tab is shown
+// again (switching to the phone). Not for the routine syncs while the tab stays open.
 import { afterEach, describe, expect, it } from 'vitest';
 import { world, type World } from './harness';
 
@@ -10,7 +10,7 @@ afterEach(() => {
 });
 
 describe('syncing state', () => {
-  it('on at start, after a wake and while new messages come in; off once a step finds nothing new', async () => {
+  it('on after a wake until a step has run; off for routine syncs, even ones that bring messages', async () => {
     w = await world();
     const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
     for (const b of [alice, bob]) await b.setup();
@@ -24,7 +24,7 @@ describe('syncing state', () => {
     await alice.sync();
     expect(alice.s.syncing()).toBe(false);
 
-    // A new message: on while the chat fetches it, off afterwards.
+    // A new message while the tab stays open: fetched without lighting the dot.
     await bob.s.send(bob.chat('alice')!.live!, 'hi');
     const seen: boolean[] = [];
     const harnessFetch = globalThis.fetch;
@@ -38,7 +38,8 @@ describe('syncing state', () => {
       globalThis.fetch = harnessFetch;
     }
     expect(await alice.texts(alice.chat('bob'))).toContain('hi');
-    expect(seen).toContain(true);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen).not.toContain(true);
     expect(alice.s.syncing()).toBe(false);
 
     // Only watching (nothing new): stays off throughout.
