@@ -11,16 +11,19 @@ export const CONFIG = {
   appSlug: 'chatovergithub',
   /** Dev/test build against the in-memory GitHub mock. */
   mock: env.VITE_MOCK === '1',
-  /** Repo names: the same for every user, so they reveal nothing. */
-  directoryRepo: 'keyhold-id',
+  /**
+   * Repo names: the same for every user, so they reveal nothing. Builds never set the VITE_*
+   * names; only the live walkthrough does (live/), so its runs stay apart from real chats.
+   */
+  directoryRepo: (env.VITE_DIRECTORY_REPO as string | undefined) ?? 'keyhold-id',
   /**
    * The private "home" repo (vault + personal store). New users create it themselves before
    * installing the app, so GitHub's "Only select repositories" has something to select.
    */
-  homeRepo: 'chat-home',
+  homeRepo: (env.VITE_HOME_REPO as string | undefined) ?? 'chat-home',
   /** Home repo name used before 2026-11-13; kept for accounts that already have one. */
-  legacyHomeRepo: 'keyhold-home',
-  chatPrefix: 'ghchat-',
+  legacyHomeRepo: (env.VITE_HOME_REPO as string | undefined) ?? 'keyhold-home',
+  chatPrefix: (env.VITE_CHAT_PREFIX as string | undefined) ?? 'ghchat-',
 };
 
 export const installUrl = () => `https://github.com/apps/${CONFIG.appSlug}/installations/new`;

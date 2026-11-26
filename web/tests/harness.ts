@@ -143,8 +143,19 @@ function matches(m: Match, r: Req) {
   return m(r);
 }
 
-export async function world(): Promise<World> {
+/**
+ * live: run against real GitHub and the real Worker instead (live/walk.live.ts) with these
+ * sign-ins; each sync round then waits `pauseMs` first, as GitHub's copies can lag a moment.
+ */
+export interface LiveOptions {
+  tokens: Record<string, string>;
+  api: string;
+  pauseMs: number;
+}
+
+export async function world(live?: LiveOptions): Promise<World> {
   const backend = mockBackend();
+  const pause = () => (live ? new Promise<void>((r) => setTimeout(r, live.pauseMs)) : undefined);
   const realFetch = globalThis.fetch;
   /** Faults waiting for their request, first match wins; each is used up once it fires. */
   const faults: { m: Match; left: number; run: (r: Req, go: () => Promise<Response>) => Promise<Response> }[] = [];
@@ -185,9 +196,11 @@ export async function world(): Promise<World> {
     requests: [],
     offline: false,
     async browser(login, idb = new IDBFactory()) {
-      const token = `tok-${login}`;
-      const me = (await (await backend.fetch(`${ORIGIN}gh/user`, { headers: { authorization: `Bearer ${token}` } })).json()) as { id: number };
-      const s = new Session({ token, login, id: me.id }, { token: async () => token, indexedDB: idb });
+      const token = live ? live.tokens[login]! : `tok-${login}`;
+      const me = live
+        ? ((await (await realFetch(`${live.api}/user`, { headers: { authorization: `Bearer ${token}` } })).json()) as { id: number; login: string })
+        : ((await (await backend.fetch(`${ORIGIN}gh/user`, { headers: { authorization: `Bearer ${token}` } })).json()) as { id: number });
+      const s = new Session({ token, login: live ? login.toLowerCase() : login, id: me.id }, { token: async () => token, indexedDB: idb });
       await s.start();
       const b = new Browser(login, s, idb);
       watch(b);
@@ -212,13 +225,17 @@ export async function world(): Promise<World> {
     async until(cond, what, rounds = 15) {
       for (let i = 0; i < rounds; i++) {
         if (await cond()) return;
+        await pause();
         for (const b of all) await b.s.syncNow();
       }
       if (await cond()) return;
       throw new Error(`still not true after ${rounds} sync rounds: ${what}`);
     },
     async rounds(n = 3) {
-      for (let i = 0; i < n; i++) for (const b of all) await b.s.syncNow();
+      for (let i = 0; i < n; i++) {
+        await pause();
+        for (const b of all) await b.s.syncNow();
+      }
     },
     hold(m) {
       let release!: () => void;

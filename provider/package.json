@@ -10,7 +10,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "build:live": "esbuild scripts/live-github.ts --bundle --platform=node --format=esm --outfile=scripts/live-github.mjs"
+    "build:live": "esbuild scripts/live-github.ts --bundle --platform=node --format=esm --outfile=scripts/live-github.mjs",
+    "live:contract": "esbuild scripts/live-contract.ts --bundle --platform=node --format=esm --outfile=scripts/live-contract.mjs && node scripts/live-contract.mjs"
   },
   "dependencies": {
     "keyhold": "github:DreamC0der-AI/keyhold#202c6b69d8527315e2600f670ec9a2c04c819431"
