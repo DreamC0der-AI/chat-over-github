@@ -80,6 +80,8 @@ try {
   await headDot.and(pg.locator('.syncing')).waitFor({ state: 'detached', timeout: 15000 });
   check(true, 'and goes still once caught up');
   await pg.setViewportSize({ width: 1280, height: 800 });
+  // Back to desktop size: wait for the chat list to take its width again before measuring it below.
+  await pg.waitForFunction(() => Math.round(document.querySelector('.sidebar').getBoundingClientRect().width) === 320, null, { timeout: 5000 }).catch(() => undefined);
 
   // ---- chat list width
   const p = alice;
