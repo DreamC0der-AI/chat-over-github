@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Live end-to-end test of the invite inbox through the deployed Worker.
 # Bob = the account with the app installed (selected repos). Alice = another account.
-# Usage: WORKER=https://chat-over-github.akagishigerutokyo.workers.dev ./invite-test.sh
+# Usage: WORKER=https://chat-over-github.sunzy.app ./invite-test.sh
 set -uo pipefail
 : "${WORKER:?set WORKER to the Worker URL}"
 API=https://api.github.com

@@ -2304,7 +2304,34 @@ export class Session {
     // browser catching up on other chats: each invitation is joined by one caller only (busy).
     const run = this.invitesQueue.then(() => this.collectInvites(force));
     this.invitesQueue = run.then(() => undefined, () => undefined);
+    // The first look (done or failed) ends "Loading your chats": the joins after it show their own progress.
+    void run.finally(() => {
+      if (!this.invitesLooked) {
+        this.invitesLooked = true;
+        this.bump();
+      }
+    }).catch(() => undefined);
     await this.joinDue(await run);
+  }
+  private invitesLooked = false;
+  /** Chats this browser has started adding since it opened (for the "3 of 8" count). */
+  private catchUpSeen = new Set<string>();
+
+  /** Still reading which chats this account has (synced chat list and invitations), at start-up. */
+  loadingChats(): boolean {
+    return this.phase === 'ready' && (!this.syncReady || !this.invitesLooked);
+  }
+
+  /** Chats from other browsers being added here: how many of those seen so far are done. */
+  catchUpProgress(): { done: number; total: number } | undefined {
+    const left = this.pendingInvites().filter((i) => i.mine && i.status !== 'invited');
+    for (const i of left) this.catchUpSeen.add(i.key);
+    if (!left.length) {
+      this.catchUpSeen.clear();
+      return undefined;
+    }
+    const total = this.catchUpSeen.size;
+    return { done: total - left.length, total };
   }
   private invitesQueue: Promise<void> = Promise.resolve();
 

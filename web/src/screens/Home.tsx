@@ -53,10 +53,11 @@ export function Home({ session, route }: { session: Session; route: string }) {
             <label className="sr" htmlFor="q">Search chats</label>
             <input id="q" type="search" placeholder="Search" value={q} onChange={(e) => setQ(e.target.value)} />
           </div>
+          <ListProgress session={session} empty={!convos.length} />
           <ul className="chat-list">
             <Invites session={session} />
             {shown.map((c) => <ChatRow key={c.key} session={session} c={c} active={c.key === convo?.key} />)}
-            {!convos.length && !session.pendingInvites().length && (
+            {!convos.length && !session.pendingInvites().length && !session.loadingChats() && (
               <li className="empty">
                 <p>No chats yet</p>
                 <button className="btn primary" onClick={() => setModal('dm')}>Start a chat</button>
@@ -190,6 +191,23 @@ export function endedText(session: Session, e: NonNullable<import('../lib/sessio
     case 'quit': return `You left ${what}`;
     case 'removed': return e.by ? `${who} removed you` : `You were removed from ${what}`;
   }
+}
+
+/** Start-up and new-browser progress, above the chat list: reading the chat list, then adding chats. */
+function ListProgress({ session, empty }: { session: Session; empty: boolean }) {
+  // A reload shows the chats from this browser at once, so "Loading" is only for an empty list.
+  const loading = empty && session.loadingChats();
+  const p = session.catchUpProgress();
+  if (!loading && !p) return null;
+  const label = p ? `Adding chats to this browser · ${p.done} of ${p.total}` : 'Loading your chats…';
+  return (
+    <div className="list-progress" role="status">
+      <div className="small muted">{label}</div>
+      <div className="bar" role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={p?.total} aria-valuenow={p?.done}>
+        <span className={p ? undefined : 'indeterminate'} style={p ? { width: `${Math.max(4, (p.done / p.total) * 100)}%` } : undefined} />
+      </div>
+    </div>
+  );
 }
 
 function Invites({ session }: { session: Session }) {

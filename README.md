@@ -2,7 +2,7 @@
 
 End-to-end encrypted DMs and group chats that use GitHub as the only backend. Each chat is a private repo, GitHub decides who may write, and the app keeps everything encrypted.
 
-Live at https://chat-over-github.akagishigerutokyo.workers.dev
+Live at https://chat-over-github.sunzy.app (old address https://chat-over-github.akagishigerutokyo.workers.dev still works)
 
 This is an app built on [keyhold](https://github.com/DreamC0der-AI/keyhold), the encryption framework. Keyhold has the protocol: storage kinds, MLS groups, group policy, identity and keys. It knows nothing about GitHub. Everything GitHub-specific is here.
 
