@@ -120,9 +120,7 @@ describe('group walkthroughs', () => {
     }
   });
 
-  // Fails today: carol joins by an admin's Welcome, and bob's quick send from just before that
-  // add is reposted to her (keyhold repostStale, as in the test above).
-  it.fails('without pre-keys: invitees join only on accept, same rules', async () => {
+  it('without pre-keys: invitees join only on accept, same rules', async () => {
     const { walk } = await start(['alice', 'bob', 'carol'], 'Hikers', false);
     await walk.create(['bob']);
     await walk.send('alice');
@@ -165,9 +163,7 @@ describe('DM walkthroughs', () => {
     await b.s.declineInvite(b.inviteFrom(from)!.key);
   }
 
-  // Fails today: after a decline the inviter's chat stays "Invited", Start chat opens that same
-  // chat, and DMs have no Resend, so there is no way to ask again.
-  it.fails('after a decline, the one who asked can ask again', async () => {
+  it('after a decline, the one who asked can ask again', async () => {
     const { a: alice, b: bob } = await dmStart();
     await alice.s.startDm('bob');
     await decline(bob, 'alice');
@@ -227,9 +223,7 @@ describe('DM walkthroughs', () => {
     await w.checkConverged();
   });
 
-  // Fails today: the browser that didn't accept keeps showing the invitation card (its notice is
-  // gone from the inbox, but notice cards are only dropped once accepted).
-  it.fails("an accept on one browser carries to the other; Delete chat, then the other side writes", async () => {
+  it("an accept on one browser carries to the other; Delete chat, then the other side writes", async () => {
     const { a: alice, b: bob, codes } = await dmStart();
     const bob2 = await w.browser('bob');
     await bob2.restore(codes.get('bob')!);
