@@ -235,6 +235,8 @@ export interface PendingInvite {
   noticeId?: string;
   error?: string;
   since: number;
+  /** When the person pressed Accept here: others show "joined" at this time. */
+  acceptedAt?: number;
   attempts: number;
   nextTry: number;
   dismissed?: boolean;
@@ -2403,8 +2405,9 @@ export class Session {
     }
   }
 
-  private async systemNote(groupId: string, body: string) {
-    const ts = Date.now();
+  /** `at`: when it happened, if not now (never later than now). */
+  private async systemNote(groupId: string, body: string, at?: number) {
+    const ts = at !== undefined && at < Date.now() ? at : Date.now();
     await this.put({ groupId, id: `sys-${ts}-${Math.random().toString(36).slice(2, 8)}`, ts, from: '', fromFp: '', mine: false, kind: 'system', body });
   }
 
@@ -2559,7 +2562,15 @@ export class Session {
     for (const e of events) {
       const who = 'address' in e ? `@${loginFrom(e.address)}` : '';
       if (e.type === 'joined') {
-        await this.systemNote(g.id, e.address === this.address ? 'You joined. Messages are end-to-end encrypted.' : `${who} joined`);
+        // At the time they accepted, so it sits before what they could read from then on (not
+        // when this app noticed their commit, which can be after messages they already read).
+        let at = e.address === this.address ? undefined : e.at;
+        if (at !== undefined) {
+          // Their clock may be behind ours: never before we invited them.
+          const sent = await this.db.lastMessage<MsgRecord>(g.id, (x) => x.kind === 'system' && !!x.body?.startsWith(`Invitation sent to ${who}.`));
+          if (sent && at <= sent.ts) at = sent.ts + 1;
+        }
+        await this.systemNote(g.id, e.address === this.address ? 'You joined. Messages are end-to-end encrypted.' : `${who} joined`, at);
         this.peers.delete(e.address);
         if (r.resets?.[e.address] || r.notJoined?.includes(e.address)) {
           if (r.resets) delete r.resets[e.address];
@@ -2822,16 +2833,18 @@ export class Session {
         const mine = owner === this.login.toLowerCase() || [...this.records.values()].some((r) => r.space === space && !r.ended && !r.purged);
         let accepted = mine;
         let details: PendingInvite['details'];
+        let acceptedAt: number | undefined;
         for (const [k, v] of this.invites) {
           if (k.startsWith('notice:') && v.status !== 'invited' && v.from === from) {
             this.invites.delete(k);
             this.activities.rekey(k, space);
             details = v.details;
+            acceptedAt = v.acceptedAt;
             accepted = true;
             break;
           }
         }
-        const inv: PendingInvite = { key: space, space, from, status: accepted ? 'joining' : 'invited', since: now, attempts: 0, nextTry: 0, mine, details };
+        const inv: PendingInvite = { key: space, space, from, status: accepted ? 'joining' : 'invited', since: now, attempts: 0, nextTry: 0, mine, details, acceptedAt };
         this.invites.set(space, inv);
         if (!accepted) void this.checkInviter(inv);
       }
@@ -2844,7 +2857,7 @@ export class Session {
         if (!n) continue;
         this.invites.delete(n[0]);
         this.activities.rekey(n[0], space);
-        this.invites.set(space, { key: space, space, from, status: 'joining', since: now, attempts: 0, nextTry: 0, details: n[1].details, rejoin: true });
+        this.invites.set(space, { key: space, space, from, status: 'joining', since: now, attempts: 0, nextTry: 0, details: n[1].details, acceptedAt: n[1].acceptedAt, rejoin: true });
       }
       // Accepted notices whose repo never showed up go away after a few minutes.
       for (const [k, v] of this.invites) if (k.startsWith('notice:') && v.status !== 'invited' && now - v.since > 5 * 60_000) this.invites.delete(k);
@@ -2886,7 +2899,7 @@ export class Session {
     this.activities.stepFor(inv.key, JOIN_UNLOCK, space);
     this.bump();
     try {
-      const g = await chat.join(space);
+      const g = await chat.join(space, inv.acceptedAt !== undefined ? { acceptedAt: inv.acceptedAt } : {});
       if (g) {
         const r = this.fill(g); // while the invitation (and its note) is still known
         this.invites.delete(inv.key);
@@ -2983,6 +2996,7 @@ export class Session {
     const from = loginFrom(inv.from);
     const plan = [...(inv.pointer ? ['Accepting the GitHub invitation', 'Finding the chat'] : []), JOIN_UNLOCK, JOIN_LOAD];
     const what = inv.details?.kind === 'group' ? (inv.details.name ? `Joining ${inv.details.name}` : 'Joining the group') : `Joining the chat with @${from}`;
+    const acceptedAt = Date.now();
     await this.activities.run(what, plan, async (t) => {
       let gone = false;
       // The card said they reset their key: accepting is trusting the new one.
@@ -2996,7 +3010,7 @@ export class Session {
         t.step('Finding the chat');
       }
       if (inv.noticeId) await p.inviteInbox.delete(inv.noticeId).catch(() => {});
-      Object.assign(inv, { status: 'joining', pointer: undefined, noticeId: undefined, nextTry: 0, attempts: 0, since: Date.now(), gone });
+      Object.assign(inv, { status: 'joining', pointer: undefined, noticeId: undefined, nextTry: 0, attempts: 0, since: Date.now(), acceptedAt, gone });
       this.bump();
       // auto: called from inside the invite check, which already holds its queue.
       await (auto ? this.checkInvitesNow(true) : this.checkInvites(true));
