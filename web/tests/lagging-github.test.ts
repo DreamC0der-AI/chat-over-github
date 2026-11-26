@@ -40,4 +40,55 @@ describe('GitHub answering from a copy a moment behind', () => {
     await w.until(async () => (await alice.texts(alice.chat('Hikers'))).includes('still here'), 'alice reads bob');
     await w.checkConverged();
   });
+
+  // After Accept, GitHub lets the person into the repo but its list of their repos can be behind.
+  const emptyList = JSON.stringify({ total_count: 0, repositories: [] });
+  const reposOf = (login: string, on: () => boolean) => (r: { login?: string; method: string; url: string }) => on() && r.login === login && r.method === 'GET' && /\/user\/installations\/\d+\/repositories/.test(r.url);
+
+  it('Accept keeps looking for the chat while GitHub does not list its repo yet, and ends with the chat open', async () => {
+    w = await world();
+    const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
+    for (const b of [alice, bob]) await b.setup();
+    await alice.s.createGroup('Hikers', ['bob']);
+    await w.until(() => !!bob.inviteFrom('alice'), 'bob sees the invitation');
+    // The first look after Accept (one request per installation) misses the new repo.
+    w.fail(reposOf('bob', () => true), 200, { body: emptyList, times: 2 });
+    await bob.s.acceptInvite(bob.inviteFrom('alice')!.key);
+    // (The group's name reaches a new member a moment later.)
+    expect(bob.chats().map((c) => !!c.live)).toEqual([true]);
+    expect(bob.invites()).toEqual([]);
+  });
+
+  it('a reload between Accept and the join carries on with the join: the invitation is not asked again', async () => {
+    w = await world();
+    const [alice, bob0] = [await w.browser('alice'), await w.browser('bob')];
+    for (const b of [alice, bob0]) await b.setup();
+    await alice.s.createGroup('Hikers', ['bob']);
+    await w.until(() => !!bob0.inviteFrom('alice'), 'bob sees the invitation');
+    let lagging = true;
+    w.fail(reposOf('bob', () => lagging), 200, { body: emptyList, times: 1000 });
+    await bob0.s.acceptInvite(bob0.inviteFrom('alice')!.key);
+    // GitHub accepted; the repo never showed up while Accept looked for it.
+    expect(bob0.chat('Hikers')).toBeUndefined();
+    expect(bob0.invites().map((i) => i.status)).toEqual(['joining']);
+
+    const bob = await w.reopen(bob0); // the reload
+    expect(bob.inviteFrom('alice')).toBeUndefined();
+    expect(bob.invites().map((i) => i.status)).toEqual(['joining']);
+    lagging = false;
+    let asked = false;
+    await w.until(() => {
+      asked ||= !!bob.inviteFrom('alice');
+      return !!bob.chat('Hikers')?.live;
+    }, 'bob joined without accepting again');
+    expect(asked).toBe(false);
+    expect(bob.invites()).toEqual([]);
+    await alice.s.send(alice.chat('Hikers')!.live!, 'welcome');
+    await w.until(async () => (await bob.texts(bob.chat('Hikers'))).includes('welcome'), 'bob reads alice');
+    // Nothing is left to bring the invitation back on the next reload.
+    const again = await w.reopen(bob);
+    await again.sync();
+    expect(again.invites()).toEqual([]);
+    expect(again.chat('Hikers')?.live).toBeTruthy();
+  });
 });

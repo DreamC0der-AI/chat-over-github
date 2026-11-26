@@ -215,6 +215,16 @@ export interface Convo {
   unreachable?: boolean;
 }
 
+/** An accepted invitation as this browser remembers it until the chat is joined (kv `accepted:<key>`). */
+interface KeptAccept {
+  key: string;
+  from: string;
+  at: number;
+  space?: string;
+  details?: InviteDetails;
+  rejoin?: boolean;
+}
+
 export interface PendingInvite {
   key: string;
   /** The chat's repo, once it shows up among the repos we can open. */
@@ -362,6 +372,10 @@ const FULL_SYNC_HIDDEN_MS = at(30 * 60_000);
 const SPACE_SCAN_MS = at(60_000);
 const SPACE_SCAN_PENDING_MS = at(15_000);
 const INVITE_RETRY_MS = at(10_000);
+/** After Accept, GitHub can take a while to list the chat's repo: look again after each of these. */
+const FIND_CHAT_WAITS_MS = [2_000, 3_000, 5_000, 8_000].map((ms) => (CONFIG.mock ? ms / 100 : ms)); // real waits, not the sync schedule
+/** An accepted invitation is remembered this long (also over a reload) while its chat hasn't shown up. */
+const ACCEPTED_KEPT_MS = 30 * 60_000;
 const INVITE_RETRY_MAX_MS = at(3 * 60_000);
 /**
  * A send skips its own sync when the chat was synced less than this long ago. Longer than the
@@ -1071,6 +1085,7 @@ export class Session {
     }
     for (const k of await this.db.keys('kv', 'declined:')) this.declined.add(k.slice('declined:'.length));
     for (const k of await this.db.keys('kv', 'block:')) this.blocked.add(k.slice('block:'.length));
+    await this.restoreAccepted();
     await this.afterReset().catch((e) => (this.lastPollError = describeError(e)));
     this.hasSyncKey = !!(await this.device.keystore.get(PERSONAL_KEY_SLOT));
     // The chat list and messages are already in this browser: show them now, and read what other
@@ -2834,6 +2849,7 @@ export class Session {
         let accepted = mine;
         let details: PendingInvite['details'];
         let acceptedAt: number | undefined;
+        let rekeyed: string | undefined;
         for (const [k, v] of this.invites) {
           if (k.startsWith('notice:') && v.status !== 'invited' && v.from === from) {
             this.invites.delete(k);
@@ -2841,11 +2857,16 @@ export class Session {
             details = v.details;
             acceptedAt = v.acceptedAt;
             accepted = true;
+            rekeyed = k;
             break;
           }
         }
         const inv: PendingInvite = { key: space, space, from, status: accepted ? 'joining' : 'invited', since: now, attempts: 0, nextTry: 0, mine, details, acceptedAt };
         this.invites.set(space, inv);
+        if (rekeyed) {
+          await this.keepAccepted(inv);
+          await this.dropAccepted(rekeyed);
+        }
         if (!accepted) void this.checkInviter(inv);
       }
       // Invited back: an invitation the person accepted that matched no other repo of that person
@@ -2857,10 +2878,18 @@ export class Session {
         if (!n) continue;
         this.invites.delete(n[0]);
         this.activities.rekey(n[0], space);
-        this.invites.set(space, { key: space, space, from, status: 'joining', since: now, attempts: 0, nextTry: 0, details: n[1].details, acceptedAt: n[1].acceptedAt, rejoin: true });
+        const back: PendingInvite = { key: space, space, from, status: 'joining', since: now, attempts: 0, nextTry: 0, details: n[1].details, acceptedAt: n[1].acceptedAt, rejoin: true };
+        this.invites.set(space, back);
+        await this.keepAccepted(back);
+        await this.dropAccepted(n[0]);
       }
-      // Accepted notices whose repo never showed up go away after a few minutes.
-      for (const [k, v] of this.invites) if (k.startsWith('notice:') && v.status !== 'invited' && now - v.since > 5 * 60_000) this.invites.delete(k);
+      // Accepted notices whose repo never showed up go away after a while (GitHub can list a
+      // repo late; a withdrawn invitation's never comes).
+      for (const [k, v] of this.invites) {
+        if (!k.startsWith('notice:') || v.status === 'invited' || now - v.since <= ACCEPTED_KEPT_MS) continue;
+        this.invites.delete(k);
+        await this.dropAccepted(k);
+      }
     }
     // A room GitHub refused us doesn't count as joined: being invited back is how access returns.
     have = new Set([...chat.groups.values()].filter((g) => g.active).map((g) => g.space));
@@ -2869,6 +2898,7 @@ export class Session {
       if (inv.busy) continue; // being joined by another caller
       if (inv.space && have.has(inv.space)) {
         this.invites.delete(inv.key);
+        await this.dropAccepted(inv.key);
         continue;
       }
       if (!inv.space || inv.dismissed || inv.status === 'invited') continue;
@@ -2890,6 +2920,31 @@ export class Session {
     }
   }
 
+  /**
+   * The person pressed Accept: that holds until the chat is joined, also over a reload. Without
+   * it, a reload between Accept and the join showed the same invitation again, to accept twice.
+   */
+  private async keepAccepted(inv: PendingInvite) {
+    const kept: KeptAccept = { key: inv.key, from: inv.from, at: inv.acceptedAt ?? Date.now(), ...(inv.space ? { space: inv.space } : {}), ...(inv.details ? { details: inv.details } : {}), ...(inv.rejoin ? { rejoin: true } : {}) };
+    await this.db.put('kv', kept, `accepted:${inv.key}`).catch(() => undefined);
+  }
+
+  private async dropAccepted(key: string) {
+    await this.db.del('kv', `accepted:${key}`).catch(() => undefined);
+  }
+
+  private async restoreAccepted() {
+    for (const k of await this.db.keys('kv', 'accepted:')) {
+      const a = await this.db.get<KeptAccept>('kv', k);
+      // Once its repo is known, the accepted chat is tried for as long as the invitation could live.
+      if (!a || typeof a.from !== 'string' || Date.now() - a.at > (a.space ? 7 * 24 * 3600_000 : ACCEPTED_KEPT_MS) || this.invites.has(a.key)) {
+        await this.db.del('kv', k);
+        continue;
+      }
+      this.invites.set(a.key, { key: a.key, from: a.from, status: 'joining', since: a.at, acceptedAt: a.at, attempts: 0, nextTry: 0, ...(a.space ? { space: a.space } : {}), ...(a.details ? { details: a.details } : {}), ...(a.rejoin ? { rejoin: true } : {}) });
+    }
+  }
+
   /** Join the chat of one accepted invitation (or one the account is already in). */
   private async joinOne(inv: PendingInvite) {
     const chat = this.chat!;
@@ -2903,6 +2958,7 @@ export class Session {
       if (g) {
         const r = this.fill(g); // while the invitation (and its note) is still known
         this.invites.delete(inv.key);
+        await this.dropAccepted(inv.key);
         if (r.ended || r.purged || inv.rejoin) {
           // Invited back: this join is newer than the end, on every browser of the account.
           r.ended = undefined;
@@ -3011,16 +3067,27 @@ export class Session {
       }
       if (inv.noticeId) await p.inviteInbox.delete(inv.noticeId).catch(() => {});
       Object.assign(inv, { status: 'joining', pointer: undefined, noticeId: undefined, nextTry: 0, attempts: 0, since: Date.now(), acceptedAt, gone });
+      if (!gone) await this.keepAccepted(inv);
       this.bump();
       // auto: called from inside the invite check, which already holds its queue.
-      await (auto ? this.checkInvitesNow(true) : this.checkInvites(true));
+      const look = () => (auto ? this.checkInvitesNow(true) : this.checkInvites(true));
+      await look();
+      // GitHub accepted, but doesn't list the chat's repo yet (it can lag a few seconds): keep
+      // looking, so Accept ends with the chat open and not with nothing.
+      for (const wait of FIND_CHAT_WAITS_MS) {
+        if (gone || auto || this.invites.get(key) !== inv || inv.space) break;
+        await sleep(wait);
+        await look();
+      }
       // Already accepted elsewhere shows up as a repo in that scan; if nothing did, it's gone.
       const still = [...this.invites.values()].find((i) => i === inv || (inv.space && i.key === inv.space)) ?? this.invites.get(key);
       // Taken by the app itself (both started a DM at once) and already retired, or a duplicate
       // room retired while another invitation from them waits (rule 2): nothing to say.
       const another = [...this.invites.values()].some((i) => i !== still && i.from === inv.from && i.status === 'invited') || (inv.details?.kind === 'dm' && !!this.liveDm(inv.from));
-      if (still && gone && (auto || another)) this.invites.delete(still.key);
-      else if (still && gone) {
+      if (still && gone && (auto || another)) {
+        this.invites.delete(still.key);
+        await this.dropAccepted(still.key);
+      } else if (still && gone) {
         Object.assign(still, { status: 'error', error: `@${from} withdrew this invitation or closed the chat.` });
         throw new Error(still.error);
       } else if (still?.status === 'waiting') t.wait(`Waiting for @${from}'s app to let you in`);
@@ -3063,6 +3130,7 @@ export class Session {
       await this.syncDeclined(inv.space);
     }
     this.invites.delete(key);
+    await this.dropAccepted(key);
     this.bump();
   }
 
@@ -3085,6 +3153,7 @@ export class Session {
   dismissInvite(key: string) {
     const inv = this.invites.get(key);
     if (inv) inv.dismissed = true;
+    void this.dropAccepted(key);
     this.bump();
   }
 
@@ -3269,6 +3338,9 @@ export class Session {
     await this.resolveDuplicates().catch(() => undefined);
     await this.checkOwnKey();
     if (this.stopped) return;
+    // The chat on screen: has someone it waits for declined without the chat saying so?
+    const open = this.activeConvo && !hidden ? this.convo(this.activeConvo)?.live : undefined;
+    if (open) await this.checkInvited(open).catch(() => undefined);
     await this.syncPersonal(now, hidden);
     if (now - this.lastBlobPrune > BLOB_PRUNE_MS) void this.pruneBlobs();
     const due: Group[] = [];

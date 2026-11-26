@@ -67,7 +67,7 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
   const listRef = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
   const roomIds = convo.rooms.map((r) => r.groupId).join(',');
-  const { busy, error, run } = useAction();
+  const { busy, doing, error, run } = useAction();
 
   useEffect(() => {
     let alive = true;
@@ -142,10 +142,11 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
   const peerLeft = !!live && dm && !!liveRec?.peerLeft && !joined && !peerReset;
   // They turned the invitation down (or it ran out): nothing is waiting, the one who asked can ask again.
   const notJoined = !!live && dm && !!peerAddr && !joined && !peerReset && !peerLeft && session.notJoined(live).includes(peerAddr);
-  const inviteBack = (a: string) => run(async () => go(`/c/${encodeURIComponent(await session.inviteBack(convo, a))}`));
+  // Each button says what it is doing itself: the others only wait (disabled).
+  const inviteBack = (a: string) => run(async () => go(`/c/${encodeURIComponent(await session.inviteBack(convo, a))}`), `back:${a}`);
   const last = convo.rooms[convo.rooms.length - 1]!;
   const space = group?.space ?? last.space;
-  const startNew = () => run(async () => go(`/c/${encodeURIComponent(await session.startDm(loginFrom(peerAddr!)))}`));
+  const startNew = () => run(async () => go(`/c/${encodeURIComponent(await session.startDm(loginFrom(peerAddr!)))}`), 'new');
 
   return (
     <>
@@ -173,19 +174,19 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
       {peerReset && (
         <div className="flash warn banner">
           <span><strong>{title} reset their encryption key.</strong> <Hint text={`Their old key can't be used any more. Invite ${title} again to keep chatting: their app asks them to accept, and your earlier messages stay here. Not sure it was them? Check with them another way first.`} /></span>
-          {!session.blocked.has(peerAddr!) && <button className="btn primary" disabled={busy} onClick={() => inviteBack(peerAddr!)}>{busy ? <><span className="spinner" /> Inviting…</> : 'Invite again'}</button>}
+          {!session.blocked.has(peerAddr!) && <button className="btn primary" disabled={busy} onClick={() => inviteBack(peerAddr!)}>{doing === `back:${peerAddr}` ? <><span className="spinner" /> Inviting…</> : 'Invite again'}</button>}
         </div>
       )}
       {groupResets.map((a) => (
         <div key={a} className="flash warn banner">
           <span><strong>@{loginFrom(a)} reset their encryption key.</strong> <Hint text="Their old key was taken out of the group. Invite them again to let the new key in; they won't see earlier messages. Not sure it was them? Check with them another way first." /></span>
-          <button className="btn" disabled={busy} onClick={() => inviteBack(a)}>{busy ? <span className="spinner" /> : 'Invite again'}</button>
+          <button className="btn" disabled={busy} onClick={() => inviteBack(a)}>{doing === `back:${a}` ? <><span className="spinner" /> Inviting…</> : 'Invite again'}</button>
         </div>
       ))}
       {notJoined && (
         <div className="flash warn banner">
           <span><strong>{title} didn’t join.</strong> <Hint text="They declined your invitation, or it ran out. Your messages stay here." /></span>
-          {session.isOwner(live!) && !session.blocked.has(peerAddr!) && <button className="btn primary" disabled={busy} onClick={() => run(() => session.invite(live!, [loginFrom(peerAddr!)]))}>{busy ? <><span className="spinner" /> Inviting…</> : 'Invite again'}</button>}
+          {session.isOwner(live!) && !session.blocked.has(peerAddr!) && <button className="btn primary" disabled={busy} onClick={() => run(() => session.invite(live!, [loginFrom(peerAddr!)]), 'again')}>{doing === 'again' ? <><span className="spinner" /> Inviting…</> : 'Invite again'}</button>}
         </div>
       )}
       {peerLeft && (
@@ -201,7 +202,7 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
             <Hint text={group ? "GitHub doesn't let you open it right now. If access comes back, it carries on." : 'Your copy of the messages stays here until you delete it.'} />
           </span>
           <span className="row">
-            {dm && peerAddr && !session.blocked.has(peerAddr) && <button className="btn primary" disabled={busy} onClick={startNew}>{busy ? <><span className="spinner" /> Starting…</> : `Start a new chat with ${title}`}</button>}
+            {dm && peerAddr && !session.blocked.has(peerAddr) && <button className="btn primary" disabled={busy} onClick={startNew}>{doing === 'new' ? <><span className="spinner" /> Starting…</> : `Start a new chat with ${title}`}</button>}
             <button className="btn" disabled={busy} onClick={() => run(async () => { if (await ask(deleteAsk(dm ? title : undefined))) { await session.deleteHistory(convo.key); go('/'); } })}>Delete chat</button>
           </span>
         </div>
