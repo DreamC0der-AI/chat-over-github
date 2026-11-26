@@ -111,13 +111,15 @@ describe('pre-keys', () => {
       'PUT topics',
     ]);
 
-    // Joining: her drops (listed, both read, the ticket deleted without a second read), the log
+    // Joining: her drops (listed, both read, the Welcome and the unused ticket deleted without a
+    // second read; a ticket left behind would keep her repo access after a removal), the log
     // (listed, its two entries read, hers written without asking for the one before), the mail
     // (nothing yet, and no second look at the repo).
     await w.until(() => !!carol.inviteFrom('alice'), 'carol sees the invitation');
     from = w.requests.length;
     await carol.s.acceptInvite(carol.inviteFrom('alice')!.key);
     expect(toChat(from)).toEqual([
+      'DELETE contents/drop',
       'DELETE contents/drop',
       'GET commits',
       'GET compare',
