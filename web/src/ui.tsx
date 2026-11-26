@@ -279,6 +279,37 @@ function place(trigger: HTMLElement, width: number, height: number, align: 'star
   return { left, top: below ? r.bottom + 6 : r.top - 6 - height };
 }
 
+/** True while `on`, and for at least `ms` once it turned on: a quick sync still shows one whole breath. */
+function useHeld(on: boolean, ms: number): boolean {
+  const [held, setHeld] = useState(on);
+  const since = useRef(0);
+  useEffect(() => {
+    if (on) {
+      if (!held) since.current = Date.now();
+      setHeld(true);
+      return;
+    }
+    const left = since.current + ms - Date.now();
+    if (left <= 0) return setHeld(false);
+    const t = setTimeout(() => setHeld(false), left);
+    return () => clearTimeout(t);
+  }, [on]);
+  return on || held;
+}
+
+/** The account bar's dot (and the chat bar's, on a phone): green and still when up to date, breathing while syncing, amber on a problem. */
+export function SyncDot({ session, className = '' }: { session: Session; className?: string }) {
+  const err = session.lastPollError;
+  const syncing = useHeld(session.syncing(), 1600);
+  const label = err ? 'Sync problem' : syncing ? 'Syncing…' : 'Up to date';
+  const text = `${err ? `Sync problem: ${err}` : label}${session.rateRemaining !== undefined ? `. ${session.rateRemaining.toLocaleString()} GitHub requests left this hour.` : ''}`;
+  return (
+    <Hint className={`sync-dot${err ? ' warn' : ''}${syncing ? ' syncing' : ''} ${className}`.trim()} label={label} text={text}>
+      <span />
+    </Hint>
+  );
+}
+
 /** A round "?" that shows a short explanation on hover, focus or tap. Keeps the screen itself quiet. */
 export function Hint({ text, children, label = 'More information', className }: { text: ReactNode; children?: ReactNode; label?: string; className?: string }) {
   const [open, setOpen] = useState(false);

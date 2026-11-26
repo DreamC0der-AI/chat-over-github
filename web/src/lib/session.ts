@@ -506,6 +506,17 @@ export class Session {
   /** The conversation on screen. */
   activeConvo?: string;
   lastPollError?: string;
+  /**
+   * Catching up: from opening until the first full sync step is done, and again after the tab is
+   * shown (switching back to a phone). Chats fetching new changes count too. Steps that only find
+   * nothing new don't, so the dot stays still while the app is merely watching.
+   */
+  syncing(): boolean {
+    return this.phase === 'ready' && (this.catchingUp || this.syncingGroups > 0 || this.loadingChats());
+  }
+  private catchingUp = true;
+  private wokeAt = 0;
+  private syncingGroups = 0;
   /** Messages on their way out, per group, for the "sending…" bubble and the failed state. */
   sending = new Map<string, Sending[]>();
   /** Reactions on their way out, by `groupId/messageId/emoji`. Shown at once, faded until sent. */
@@ -1134,6 +1145,12 @@ export class Session {
    */
   private onWake = () => {
     if (this.stopped || !this.chat || document.visibilityState === 'hidden') return;
+    // Shown again (often after the phone was away a while): catching up until a full step ends.
+    this.wokeAt = Date.now();
+    if (!this.catchingUp) {
+      this.catchingUp = true;
+      this.bump();
+    }
     this.lastInvites = 0;
     this.lastClosures = 0;
     this.lastPull = 0;
@@ -2668,6 +2685,7 @@ export class Session {
   }
 
   async syncGroup(g: Group) {
+    if (this.syncingGroups++ === 0) this.bump();
     try {
       const r = await g.sync();
       await this.onEvents(g, r.events);
@@ -2677,6 +2695,8 @@ export class Session {
       else this.clearGroupError(g.id);
     } catch (e) {
       this.setGroupError(g.id, this.noteError(e));
+    } finally {
+      this.syncingGroups--;
     }
     // Refused by GitHub (maybe only for a moment): try again later, less and less often. Only a
     // signed close or a removal we can read ends the room; until then it is "can't reach".
@@ -3226,11 +3246,17 @@ export class Session {
     void this.openChatLoop(run);
     while (!this.stopped && run === this.loopRun) {
       const waiting = this.afterTick.splice(0);
+      const started = Date.now();
       try {
         await this.tick();
         this.lastPollError = undefined;
       } catch (e) {
         this.lastPollError = this.noteError(e);
+        this.bump();
+      }
+      // A whole step ran since the start or the last wake: caught up (or failed, which the dot shows instead).
+      if (this.catchingUp && this.syncReady && started >= this.wokeAt) {
+        this.catchingUp = false;
         this.bump();
       }
       for (const done of waiting) done();

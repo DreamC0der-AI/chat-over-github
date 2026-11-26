@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { clampSide, saveSideWidth, SIDE_DEFAULT, SIDE_MAX, SIDE_MIN, sideWidth } from '../lib/prefs';
 import { loginFrom, type Convo, type PendingInvite, type Session } from '../lib/session';
-import { Avatar, ErrorFlash, GroupAvatar, go, Hint, Icon, Modal, timeLabel, useAction, useSession } from '../ui';
+import { Avatar, ErrorFlash, GroupAvatar, go, Hint, Icon, Modal, SyncDot, timeLabel, useAction, useSession } from '../ui';
 import { ChatMenu } from './ChatMenu';
 import { Contacts } from './Contacts';
 import { Conversation } from './Conversation';
@@ -329,8 +329,6 @@ function InviteRow({ session, inv }: { session: Session; inv: PendingInvite }) {
 
 /** Bottom of the sidebar: who is signed in, a sync dot, and the way to settings. */
 function Me({ session }: { session: Session }) {
-  const err = session.lastPollError;
-  const status = `${err ? `Sync problem: ${err}` : 'Up to date'}${session.rateRemaining !== undefined ? `. ${session.rateRemaining.toLocaleString()} GitHub requests left this hour.` : ''}`;
   return (
     <div className="me status-bar">
       <a href="#/settings" className="me-link" aria-label="Account and devices" title="Account and devices">
@@ -338,7 +336,7 @@ function Me({ session }: { session: Session }) {
         <span className="me-name">{session.login}</span>
       </a>
       {!session.syncOn && <a href="#/settings/devices" className="small">Turn on sync</a>}
-      <Hint className={`sync-dot${err ? ' warn' : ''}`} label={err ? 'Sync problem' : 'Up to date'} text={status}><span /></Hint>
+      <SyncDot session={session} />
       <a href="#/settings" className="btn icon ghost" aria-label="Settings" title="Settings">{Icon.gear()}</a>
     </div>
   );

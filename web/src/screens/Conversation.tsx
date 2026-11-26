@@ -2,7 +2,7 @@ import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Group } from 'keyhold/chat';
 import { describeError, loginFrom, type Convo, type MsgRecord, type PeerInfo, type Session } from '../lib/session';
 import { EARLIER_ELSEWHERE, endedText } from './Home';
-import { ask, Avatar, ErrorFlash, GroupAvatar, go, Hint, Icon, MenuItem, Notices, timeLabel, toast, useAction } from '../ui';
+import { ask, Avatar, ErrorFlash, GroupAvatar, go, Hint, Icon, MenuItem, Notices, SyncDot, timeLabel, toast, useAction } from '../ui';
 import { ChatMenu, CLOSE_ASK, deleteAsk } from './ChatMenu';
 import { AttachmentView, DraftTray, isImage, Lightbox, PendingAttachment, saveBlob, toDrafts, type Draft, type Viewing } from './Attachments';
 import { EmojiRow, MsgPopup, useLongPress, type Anchor } from './MessageMenu';
@@ -163,6 +163,7 @@ export function Conversation({ session, convo }: { session: Session; convo: Conv
           ) : !dm && group && <span className="convo-sub">{session.joinedMembers(group).length} {session.joinedMembers(group).length === 1 ? 'member' : 'members'}</span>}
         </div>
         <div className="convo-actions">
+          <span className="mobile-only"><SyncDot session={session} /></span>
           <ChatMenu session={session} convo={convo} />
         </div>
       </div>

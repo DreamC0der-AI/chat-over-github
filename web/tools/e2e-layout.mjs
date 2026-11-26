@@ -63,6 +63,24 @@ try {
   await alice.page.reload();
   await alice.page.locator('#composer').waitFor();
 
+  // ---- syncing: the dot breathes while the app catches up, and on a phone the chat bar has it too
+  const pg = alice.page;
+  await pg.setViewportSize({ width: 390, height: 844 });
+  const headDot = pg.locator('.convo-head .sync-dot');
+  check(await headDot.isVisible(), 'phone: the open chat shows the sync dot in its bar');
+  await headDot.and(pg.locator('.syncing')).waitFor({ state: 'detached', timeout: 15000 });
+  check(true, 'the dot is still once caught up');
+  // Slow GitHub answers, then the tab is shown again (switching back to the phone): catching up.
+  await pg.route('**/gh/**', async (r) => { await new Promise((ok) => setTimeout(ok, 1500)); await r.continue().catch(() => undefined); });
+  await pg.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await pg.locator('.convo-head .sync-dot.syncing').waitFor({ timeout: 5000 });
+  check(true, 'after the tab is shown again, the dot breathes while catching up');
+  await pg.screenshot({ path: `${SHOTS}/phone-chat-syncing.png` });
+  await pg.unroute('**/gh/**');
+  await headDot.and(pg.locator('.syncing')).waitFor({ state: 'detached', timeout: 15000 });
+  check(true, 'and goes still once caught up');
+  await pg.setViewportSize({ width: 1280, height: 800 });
+
   // ---- chat list width
   const p = alice;
   check(Math.round(await sideW(p)) === 320, 'chat list starts at 320 px');
