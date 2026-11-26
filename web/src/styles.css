@@ -385,6 +385,12 @@ body.resizing iframe, body.resizing img { pointer-events: none; }
 .chat-row:hover .counter, .chat-row.active .counter { margin-right: 28px; }
 @media (hover: none) { .chat-more { opacity: 1; } .chat-row .counter { margin-right: 28px; } }
 
+.list-progress { padding: 0 12px 8px; display: flex; flex-direction: column; gap: 6px; }
+.list-progress .bar { height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; position: relative; }
+.list-progress .bar span { position: absolute; inset: 0 auto 0 0; background: var(--accent); border-radius: 2px; transition: width .4s ease; }
+.list-progress .bar span.indeterminate { width: 35%; animation: indeterminate 1.2s ease-in-out infinite; }
+@keyframes indeterminate { from { left: -35%; } to { left: 100%; } }
+@media (prefers-reduced-motion: reduce) { .list-progress .bar span.indeterminate { animation: none; width: 100%; opacity: .5; } }
 .invites { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
 .invite-row { padding: 12px; align-items: flex-start; flex-wrap: nowrap; gap: 12px; border-radius: var(--r-lg); background: var(--canvas); box-shadow: var(--shadow-sm), 0 0 0 1px var(--accent-border); }
 .invite-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
