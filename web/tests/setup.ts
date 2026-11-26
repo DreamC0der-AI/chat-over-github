@@ -6,6 +6,9 @@ const g = globalThis as Record<string, unknown>;
 // (Session.syncNow), so what happens depends on the steps, not on how fast the machine is.
 g.__syncScale = 1e6;
 g.window = globalThis;
+// window.addEventListener('online', ...) and the like: nothing fires them under Node.
+g.addEventListener ??= () => {};
+g.removeEventListener ??= () => {};
 g.document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} };
 g.location = { origin: 'http://mock.test', href: 'http://mock.test/', hash: '', search: '', pathname: '/' };
 const store = new Map<string, string>();
