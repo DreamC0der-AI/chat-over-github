@@ -8,6 +8,11 @@ compatibility_date = "2026-10-01"
 routes = [{ pattern = "chat-over-github.sunzy.app", custom_domain = true }]
 workers_dev = true
 
+# Before each deploy: copy the live site's current and recent builds into public/assets/, so pages
+# loaded before the deploy keep finding their stylesheet and chunks (see keep-old-assets.mjs).
+[build]
+command = "node keep-old-assets.mjs"
+
 # The chat web app (npm run build in the repo root writes it here). Files are served first; other paths reach the Worker.
 [assets]
 directory = "./public"
