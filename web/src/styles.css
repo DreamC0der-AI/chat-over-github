@@ -404,6 +404,13 @@ body.resizing iframe, body.resizing img { pointer-events: none; }
 .sync-dot { width: 20px; height: 20px; padding: 0; border: 0; background: none; cursor: help; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; }
 .sync-dot span { width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
 .sync-dot.warn span { background: var(--attention-border); }
+.sync-dot span { position: relative; }
+/* Syncing: the dot breathes, with a soft ring going out from it. */
+.sync-dot.syncing span { animation: breathe-dot 1.6s ease-in-out infinite; }
+.sync-dot.syncing span::after { content: ''; position: absolute; inset: 0; border-radius: 50%; background: inherit; animation: dot-ring 1.6s ease-out infinite; }
+@keyframes breathe-dot { 50% { opacity: .45; transform: scale(.8); } }
+@keyframes dot-ring { from { transform: scale(1); opacity: .5; } to { transform: scale(2.6); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .sync-dot.syncing span { background: none; box-shadow: inset 0 0 0 2px var(--green); } }
 
 /* chat */
 .content { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; background: var(--canvas); }
