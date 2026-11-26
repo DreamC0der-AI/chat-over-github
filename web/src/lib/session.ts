@@ -2976,6 +2976,28 @@ export class Session {
 
   // ---- people ----
 
+  private userSearch = new Map<string, Promise<string[]>>();
+
+  /**
+   * GitHub accounts whose login matches `q`, best match first, for the invite box. Public
+   * profile data only (no repository access needed). Results are kept per query, so typing
+   * back and forth doesn't spend the search limit (30 a minute) twice.
+   */
+  searchUsers(q: string): Promise<string[]> {
+    const key = q.toLowerCase();
+    let p = this.userSearch.get(key);
+    if (!p) {
+      p = this.ghJson<{ items?: { login: string; type: string }[] }>(`/search/users?q=${encodeURIComponent(`${key} in:login type:user`)}&per_page=8`)
+        .then(({ status, data }) => (status === 200 && data?.items ? data.items.map((i) => i.login) : Promise.reject(new Error(`HTTP ${status}`))))
+        .catch(() => {
+          this.userSearch.delete(key);
+          return [];
+        });
+      this.userSearch.set(key, p);
+    }
+    return p;
+  }
+
   /**
    * Everyone this account talks to, for the Contacts screen: people with a DM, members of its
    * groups, and anyone whose key it remembers (synced), with trust state known without a lookup.

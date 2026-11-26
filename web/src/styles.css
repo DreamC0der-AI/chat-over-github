@@ -225,6 +225,8 @@ code { background: var(--subtle); padding: 1px 5px; border-radius: 5px; }
 .picker-mark { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; flex: none; border: 1.5px solid var(--border); border-radius: 50%; color: #fff; }
 .picker-item.on .picker-mark { background: var(--accent-solid); border-color: var(--accent-solid); }
 .picker-item:not(.on) .picker-mark svg { color: var(--muted); }
+.picker-head { padding: 6px 8px 2px; color: var(--muted); font-size: 12px; font-weight: 600; }
+.picker-note { padding: 6px 8px; color: var(--faint); font-size: 13px; }
 .inline-form .input { flex: 1; min-width: 0; }
 .invite-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: start; }
 .invite-form > .btn { min-height: 36px; }

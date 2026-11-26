@@ -1,12 +1,12 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { type Session } from '../lib/session';
 import { Avatar, Icon } from '../ui';
 
 const clean = (s: string) => s.trim().replace(/^@/, '').toLowerCase();
 
 /**
- * Pick people from your contacts (search, tap to toggle), or type a GitHub username of
- * someone who isn't a contact yet and press Enter. `value` holds the picked logins.
+ * Pick people: typing searches your contacts first, then GitHub accounts (tap to toggle), or
+ * type a full GitHub username and press Enter. `value` holds the picked logins.
  * `exclude`: logins not offered (already in the group or invited).
  */
 export function PeoplePicker({ session, id, label, value, onChange, query, onQuery, exclude = [], disabled }: {
@@ -30,8 +30,23 @@ export function PeoplePicker({ session, id, label, value, onChange, query, onQue
   const excluded = (l: string) => skip.split(' ').includes(l);
   const q = clean(query);
   const has = (l: string) => value.some((x) => x.toLowerCase() === l.toLowerCase());
-  const shown = contacts.filter((l) => !q || l.toLowerCase().includes(q));
-  const typed = q && /^[a-z0-9][a-z0-9-]{0,38}$/.test(q) && !contacts.some((l) => l.toLowerCase() === q) && !has(q) && !excluded(q) ? q : '';
+  const valid = /^[a-z0-9][a-z0-9-]{0,38}$/.test(q);
+  // Contacts whose login starts with the text come before ones that only contain it.
+  const shown = contacts
+    .filter((l) => !q || l.toLowerCase().includes(q))
+    .sort((a, b) => (q ? Number(!a.toLowerCase().startsWith(q)) - Number(!b.toLowerCase().startsWith(q)) : 0));
+  // GitHub accounts matching the text, after a short pause in typing.
+  const [found, setFound] = useState<{ q: string; logins: string[] }>({ q: '', logins: [] });
+  useEffect(() => {
+    if (!q || !valid) return;
+    let gone = false;
+    const t = setTimeout(() => void session.searchUsers(q).then((logins) => { if (!gone) setFound({ q, logins }); }), 250);
+    return () => { gone = true; clearTimeout(t); };
+  }, [q, valid, session]);
+  const searching = !!q && valid && found.q !== q;
+  const isContact = (l: string) => contacts.some((c) => c.toLowerCase() === l.toLowerCase());
+  const github = found.q === q ? found.logins.filter((l) => !isContact(l) && !excluded(l.toLowerCase())) : [];
+  const typed = q && valid && !isContact(q) && !github.some((l) => l.toLowerCase() === q) && !has(q) && !excluded(q) ? q : '';
   const toggle = (l: string) => {
     onChange(has(l) ? value.filter((x) => x.toLowerCase() !== l.toLowerCase()) : [...value, l]);
     onQuery('');
@@ -44,6 +59,18 @@ export function PeoplePicker({ session, id, label, value, onChange, query, onQue
     if (!has(pick) && !excluded(pick.toLowerCase())) onChange([...value, pick]);
     onQuery('');
     return true;
+  };
+  const item = (l: string) => {
+    const on = has(l);
+    return (
+      <li key={l} role="option" aria-selected={on}>
+        <button type="button" className={`picker-item${on ? ' on' : ''}`} disabled={disabled} onClick={() => toggle(l)}>
+          <Avatar name={l} login={l} size="sm" />
+          <span className="name">{l}</span>
+          <span className="picker-mark">{on && Icon.check(14)}</span>
+        </button>
+      </li>
+    );
   };
   return (
     <div className="picker">
@@ -78,8 +105,12 @@ export function PeoplePicker({ session, id, label, value, onChange, query, onQue
           autoComplete="off"
         />
       </div>
-      {(shown.length > 0 || typed) && (
-        <ul className="picker-list" role="listbox" aria-label="Contacts" aria-multiselectable="true">
+      {(shown.length > 0 || github.length > 0 || typed || searching) && (
+        <ul className="picker-list" role="listbox" aria-label="People" aria-multiselectable="true">
+          {q && shown.length > 0 && <li className="picker-head" role="presentation">Contacts</li>}
+          {shown.map(item)}
+          {q && (github.length > 0 || typed || searching) && <li className="picker-head" role="presentation">GitHub</li>}
+          {github.map(item)}
           {typed && (
             <li role="option" aria-selected={false}>
               <button type="button" className="picker-item" disabled={disabled} onClick={() => toggle(typed)}>
@@ -89,18 +120,7 @@ export function PeoplePicker({ session, id, label, value, onChange, query, onQue
               </button>
             </li>
           )}
-          {shown.map((l) => {
-            const on = has(l);
-            return (
-              <li key={l} role="option" aria-selected={on}>
-                <button type="button" className={`picker-item${on ? ' on' : ''}`} disabled={disabled} onClick={() => toggle(l)}>
-                  <Avatar name={l} login={l} size="sm" />
-                  <span className="name">{l}</span>
-                  <span className="picker-mark">{on && Icon.check(14)}</span>
-                </button>
-              </li>
-            );
-          })}
+          {searching && <li className="picker-note" role="presentation">Searching GitHub…</li>}
         </ul>
       )}
     </div>
