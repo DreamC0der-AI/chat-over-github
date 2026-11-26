@@ -196,7 +196,9 @@ export function VerifyPanel({ session, address, fingerprint }: { session: Sessio
       </p>
       <div className="safety">{p.safety?.split(' ').map((g, i) => <span key={i}>{g}</span>)}</div>
       <ErrorFlash error={error} />
-      {p.status === 'key-changed' ? (
+      {p.checking ? (
+        <div className="verified-note checking"><span className="spinner" /> Checking…</div>
+      ) : p.status === 'key-changed' ? (
         <button className="btn primary block" disabled={busy} onClick={() => run(() => session.acceptKeyChange(address))}>{busy ? <><span className="spinner" /> Saving…</> : 'Numbers match, accept the new key'}</button>
       ) : p.verified ? (
         <div className="verified-note">{Icon.shield(true, 16)} Verified</div>

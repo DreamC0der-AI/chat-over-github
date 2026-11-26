@@ -6,6 +6,34 @@ let w: World;
 afterEach(() => w?.stop());
 
 describe('two browsers of one account', () => {
+  it("Accept on a new browser doesn't wait for it to catch up on other chats", async () => {
+    w = await world();
+    const [alice, bob, dave] = [await w.browser('alice'), await w.browser('bob'), await w.browser('dave')];
+    const code = await alice.setup();
+    await bob.setup();
+    await dave.setup();
+    await w.dm(alice, bob);
+    const bobRoom = alice.chat('bob')!.live!.space;
+    await dave.s.startDm('alice');
+
+    const alice2 = await w.browser('alice');
+    await alice2.restore(code);
+    // Catching up on the chat with bob hangs (a slow phone).
+    const held = w.hold((r) => r.login === 'alice' && r.url.includes(`/${bobRoom}/contents/drop`)); // the join's first read
+    const step = alice2.sync();
+    await held.started;
+    for (let i = 0; i < 20 && !alice2.inviteFrom('dave'); i++) await new Promise((r) => setTimeout(r, 10));
+    expect(alice2.inviteFrom('dave')).toBeTruthy();
+    // Accept goes ahead while that join still hangs.
+    await alice2.s.acceptInvite(alice2.inviteFrom('dave')!.key);
+    expect(alice2.chat('dave')?.live).toBeTruthy();
+    expect(alice2.chat('bob')?.live).toBeUndefined();
+    held.release();
+    await step;
+    await w.until(() => !!alice2.chat('bob')?.live && !!alice.chat('dave')?.live && !!dave.chat('alice')?.live, 'both chats on both browsers', 30);
+    await w.checkConverged();
+  });
+
   it('a new browser joins existing chats by itself, never as an invitation from yourself', async () => {
     w = await world();
     const [alice, bob] = [await w.browser('alice'), await w.browser('bob')];
