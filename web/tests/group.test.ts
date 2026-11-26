@@ -84,6 +84,26 @@ describe('groups', () => {
     await w.checkConverged();
   });
 
+  it('someone who joined with a pre-key, then was removed, loses the repo and sees the new invitation', async () => {
+    w = await world();
+    const [alice, bob, carol] = [await w.browser('alice'), await w.browser('bob'), await w.browser('carol')];
+    for (const b of [alice, bob, carol]) await b.setup();
+    await w.rounds(3); // pre-keys are published after the first rounds: the invite adds them at once
+    await alice.s.createGroup('Hikers', ['bob', 'carol']);
+    const repo = () => w.backend.gh.repos.get(alice.chat('Hikers')!.live!.space.toLowerCase())!;
+    await w.until(() => !!bob.inviteFrom('alice') && !!carol.inviteFrom('alice'), 'both see the invitation');
+    for (const b of [bob, carol]) await b.s.acceptInvite(b.inviteFrom('alice')!.key);
+    await w.until(() => !!bob.chat('Hikers')?.live && !!carol.chat('Hikers')?.live, 'both joined');
+    await w.rounds(2);
+    const g = alice.chat('Hikers')!.live!;
+    await alice.s.removeMember(g, g.members().find((m) => m.address === 'github:carol')!.fingerprint);
+    expect(repo().collaborators.has('carol')).toBe(false);
+    await w.until(() => carol.chat('Hikers')?.rooms.at(-1)?.ended?.how === 'removed', 'carol is out');
+    await w.rounds(2);
+    await reinvite(alice, carol);
+    await w.checkConverged();
+  });
+
   it('someone who quit and deleted the chat can be invited back and join again', async () => {
     const { alice, bob } = await hikers();
     await bob.s.quitChat(bob.chat('Hikers')!.live!);

@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "chat-over-github-provider": "0.1.0",
-    "keyhold": "github:DreamC0der-AI/keyhold#ae2c002fa9fb377df360eec259a130b89d7c4db7",
+    "keyhold": "github:DreamC0der-AI/keyhold#202c6b69d8527315e2600f670ec9a2c04c819431",
     "react": "18.3.1",
     "react-dom": "18.3.1"
   },
