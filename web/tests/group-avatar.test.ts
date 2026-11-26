@@ -66,6 +66,22 @@ describe('group pictures', () => {
     const alice2 = await w.browser('alice');
     await alice2.restore(code);
     await w.until(() => alice2.chat('Hikers')?.avatar === PIC2, 'the new browser has the picture', 30);
+    // A change on one of alice's browsers reaches her other one.
+    await alice.s.setAvatar(alice.chat('Hikers')!.live!, PIC);
+    await w.until(() => alice2.chat('Hikers')?.avatar === PIC, 'her other browser follows', 30);
+    await alice2.s.setAvatar(alice2.chat('Hikers')!.live!, PIC2);
+    await w.until(() => alice.chat('Hikers')?.avatar === PIC2 && bob.chat('Hikers')?.avatar === PIC2, 'and back', 30);
+
+    // A browser of hers that missed the message (an older app took it) still gets it, from her synced chat list.
+    type Rec = { avatar?: string };
+    const recs = (b: typeof alice) => (b.s as unknown as { records: Map<string, Rec> }).records;
+    const id = alice.chat('Hikers')!.key;
+    const s2 = alice2.s as unknown as { onMessage: (g: unknown, m: { message: { t: string } }) => Promise<void> };
+    const real = s2.onMessage.bind(alice2.s);
+    s2.onMessage = async (g, m) => { if (m.message.t !== 'meta') await real(g, m); };
+    await alice.s.setAvatar(alice.chat('Hikers')!.live!, PIC);
+    await w.until(() => recs(alice2).get(id)?.avatar === PIC, 'the missed picture arrives through sync', 30);
+    s2.onMessage = real;
 
     await alice.s.setAvatar(alice.chat('Hikers')!.live!, '');
     expect(alice.chat('Hikers')?.avatar).toBeUndefined();

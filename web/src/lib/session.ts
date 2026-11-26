@@ -136,6 +136,8 @@ export interface ChatRecord {
   lastName?: string;
   /** Group picture (a data URL) from the newest admin meta message, kept for when the group state is gone. '' = removed. */
   avatar?: string;
+  /** Sender's time of the meta message that set `avatar`: the newest wins, also across this account's browsers. */
+  avatarAt?: number;
   deviceCount?: number;
   /** The room's repo, kept so the room can still be shown after its group state is gone. */
   space?: string;
@@ -176,6 +178,8 @@ export interface ChatRecord {
    * so earlier messages, which stay in each browser, aren't here.
    */
   joinedAt?: number;
+  /** This browser only: when it caught up on a chat of this account's (joinedAt, if the chat is older than this browser). */
+  caughtUpAt?: number;
 }
 
 /** What the chat list shows: a DM is one entry per person, whatever rooms it went through. */
@@ -1149,6 +1153,9 @@ export class Session {
       space: r.space, kind: r.kind, peer: r.peer, name: r.lastName, createdAt: r.createdAt,
       ended: r.ended, endedLast: r.ended, clearedAt: r.clearedAt, clearedId: r.clearedId, peerLeft: r.peerLeft || undefined,
       purged: r.purged || undefined, purgedAt: r.purged ? r.purgedAt : undefined, rejoinedAt: r.rejoinedAt,
+      // Also here, not only in the group: a browser of ours that missed the message (asleep, or on
+      // an older app then) still gets it, without waiting for an admin to send it again.
+      pic: r.kind === 'group' && r.avatar !== undefined ? { at: r.avatarAt ?? 1, v: r.avatar } : undefined, // 1: learnt before avatarAt existed
     };
     // A field never set stays out (older records have no endedLast; set-once fields can't be deleted).
     for (const k of Object.keys(fields)) if (fields[k] === undefined && k !== 'endedLast') delete fields[k];
@@ -1159,6 +1166,9 @@ export class Session {
     if (this.pushed.get(r.groupId) !== snap) {
       void this.queueSet(r.groupId, snap, async (p) => {
         const cur = await p.get('chats', r.groupId, false);
+        // A picture older than the one stored (this browser missed a change) is not written back.
+        const stored = cur?.pic as { at?: number } | undefined;
+        if (fields.pic && typeof stored?.at === 'number' && stored.at >= (fields.pic as { at: number }).at) delete fields.pic;
         if (cur && Object.entries(fields).every(([k, v]) => JSON.stringify(cur[k]) === JSON.stringify(v))) return;
         await p.set('chats', r.groupId, fields, CHAT_RULES);
       });
@@ -1222,6 +1232,13 @@ export class Session {
     for (const f of ['space', 'kind', 'peer'] as const) if (!r[f] && v[f]) (r as unknown as Record<string, unknown>)[f] = v[f];
     if (!r.lastName && typeof v.name === 'string') r.lastName = v.name;
     if (typeof v.createdAt === 'number' && v.createdAt < r.createdAt) r.createdAt = v.createdAt;
+    // Joined here before the synced list said how old the chat is (the record began with this browser's clock).
+    if (r.caughtUpAt && !r.joinedAt && r.createdAt < (this.identity?.cert.issuedAt ?? 0)) r.joinedAt = r.caughtUpAt;
+    const pic = v.pic as { at?: unknown; v?: unknown } | undefined;
+    if (pic && typeof pic.at === 'number' && pic.at > (r.avatarAt ?? 0) && typeof pic.v === 'string' && (pic.v === '' || safeAvatar(pic.v))) {
+      r.avatar = pic.v;
+      r.avatarAt = pic.at;
+    }
     if (v.peerLeft) r.peerLeft = true;
     if (typeof v.clearedAt === 'number' && v.clearedAt > (r.clearedAt ?? 0)) await this.applyClear(r, v.clearedAt, typeof v.clearedId === 'string' ? v.clearedId : undefined, false);
     // Joined again on another browser: the end (and delete) before that no longer holds.
@@ -1346,7 +1363,8 @@ export class Session {
     const last = rooms.reduce((a, b) => (b.lastTs >= a.lastTs ? b : a));
     const peer = dm ? rooms.find((r) => r.peer)?.peer : undefined;
     const name = [...rooms].reverse().find((r) => r.lastName)?.lastName;
-    const avatar = dm ? undefined : (current?.avatar ?? [...rooms].reverse().find((r) => r.avatar !== undefined)?.avatar);
+    // The record first: it also learns pictures from this account's other browsers.
+    const avatar = dm ? undefined : ([...rooms].reverse().find((r) => r.avatar !== undefined)?.avatar ?? current?.avatar);
     return {
       key, dm, peer, rooms, live, current,
       title: dm ? (peer ? loginFrom(peer) : 'Direct message') : current?.name || name || 'Untitled group',
@@ -2123,8 +2141,9 @@ export class Session {
         // keyhold takes names and pictures only from admins; the notes follow the same rule.
         if (!g.policy.admins.includes(m.from.fingerprint)) break;
         const who = mine ? 'You' : `@${loginFrom(m.from.address)}`;
-        if (typeof msg.avatar === 'string' && (msg.avatar ? safeAvatar(msg.avatar) : true) && msg.avatar !== r.avatar) {
+        if (typeof msg.avatar === 'string' && (msg.avatar ? safeAvatar(msg.avatar) : true) && msg.avatar !== r.avatar && msg.ts >= (r.avatarAt ?? 0)) {
           r.avatar = msg.avatar;
+          r.avatarAt = msg.ts;
           await this.saveRecord(r);
           // Only a picture-only message is someone changing it; with a name it is the group being
           // made, or an admin repeating both for someone who just joined.
@@ -2403,8 +2422,10 @@ export class Session {
         if (a && !a.ended) a.link = `/c/${encodeURIComponent(this.convoKey(r))}`;
         // Catching up on a chat the account was already in: its history stays in the other browsers.
         // "Already" means it existed before this browser was added, not some fixed age.
-        if (inv.mine && !r.joinedAt && r.createdAt < (this.identity?.cert.issuedAt ?? Date.now())) {
-          r.joinedAt = Date.now();
+        if (inv.mine && !r.joinedAt) {
+          // Kept: the synced chat list may tell the real creation time only after this.
+          r.caughtUpAt = Date.now();
+          if (r.createdAt < (this.identity?.cert.issuedAt ?? Date.now())) r.joinedAt = r.caughtUpAt;
           await this.saveRecord(r);
         }
         await this.syncGroup(g);
