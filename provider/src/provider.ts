@@ -735,7 +735,8 @@ export function githubProvider(o: GitHubProviderOptions): StorageProvider & { cl
       const active = (c.data as { login: string }[]).map((u) => toAddress(u.login));
       if (!active.includes(toAddress(ow))) active.push(toAddress(ow));
       const pending: Address[] = [];
-      for (const i of (inv?.data ?? []) as { invitee: { login: string } }[]) pending.push(toAddress(i.invitee.login));
+      // An expired invitation stays listed on GitHub but can't be accepted: it no longer counts.
+      for (const i of (inv?.data ?? []) as { invitee: { login: string }; expired?: boolean }[]) if (!i.expired) pending.push(toAddress(i.invitee.login));
       return { active, pending };
     },
     async grant(space, address): Promise<GrantResult> {

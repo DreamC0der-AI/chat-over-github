@@ -1709,6 +1709,14 @@ export class Session {
     return toHex(await sha256(new TextEncoder().encode(`keyhold-chat-web/v1/closure:${groupId}`))).slice(0, 32);
   }
 
+  /** Tag for "I declined" notices to a chat's owner, sent the same way as closure notices. */
+  private async declineTag() {
+    return toHex(await sha256(new TextEncoder().encode('keyhold-chat-web/v1/declined'))).slice(0, 32);
+  }
+
+  /** Decline notices already acted on (their deletion on the Worker may lag or fail). */
+  private handledDeclines = new Set<string>();
+
   /** Tag for "you were removed" notices, sent the same way as closure notices. */
   private async removalTag(groupId: string) {
     return toHex(await sha256(new TextEncoder().encode(`keyhold-chat-web/v1/removal:${groupId}`))).slice(0, 32);
@@ -2200,7 +2208,8 @@ export class Session {
     // repeats the group name whenever the number of devices in the group goes up.
     const r = this.record(g.id);
     const devices = g.members().reduce((n, m) => n + m.devices.length, 0);
-    const shareName = devices > (r.deviceCount ?? 1);
+    // Or when someone was added or joined: a device taken out and added again keeps the count.
+    const shareName = devices > (r.deviceCount ?? 1) || events.some((e) => (e.type === 'added' || e.type === 'joined') && e.address !== this.address);
     if (devices !== r.deviceCount) {
       r.deviceCount = devices;
       await this.saveRecord(r);
@@ -2585,6 +2594,17 @@ export class Session {
       await this.ghFetch(`${CONFIG.api}/repos/${inv.space}/collaborators/${encodeURIComponent(this.login)}`, { method: 'DELETE' }).catch(() => {});
     }
     if (inv.noticeId) await p.inviteInbox.delete(inv.noticeId).catch(() => {});
+    // The inviter's group already encrypts to our devices (pre-keys): tell the inviter's app, so
+    // it takes us out at once rather than at its next check. The notice names no chat (the
+    // invitation doesn't tell us the repo): their app checks the chats where we are invited.
+    const inviter = loginFrom(inv.from);
+    if (inviter.toLowerCase() !== this.login.toLowerCase()) {
+      await this.ghFetch(`${CONFIG.worker}/closures`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: inviter, tag: await this.declineTag() }),
+      }).catch(() => undefined);
+    }
     if (inv.space) {
       this.declined.add(inv.space);
       await this.db.put('kv', Date.now(), `declined:${inv.space}`);
@@ -2875,7 +2895,24 @@ export class Session {
       tags.set(await this.closureTag(rec.groupId), rec);
       removals.set(await this.removalTag(rec.groupId), rec);
     }
+    const declineTag = await this.declineTag();
     for (const n of closures) {
+      if (n.tag === declineTag) {
+        // Someone turned down an invitation from us: in the chats we own where they are invited
+        // and not in yet, check GitHub now, which takes their devices out of the encryption if
+        // the invitation is really gone. Anyone could send this; it only makes that check sooner.
+        if (!this.handledDeclines.has(n.id)) {
+          this.handledDeclines.add(n.id);
+          const who = toAddress(n.from.toLowerCase());
+          for (const g of this.chat!.groups.values()) {
+            if (!g.active || !this.isOwner(g) || !g.members().some((m) => m.address === who && m.pending)) continue;
+            await g.reconcileChannel(true).catch(() => undefined);
+            await this.syncGroup(g).catch(() => undefined);
+          }
+        }
+        await this.ghFetch(`${CONFIG.worker}/closures/${n.id}`, { method: 'DELETE' }).catch(() => undefined);
+        continue;
+      }
       const from = toAddress(n.from.toLowerCase());
       const at = Date.parse(n.at) || Date.now();
       const removal = removals.get(n.tag);
