@@ -1,7 +1,7 @@
 // Group pictures: set at creation or later by an admin, reach every member and new browsers.
 import { afterEach, describe, expect, it } from 'vitest';
 import { world, type World } from './harness';
-import { groupPattern, safeAvatar } from '../src/lib/group-avatar';
+import { fitCrop, groupPattern, MAX_ZOOM, safeAvatar } from '../src/lib/group-avatar';
 
 let w: World;
 afterEach(() => w?.stop());
@@ -21,6 +21,19 @@ describe('group pictures', () => {
     expect(groupPattern('abc')).toEqual(groupPattern('abc'));
     const all = new Set(Array.from({ length: 50 }, (_, i) => groupPattern(`g${i}`).d));
     expect(all.size).toBeGreaterThan(45);
+  });
+
+  it('the crop stays inside the picture and zoom stays in range', () => {
+    // 400 x 200 picture, 100 px crop square
+    const start = fitCrop(400, 200, 100, 1, 200, 100);
+    expect(start.crop).toEqual({ x: 100, y: 0, size: 200 });
+    expect(start.scale).toBe(0.5);
+    // dragged far past the left edge: stops at it
+    expect(fitCrop(400, 200, 100, 1, -500, 100).crop).toEqual({ x: 0, y: 0, size: 200 });
+    // zoomed 2x near the bottom-right corner
+    expect(fitCrop(400, 200, 100, 2, 999, 999).crop).toEqual({ x: 300, y: 100, size: 100 });
+    expect(fitCrop(400, 200, 100, 0.2, 200, 100).zoom).toBe(1);
+    expect(fitCrop(400, 200, 100, 99, 200, 100).zoom).toBe(MAX_ZOOM);
   });
 
   it('a picture set when creating reaches members; an admin change and removal too, a member can\'t', async () => {
