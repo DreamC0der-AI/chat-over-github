@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { DeviceCertificate } from 'keyhold/chat';
 import { signOut } from '../lib/auth';
-import { onTheme, saveSideWidth, setTheme, SIDE_DEFAULT, sideWidth, themeChoice, THEMES } from '../lib/prefs';
+import { onTheme, setTheme, themeChoice, THEMES } from '../lib/prefs';
 import { loginFrom, type Session } from '../lib/session';
 import { ask, Avatar, ErrorFlash, Hint, Icon, Modal, useAction, useSession } from '../ui';
 import { forgetAvatars } from '../lib/avatars';
@@ -146,11 +146,10 @@ export function Settings({ session, route }: { session: Session; route: string }
   );
 }
 
-/** Theme cards (each a tiny picture of the app in that theme) and the chat list width. */
+/** Theme cards, each a tiny picture of the app in that theme. */
 function Appearance() {
   const [theme, setThemeState] = useState(themeChoice);
   useEffect(() => onTheme(() => setThemeState(themeChoice())), []);
-  const [width, setWidth] = useState(sideWidth);
   return (
     <>
       <section className="box">
@@ -178,15 +177,6 @@ function Appearance() {
               </button>
             ))}
           </div>
-        </div>
-      </section>
-      <section className="box hide-sm">
-        <div className="box-row kv">
-          <span>Chat list width <Hint text="Drag the right edge of the chat list to change it." /></span>
-          <span className="row">
-            <span className="muted small">{width === SIDE_DEFAULT ? 'Default' : `${width} px`}</span>
-            <button className="btn" disabled={width === SIDE_DEFAULT} onClick={() => { saveSideWidth(SIDE_DEFAULT); setWidth(SIDE_DEFAULT); }}>Reset</button>
-          </span>
         </div>
       </section>
     </>
