@@ -3701,10 +3701,6 @@ export class Session {
     this.peers.delete(address);
     this.bump();
   }
-
-  async myFingerprint() {
-    return this.identity?.fingerprint;
-  }
 }
 
 export { sleep };

@@ -641,7 +641,6 @@ body.resizing iframe, body.resizing img { pointer-events: none; }
 .settings-tab-chev { display: none; color: var(--faint); }
 .settings-main { min-width: 0; display: flex; flex-direction: column; gap: 16px; padding-top: 46px; }
 .settings-title { font-size: 20px; margin-bottom: -2px; }
-.fingerprint { font-size: 14px; letter-spacing: .02em; word-spacing: .3em; line-height: 1.8; user-select: all; }
 .danger-box { box-shadow: 0 0 0 1px var(--danger-border); border-color: transparent; }
 .danger-box .box-header h3 { color: var(--danger); }
 

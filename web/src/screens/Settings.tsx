@@ -31,7 +31,6 @@ export function Settings({ session, route }: { session: Session; route: string }
   useEffect(() => {
     void load();
   }, []);
-  const fp = session.identity?.fingerprint ?? '';
 
   return (
     <div className="app">
@@ -43,7 +42,6 @@ export function Settings({ session, route }: { session: Session; route: string }
               <Avatar name={session.login} login={session.login} size="xl" />
               <div className="profile-text">
                 <h2>{session.login}</h2>
-                <div className="small muted mono">{fp.slice(0, 8)} {fp.slice(8, 16)}</div>
               </div>
             </div>
             <nav className="settings-nav" aria-label="Settings">
@@ -93,10 +91,6 @@ export function Settings({ session, route }: { session: Session; route: string }
 
             {section.id === 'privacy' && (
               <>
-                <section className="box">
-                  <div className="box-header"><h3>Identity fingerprint</h3><Hint text="People you chat with can compare this to check it's really you." /></div>
-                  <div className="box-row"><div className="fingerprint mono">{fp.match(/.{1,8}/g)?.join(' ')}</div></div>
-                </section>
                 <section className="box">
                   <div className="box-header"><h3>Blocked</h3><Hint text="Invitations from blocked people are turned down without asking you. Block someone in Contacts or from a chat's … menu." /></div>
                   {session.blocked.size === 0 ? (
