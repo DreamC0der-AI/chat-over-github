@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { DeviceCertificate } from 'keyhold/chat';
 import { signOut } from '../lib/auth';
-import { onTheme, saveSideWidth, setTheme, SIDE_DEFAULT, sideWidth, themeChoice, THEMES } from '../lib/prefs';
+import { onTheme, setTheme, themeChoice, THEMES } from '../lib/prefs';
 import { loginFrom, type Session } from '../lib/session';
 import { ask, Avatar, ErrorFlash, Hint, Icon, Modal, useAction, useSession } from '../ui';
 import { forgetAvatars } from '../lib/avatars';
@@ -31,7 +31,6 @@ export function Settings({ session, route }: { session: Session; route: string }
   useEffect(() => {
     void load();
   }, []);
-  const fp = session.identity?.fingerprint ?? '';
 
   return (
     <div className="app">
@@ -43,7 +42,6 @@ export function Settings({ session, route }: { session: Session; route: string }
               <Avatar name={session.login} login={session.login} size="xl" />
               <div className="profile-text">
                 <h2>{session.login}</h2>
-                <div className="small muted mono">{fp.slice(0, 8)} {fp.slice(8, 16)}</div>
               </div>
             </div>
             <nav className="settings-nav" aria-label="Settings">
@@ -93,10 +91,6 @@ export function Settings({ session, route }: { session: Session; route: string }
 
             {section.id === 'privacy' && (
               <>
-                <section className="box">
-                  <div className="box-header"><h3>Identity fingerprint</h3><Hint text="People you chat with can compare this to check it's really you." /></div>
-                  <div className="box-row"><div className="fingerprint mono">{fp.match(/.{1,8}/g)?.join(' ')}</div></div>
-                </section>
                 <section className="box">
                   <div className="box-header"><h3>Blocked</h3><Hint text="Invitations from blocked people are turned down without asking you. Block someone in Contacts or from a chat's … menu." /></div>
                   {session.blocked.size === 0 ? (
@@ -152,11 +146,10 @@ export function Settings({ session, route }: { session: Session; route: string }
   );
 }
 
-/** Theme cards (each a tiny picture of the app in that theme) and the chat list width. */
+/** Theme cards, each a tiny picture of the app in that theme. */
 function Appearance() {
   const [theme, setThemeState] = useState(themeChoice);
   useEffect(() => onTheme(() => setThemeState(themeChoice())), []);
-  const [width, setWidth] = useState(sideWidth);
   return (
     <>
       <section className="box">
@@ -184,15 +177,6 @@ function Appearance() {
               </button>
             ))}
           </div>
-        </div>
-      </section>
-      <section className="box hide-sm">
-        <div className="box-row kv">
-          <span>Chat list width <Hint text="Drag the right edge of the chat list to change it." /></span>
-          <span className="row">
-            <span className="muted small">{width === SIDE_DEFAULT ? 'Default' : `${width} px`}</span>
-            <button className="btn" disabled={width === SIDE_DEFAULT} onClick={() => { saveSideWidth(SIDE_DEFAULT); setWidth(SIDE_DEFAULT); }}>Reset</button>
-          </span>
         </div>
       </section>
     </>

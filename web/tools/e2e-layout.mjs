@@ -160,7 +160,7 @@ try {
   check((await theme(p)) === 'light', 'and back to light');
 
   // ---- settings sections (desktop)
-  for (const [name, id, heading] of [['Devices and sync', 'devices', 'Devices'], ['Privacy', 'privacy', 'Identity fingerprint'], ['Storage', 'storage', 'Your repos'], ['Account', 'account', 'Danger zone']]) {
+  for (const [name, id, heading] of [['Devices and sync', 'devices', 'Devices'], ['Privacy', 'privacy', 'Blocked'], ['Storage', 'storage', 'Your repos'], ['Account', 'account', 'Danger zone']]) {
     await p.page.getByRole('link', { name }).click();
     await p.page.getByRole('heading', { name: heading, exact: true }).waitFor();
     check((await p.page.evaluate(() => location.hash)) === `#/settings/${id}` && (await p.page.getByRole('link', { name }).getAttribute('aria-current')) === 'page', `${name} opens in its own section`);
